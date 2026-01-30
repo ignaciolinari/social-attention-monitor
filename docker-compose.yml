@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sam-postgres
+    environment:
+      POSTGRES_DB: sam
+      POSTGRES_USER: sam
+      POSTGRES_PASSWORD: sam
+    ports:
+      - "5432:5432"
+    volumes:
+      - sam-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sam -d sam"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  sam-postgres-data:
