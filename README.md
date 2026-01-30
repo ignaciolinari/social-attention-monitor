@@ -41,7 +41,7 @@ Recommended (Docker):
 # - OrbStack (macOS)
 # - Colima (macOS)
 
-# Start Postgres
+# Start Postgres (+ TimescaleDB) and Redis
 make db-up
 
 # Apply migrations
@@ -78,6 +78,13 @@ make run-api
 
 # In another terminal, start the dashboard
 make run-dashboard
+```
+
+Optional (run everything via Docker):
+
+```bash
+cp .env.example .env
+docker compose up -d
 ```
 
 Then visit:

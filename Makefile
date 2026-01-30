@@ -1,5 +1,5 @@
 .PHONY: help install dev test lint format typecheck run-api run-dashboard run-collector \
-	db-up db-down db-logs db-reset db-migrate db-upgrade db-downgrade db-setup clean demo
+	db-up db-down db-logs db-reset db-migrate db-upgrade db-downgrade db-setup clean demo lock audit
 
 # Default target
 help:
@@ -21,6 +21,8 @@ help:
 	@echo "  db-upgrade    Apply migrations"
 	@echo "  db-setup      Create database and apply migrations"
 	@echo "  clean         Remove build artifacts"
+	@echo "  lock          Generate pinned requirements lockfile (uv)"
+	@echo "  audit         Run dependency vulnerability scan (pip-audit)"
 	@echo ""
 
 # Installation
@@ -62,17 +64,17 @@ run-collector:
 
 # Database
 db-up:
-	docker compose up -d postgres
+	docker compose up -d postgres redis
 
 db-down:
 	docker compose down
 
 db-logs:
-	docker compose logs -f postgres
+	docker compose logs -f postgres redis
 
 db-reset:
 	docker compose down -v
-	docker compose up -d postgres
+	docker compose up -d postgres redis
 
 db-migrate:
 	@read -p "Migration message: " msg; \
@@ -101,3 +103,10 @@ clean:
 # Demo
 demo:
 	SAM_DEMO_MODE=true python -m sam.cli demo
+
+# Dependency management
+lock:
+	uv pip compile pyproject.toml -o requirements.lock
+
+audit:
+	pip-audit

@@ -1,20 +1,84 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: timescale/timescaledb:latest-pg16
     container_name: sam-postgres
     environment:
-      POSTGRES_DB: sam
-      POSTGRES_USER: sam
-      POSTGRES_PASSWORD: sam
+      POSTGRES_DB: ${POSTGRES_DB:-sam}
+      POSTGRES_USER: ${POSTGRES_USER:-sam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sam}
     ports:
       - "5432:5432"
     volumes:
       - sam-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sam -d sam"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 3s
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    container_name: sam-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - sam-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    container_name: sam-api
+    env_file:
+      - .env
+    environment:
+      # Ensure services use docker hostnames
+      DATABASE_URL: postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      DATABASE_SYNC_URL: postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+    command: ["uvicorn", "sam.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  collector:
+    build: .
+    container_name: sam-collector
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      DATABASE_SYNC_URL: postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+    command: ["python", "-m", "sam.scheduler.runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  dashboard:
+    build: .
+    container_name: sam-dashboard
+    env_file:
+      - .env
+    environment:
+      API_HOST: api
+      API_PORT: 8000
+    command: ["streamlit", "run", "src/dashboard/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
 volumes:
   sam-postgres-data:
+  sam-redis-data:
