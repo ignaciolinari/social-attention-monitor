@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sam.processors.metrics import EngagementMetrics, get_calculator
+from sam.processors.metrics import EngagementMetrics, MentionData, get_calculator
 from sam.storage.repository import (
     get_latest_metrics_snapshot,
     get_mentions_in_window,
@@ -59,21 +60,25 @@ async def compute_and_upsert_metrics_snapshot(
             platform_breakdown={},
         )
 
-    mention_dicts = [
-        {
-            "created_at": m.created_at,
-            "platform": m.platform,
-            "author": m.author,
-            "metrics": m.metrics or {},
-            "sentiment": m.sentiment or {},
-        }
-        for m in mentions
-    ]
+    mention_dicts = cast(
+        list[MentionData],
+        [
+            {
+                "created_at": m.created_at,
+                "platform": m.platform,
+                "author": m.author,
+                "metrics": m.metrics or {},
+                "sentiment": m.sentiment or {},
+            }
+            for m in mentions
+        ],
+    )
 
     computed = calc.calculate(
         mention_dicts,
         window_hours=window_hours,
         previous_metrics=previous_metrics,
+        window_end=snapshot_time,
     )
 
     await upsert_metrics_snapshot(
@@ -100,4 +105,3 @@ async def compute_and_upsert_metrics_snapshot(
             },
         },
     )
-

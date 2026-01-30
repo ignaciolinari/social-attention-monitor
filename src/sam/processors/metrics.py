@@ -6,7 +6,7 @@ Computes engagement metrics and composite scores for titles.
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TypedDict
 
 import numpy as np
 
@@ -40,6 +40,25 @@ class EngagementMetrics:
     platform_breakdown: dict[str, int]
 
 
+class MetricsPayload(TypedDict, total=False):
+    score: int
+    num_comments: int
+    like_count: int
+    comment_count: int
+
+
+class SentimentPayload(TypedDict, total=False):
+    compound: float
+
+
+class MentionData(TypedDict, total=False):
+    created_at: datetime
+    author: str
+    platform: str
+    metrics: MetricsPayload
+    sentiment: SentimentPayload
+
+
 class MetricsCalculator:
     """
     Calculates engagement metrics and composite scores.
@@ -57,9 +76,10 @@ class MetricsCalculator:
 
     def calculate(
         self,
-        mentions: list[dict[str, Any]],
+        mentions: list["MentionData"],
         window_hours: int = 24,
         previous_metrics: "EngagementMetrics | None" = None,
+        window_end: datetime | None = None,
     ) -> EngagementMetrics:
         """
         Calculate engagement metrics for a set of mentions.
@@ -72,16 +92,21 @@ class MetricsCalculator:
         Returns:
             EngagementMetrics with all computed values
         """
-        now = datetime.now(UTC)
-        window_start = now - timedelta(hours=window_hours)
+        if window_hours <= 0:
+            raise ValueError("window_hours must be positive")
+
+        window_end = window_end or datetime.now(UTC)
+        window_start = window_end - timedelta(hours=window_hours)
 
         # Filter to window
         in_window = []
         for mention in mentions:
-            created_at = mention.get("created_at", now)
-            if isinstance(created_at, datetime) and created_at.tzinfo is None:
+            created_at = mention.get("created_at", window_end)
+            if not isinstance(created_at, datetime):
+                created_at = window_end
+            if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=UTC)
-            if created_at >= window_start:
+            if window_start <= created_at < window_end:
                 in_window.append(mention)
 
         # Basic counts
@@ -148,7 +173,7 @@ class MetricsCalculator:
             attention_index=attention_index,
             hype_acceleration=hype_acceleration,
             window_start=window_start,
-            window_end=now,
+            window_end=window_end,
             platform_breakdown=platform_breakdown,
         )
 

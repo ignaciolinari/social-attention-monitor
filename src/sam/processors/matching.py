@@ -77,4 +77,3 @@ def match_best(
     if best is None or best.score < min_score:
         return None
     return best
-

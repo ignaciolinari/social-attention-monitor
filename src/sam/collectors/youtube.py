@@ -4,6 +4,7 @@ YouTube Collector
 Collects video data from YouTube using the Data API v3.
 """
 
+import contextlib
 import random
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -20,6 +21,18 @@ def _should_retry(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, httpx.TimeoutException)
+
+
+def _youtube_quota_reason(payload: dict[str, Any] | None) -> str | None:
+    """Return a YouTube quota/rate-limit reason string if present."""
+    if not payload:
+        return None
+    err = payload.get("error") or {}
+    for item in err.get("errors", []) or []:
+        reason = item.get("reason")
+        if reason in {"quotaExceeded", "dailyLimitExceeded", "userRateLimitExceeded"}:
+            return str(reason)
+    return None
 
 
 class YouTubeCollector(BaseCollector):
@@ -164,13 +177,42 @@ class YouTubeCollector(BaseCollector):
             )
 
         except httpx.HTTPStatusError as e:
-            result = CollectionResult(
-                platform=self.platform_name,
-                posts=[],
-                collected_at=datetime.now(UTC),
-                success=False,
-                error=f"HTTP error: {e.response.status_code}",
-            )
+            retry_after = e.response.headers.get("Retry-After")
+            payload: dict[str, Any] | None = None
+            with contextlib.suppress(Exception):
+                payload = cast(dict[str, Any], e.response.json())
+
+            quota_reason = _youtube_quota_reason(payload)
+            if quota_reason is not None:
+                msg = f"quota/rate limit exceeded ({quota_reason})"
+                if retry_after:
+                    msg = f"{msg}; retry_after={retry_after}s"
+                result = CollectionResult(
+                    platform=self.platform_name,
+                    posts=[],
+                    collected_at=datetime.now(UTC),
+                    success=False,
+                    error=msg,
+                )
+            elif e.response.status_code == 429:
+                msg = "rate limited (HTTP 429)"
+                if retry_after:
+                    msg = f"{msg}; retry_after={retry_after}s"
+                result = CollectionResult(
+                    platform=self.platform_name,
+                    posts=[],
+                    collected_at=datetime.now(UTC),
+                    success=False,
+                    error=msg,
+                )
+            else:
+                result = CollectionResult(
+                    platform=self.platform_name,
+                    posts=[],
+                    collected_at=datetime.now(UTC),
+                    success=False,
+                    error=f"HTTP error: {e.response.status_code}",
+                )
         except Exception as e:
             result = CollectionResult(
                 platform=self.platform_name,

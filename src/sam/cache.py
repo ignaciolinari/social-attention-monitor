@@ -52,4 +52,3 @@ async def cache_set_json(key: str, value: Any, *, ttl_seconds: int) -> None:
     if r is None:
         return
     await r.set(key, json.dumps(value), ex=ttl_seconds)
-

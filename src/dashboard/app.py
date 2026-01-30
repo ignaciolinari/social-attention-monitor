@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from sam.config import get_settings
+
 st.set_page_config(
     page_title="SAM - Social Attention Monitor",
     page_icon="📊",
@@ -39,7 +41,8 @@ def _api_base_url() -> str:
 @st.cache_data(ttl=30)
 def _get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     url = _api_base_url() + path
-    r = httpx.get(url, params=params, timeout=10.0)
+    timeout_s = get_settings().dashboard_http_timeout_seconds
+    r = httpx.get(url, params=params, timeout=timeout_s)
     r.raise_for_status()
     data: Any = r.json()
     if not isinstance(data, dict):
@@ -134,7 +137,9 @@ def main() -> None:
                 }
             )
 
-        df = pd.DataFrame(rows).sort_values(by="attention_index", ascending=False, na_position="last")
+        df = pd.DataFrame(rows).sort_values(
+            by="attention_index", ascending=False, na_position="last"
+        )
         st.dataframe(
             df.drop(columns=["title_id"]),
             use_container_width=True,
@@ -158,7 +163,7 @@ def main() -> None:
         try:
             ts = _get_json(
                 "/api/v1/metrics/timeseries",
-                params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+                params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
             )
         except Exception as e:
             st.error(f"Failed to load time series: {e}")
@@ -195,7 +200,7 @@ def main() -> None:
 
         ts = _get_json(
             "/api/v1/metrics/timeseries",
-            params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+            params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
         )
         points = ts.get("points", [])
         if not points:
@@ -228,7 +233,7 @@ def main() -> None:
 
         ts = _get_json(
             "/api/v1/metrics/timeseries",
-            params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+            params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
         )
         points = ts.get("points", [])
         if not points:

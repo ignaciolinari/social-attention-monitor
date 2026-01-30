@@ -107,26 +107,66 @@ class RedditCollector(BaseCollector):
             )
 
         target_subreddits = subreddits or self._collector_settings.subreddit_list
-        try:
-            # PRAW is synchronous; run collection in a thread to preserve async API.
-            result = await asyncio.to_thread(
-                self._collect_sync,
-                query,
-                limit,
-                target_subreddits,
-                time_filter,
-            )
-        except Exception as e:
-            result = CollectionResult(
-                platform=self.platform_name,
-                posts=[],
-                collected_at=datetime.now(UTC),
-                success=False,
-                error=str(e),
-            )
+        result = await self._collect_with_retries(
+            query=query,
+            limit=limit,
+            target_subreddits=target_subreddits,
+            time_filter=time_filter,
+        )
 
         self._log_collection(result)
         return result
+
+    async def _collect_with_retries(
+        self,
+        *,
+        query: str | None,
+        limit: int,
+        target_subreddits: list[str],
+        time_filter: str,
+        max_attempts: int = 3,
+    ) -> CollectionResult:
+        """Run sync PRAW collection with explicit retry/backoff on 429s."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                # PRAW is synchronous; run collection in a thread to preserve async API.
+                return await asyncio.to_thread(
+                    self._collect_sync,
+                    query,
+                    limit,
+                    target_subreddits,
+                    time_filter,
+                )
+            except RedditRateLimitError as e:
+                if attempt >= max_attempts:
+                    return CollectionResult(
+                        platform=self.platform_name,
+                        posts=[],
+                        collected_at=datetime.now(UTC),
+                        success=False,
+                        error=f"rate limited by Reddit API; retry_after={e.retry_after_seconds}s",
+                    )
+
+                # Respect Retry-After when available; otherwise exponential backoff with jitter.
+                if e.retry_after_seconds is not None:
+                    sleep_s = max(1.0, float(e.retry_after_seconds))
+                else:
+                    sleep_s = min(60.0, (2 ** (attempt - 1)) * 2.0) + random.uniform(0.0, 1.0)
+
+                logger.warning(
+                    f"[reddit] Rate limited (attempt {attempt}/{max_attempts}); sleeping {sleep_s:.1f}s"
+                )
+                await asyncio.sleep(sleep_s)
+            except Exception as e:
+                return CollectionResult(
+                    platform=self.platform_name,
+                    posts=[],
+                    collected_at=datetime.now(UTC),
+                    success=False,
+                    error=str(e),
+                )
 
     def _collect_sync(
         self,
@@ -136,6 +176,8 @@ class RedditCollector(BaseCollector):
         time_filter: str,
     ) -> CollectionResult:
         collected_posts: list[CollectedPost] = []
+        successes = 0
+        errors = 0
         for subreddit_name in target_subreddits:
             try:
                 subreddit = self._client.subreddit(subreddit_name)
@@ -161,11 +203,21 @@ class RedditCollector(BaseCollector):
                     f"[reddit] Collected from r/{subreddit_name}: "
                     f"{len([p for p in collected_posts if p.metrics.get('subreddit') == subreddit_name])} posts"
                 )
+                successes += 1
             except prawcore.exceptions.TooManyRequests as e:
-                logger.warning(f"[reddit] Rate limited by Reddit API: {e}")
-                break
+                raise RedditRateLimitError.from_praw(e) from e
             except Exception as e:
+                errors += 1
                 logger.warning(f"[reddit] Error collecting from r/{subreddit_name}: {e}")
+
+        if successes == 0 and errors > 0:
+            return CollectionResult(
+                platform=self.platform_name,
+                posts=[],
+                collected_at=datetime.now(UTC),
+                success=False,
+                error="failed to collect from all target subreddits",
+            )
 
         return CollectionResult(
             platform=self.platform_name,
@@ -257,3 +309,22 @@ class RedditCollector(BaseCollector):
             )
 
         return posts
+
+
+class RedditRateLimitError(RuntimeError):
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+    @classmethod
+    def from_praw(cls, exc: prawcore.exceptions.TooManyRequests) -> "RedditRateLimitError":
+        retry_after: int | None = None
+        # prawcore exposes response similar to requests.Response
+        with contextlib.suppress(Exception):
+            ra = getattr(getattr(exc, "response", None), "headers", {}).get("retry-after")
+            if ra is not None:
+                retry_after = int(float(str(ra)))
+        msg = "rate limited by Reddit API (HTTP 429)"
+        if retry_after is not None:
+            msg = f"{msg}; retry_after={retry_after}s"
+        return cls(msg, retry_after_seconds=retry_after)

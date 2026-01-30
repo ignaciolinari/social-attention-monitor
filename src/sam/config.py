@@ -107,6 +107,21 @@ class CollectorSettings(BaseSettings):
         return [s.strip() for s in self.target_subreddits.split(",") if s.strip()]
 
 
+class StorageSettings(BaseSettings):
+    """Local filesystem storage settings (raw data, artifacts)."""
+
+    model_config = SettingsConfigDict(env_prefix="SAM_STORAGE_")
+
+    enable_raw_data_storage: bool = Field(
+        default=False,
+        description="Persist collected raw data to local filesystem",
+    )
+    raw_data_dir: str = Field(
+        default="data/raw",
+        description="Directory for raw data dumps (JSONL)",
+    )
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -122,6 +137,11 @@ class Settings(BaseSettings):
     )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
         default="INFO", description="Logging level"
+    )
+    log_json: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("LOG_JSON", "SAM_LOG_JSON"),
+        description="Emit structured JSON logs",
     )
 
     # Demo mode
@@ -149,6 +169,17 @@ class Settings(BaseSettings):
 
     # Dashboard
     dashboard_port: int = Field(default=8501, description="Streamlit dashboard port")
+    dashboard_http_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("SAM_DASHBOARD_HTTP_TIMEOUT"),
+        description="Dashboard HTTP timeout in seconds",
+    )
+
+    # API behavior
+    mentions_refresh_stale_minutes: int = Field(
+        default=30,
+        description="Minutes after which mentions data is considered stale",
+    )
 
     # Nested settings
     reddit: RedditSettings = Field(default_factory=RedditSettings)
@@ -157,6 +188,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     collector: CollectorSettings = Field(default_factory=CollectorSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
 
     @field_validator("sam_env", mode="before")
     @classmethod

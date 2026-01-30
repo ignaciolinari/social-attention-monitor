@@ -13,6 +13,8 @@ from typing import Any
 from loguru import logger
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+from sam.processors.text_cleaning import clean_text_for_sentiment
+
 
 class SentimentModel(str, Enum):
     """Available sentiment analysis models."""
@@ -141,20 +143,7 @@ class SentimentAnalyzer:
         Preserves sentiment-carrying elements like emojis and punctuation
         while cleaning up noise.
         """
-        # Remove URLs
-        text = re.sub(r"http\S+|www\S+", "", text)
-
-        # Remove Reddit-specific formatting
-        text = re.sub(r"\[.*?\]\(.*?\)", "", text)  # Markdown links
-        text = re.sub(r"&gt;.*", "", text)  # Quote blocks
-        text = re.sub(r"/r/\w+", "", text)  # Subreddit mentions
-        text = re.sub(r"/u/\w+", "", text)  # User mentions
-
-        # Keep emojis and punctuation (important for VADER)
-        # Just remove extra whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-
-        return text
+        return clean_text_for_sentiment(text)
 
     def get_aspect_sentiment(
         self,

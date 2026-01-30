@@ -148,7 +148,14 @@ class TMDBCollector:
             return titles
 
         except Exception as e:
-            logger.error(f"[tmdb] Error fetching trending: {e}")
+            # tenacity wraps HTTPStatusError retries; this final exception is the one that
+            # bubbled after retries. Keep logs actionable.
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                retry_after = e.response.headers.get("Retry-After")
+                extra = f" retry_after={retry_after}s" if retry_after else ""
+                logger.error(f"[tmdb] Rate limited by TMDB API (HTTP 429).{extra}")
+            else:
+                logger.error(f"[tmdb] Error fetching trending: {e}")
             return []
 
     async def search(

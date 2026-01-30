@@ -15,6 +15,7 @@ def setup_logging() -> None:
     logger.add(
         sys.stderr,
         level=settings.log_level,
+        serialize=settings.log_json,
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
             "<level>{level: <8}</level> | "

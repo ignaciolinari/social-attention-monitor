@@ -31,6 +31,7 @@ from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
 from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
+from sam.pipeline.raw_storage import persist_collection_result
 from sam.processors.sentiment import analyze_sentiment_batch
 from sam.storage.database import close_db, get_session, init_db
 from sam.storage.repository import (
@@ -56,6 +57,7 @@ async def collect_once(
     limit_titles: int,
     limit_reddit: int,
     limit_youtube: int,
+    run_id: uuid.UUID | None = None,
 ) -> dict[str, int]:
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
@@ -83,6 +85,15 @@ async def collect_once(
             # Reddit
             reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
             if reddit_result.success and reddit_result.posts:
+                if settings.storage.enable_raw_data_storage:
+                    await persist_collection_result(
+                        reddit_result,
+                        raw_data_dir=settings.storage.raw_data_dir,
+                        title=t.title,
+                        title_id=db_title.id,
+                        query=t.title,
+                        run_id=run_id,
+                    )
                 sentiments = analyze_sentiment_batch([p.content for p in reddit_result.posts])
                 sentiment_map = {
                     post.source_id: {
@@ -109,6 +120,15 @@ async def collect_once(
             yt_query = f"{t.title} trailer"
             yt_result = await youtube.collect(query=yt_query, limit=limit_youtube)
             if yt_result.success and yt_result.posts:
+                if settings.storage.enable_raw_data_storage:
+                    await persist_collection_result(
+                        yt_result,
+                        raw_data_dir=settings.storage.raw_data_dir,
+                        title=t.title,
+                        title_id=db_title.id,
+                        query=yt_query,
+                        run_id=run_id,
+                    )
                 sentiments = analyze_sentiment_batch([p.content for p in yt_result.posts])
                 sentiment_map = {
                     post.source_id: {
@@ -142,10 +162,9 @@ async def collect_once(
                 stats["metrics_snapshots_upserted"] += 1
 
     finally:
-        with contextlib.suppress(Exception):
-            await reddit.close()
-        await youtube.close()
-        await tmdb.close()
+        for collector in (reddit, youtube, tmdb):
+            with contextlib.suppress(Exception):
+                await collector.close()
 
     return stats
 
@@ -192,6 +211,7 @@ async def _collection_job(
                 limit_titles=limit_titles,
                 limit_reddit=limit_reddit,
                 limit_youtube=limit_youtube,
+                run_id=run.id,
             )
             elapsed = (datetime.now(UTC) - started).total_seconds()
             await finish_pipeline_run(
@@ -280,13 +300,17 @@ def main() -> None:
 
         try:
             if args.once:
-                async with get_session() as session:
-                    await collect_once(
-                        session,
-                        limit_titles=args.limit_titles,
-                        limit_reddit=args.limit_reddit,
-                        limit_youtube=args.limit_youtube,
-                    )
+                # Route one-shot runs through the same job path so we also:
+                # - acquire/release the lease
+                # - record a PipelineRun (started/finished/error)
+                owner_id = uuid.uuid4()
+                await _collection_job(
+                    owner_id=owner_id,
+                    interval_minutes=args.interval_minutes,
+                    limit_titles=args.limit_titles,
+                    limit_reddit=args.limit_reddit,
+                    limit_youtube=args.limit_youtube,
+                )
             else:
                 await run_forever(
                     interval_minutes=args.interval_minutes,
