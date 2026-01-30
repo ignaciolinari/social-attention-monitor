@@ -238,7 +238,9 @@ class Lease(Base):
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -263,7 +265,9 @@ class PipelineRun(Base):
         String(20), nullable=False, default="running"
     )  # running, success, failed, skipped
 
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     error: Mapped[str | None] = mapped_column(Text)
 

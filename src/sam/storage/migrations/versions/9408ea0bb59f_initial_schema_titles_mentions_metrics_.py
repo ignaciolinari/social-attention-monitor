@@ -1,7 +1,7 @@
 """Initial schema - titles mentions metrics alerts
 
 Revision ID: 9408ea0bb59f
-Revises: 
+Revises:
 Create Date: 2026-01-29 02:01:15.495868
 
 """

@@ -81,4 +81,3 @@ def downgrade() -> None:
     # We intentionally do not drop the extension or attempt to "un-hypertable"
     # in downgrade, as that can be destructive and environment-specific.
     pass
-

@@ -85,13 +85,15 @@ async def insert_mentions(
         return 0
 
     stmt = (
-        insert(Mention).values(rows).on_conflict_do_nothing(constraint="uq_platform_source_title")
+        insert(Mention)
+        .values(rows)
+        .on_conflict_do_nothing(constraint="uq_platform_source_title")
+        .returning(Mention.id)
     )
 
     result = await session.execute(stmt)
-    # rowcount is driver-dependent for executemany; treat as best-effort.
-    rowcount = getattr(result, "rowcount", 0) or 0
-    return int(rowcount)
+    inserted_ids = result.scalars().all()
+    return len(inserted_ids)
 
 
 async def get_title_by_name(session: AsyncSession, title: str) -> Title | None:
@@ -159,6 +161,32 @@ async def get_mentions_for_title(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def get_mentions_count(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    platform: str,
+) -> int:
+    """Get total mention count for a title and platform."""
+    stmt = select(func.count()).where(Mention.title_id == title_id, Mention.platform == platform)
+    result = await session.execute(stmt)
+    return int(result.scalar_one())
+
+
+async def get_latest_mention_collected_at(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    platform: str,
+) -> datetime | None:
+    """Get latest collected_at timestamp for a title and platform."""
+    stmt = select(func.max(Mention.collected_at)).where(
+        Mention.title_id == title_id, Mention.platform == platform
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one()
 
 
 async def get_mentions_in_window(
@@ -253,7 +281,9 @@ async def get_trending_by_attention_index(
                 MetricsSnapshot.window_hours == window_hours,
             ),
         )
-        .order_by(MetricsSnapshot.attention_index.desc().nullslast(), Title.popularity.desc().nullslast())
+        .order_by(
+            MetricsSnapshot.attention_index.desc().nullslast(), Title.popularity.desc().nullslast()
+        )
         .limit(limit)
     )
 
@@ -299,7 +329,11 @@ async def upsert_metrics_snapshot(
         .values(**values)
         .on_conflict_do_update(
             constraint="uq_title_snapshot",
-            set_={k: v for k, v in values.items() if k not in {"title_id", "snapshot_time", "window_hours"}},
+            set_={
+                k: v
+                for k, v in values.items()
+                if k not in {"title_id", "snapshot_time", "window_hours"}
+            },
         )
     )
     await session.execute(stmt)

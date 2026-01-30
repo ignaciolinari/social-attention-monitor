@@ -74,4 +74,3 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_leases_owner_id"), table_name="leases")
     op.drop_index(op.f("ix_leases_expires_at"), table_name="leases")
     op.drop_table("leases")
-
