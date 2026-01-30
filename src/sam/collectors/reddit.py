@@ -5,11 +5,13 @@ Collects posts and comments from Reddit subreddits using PRAW.
 """
 
 import asyncio
+import contextlib
 import random
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import praw
+import prawcore
 from loguru import logger
 
 from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
@@ -52,8 +54,13 @@ class RedditCollector(BaseCollector):
                 client_secret=self._settings.client_secret,
                 user_agent=self._settings.user_agent,
             )
-            # Test connection
-            _ = self._client.user.me()
+            # Important: do NOT call `user.me()` here.
+            # `user.me()` requires a user-authorized OAuth flow and will fail for typical
+            # read-only "installed/script" style apps that only use client credentials.
+            # We'll rely on request-time error handling inside collection calls.
+            with contextlib.suppress(Exception):
+                # Explicitly force read-only mode (safe even if already read-only).
+                self._client.read_only = True
             logger.info("[reddit] PRAW client initialized successfully")
         except Exception as e:
             logger.warning(f"[reddit] Failed to initialize PRAW client: {e}")
@@ -154,6 +161,9 @@ class RedditCollector(BaseCollector):
                     f"[reddit] Collected from r/{subreddit_name}: "
                     f"{len([p for p in collected_posts if p.metrics.get('subreddit') == subreddit_name])} posts"
                 )
+            except prawcore.exceptions.TooManyRequests as e:
+                logger.warning(f"[reddit] Rate limited by Reddit API: {e}")
+                break
             except Exception as e:
                 logger.warning(f"[reddit] Error collecting from r/{subreddit_name}: {e}")
 

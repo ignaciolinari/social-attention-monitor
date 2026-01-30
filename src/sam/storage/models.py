@@ -223,3 +223,56 @@ class Alert(Base):
 
     def __repr__(self) -> str:
         return f"<Alert(id={self.id}, type={self.alert_type}, title_id={self.title_id})>"
+
+
+class Lease(Base):
+    """
+    A simple distributed lease used to prevent overlapping work across processes.
+
+    This is preferred over advisory locks for async apps because it doesn't depend
+    on holding a specific DB connection for the whole duration of a run.
+    """
+
+    __tablename__ = "leases"
+
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<Lease(name={self.name}, owner_id={self.owner_id}, expires_at={self.expires_at})>"
+
+
+class PipelineRun(Base):
+    """A persisted record of a pipeline run (for observability & debugging)."""
+
+    __tablename__ = "pipeline_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="running"
+    )  # running, success, failed, skipped
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    stats: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index("ix_pipeline_runs_job_started", "job_name", "started_at"),
+        Index("ix_pipeline_runs_owner_started", "owner_id", "started_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PipelineRun(id={self.id}, job={self.job_name}, status={self.status})>"

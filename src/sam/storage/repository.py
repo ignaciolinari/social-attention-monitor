@@ -5,16 +5,16 @@ Keeps the scheduler runner simple and testable.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.collectors.base import CollectedPost
 from sam.collectors.tmdb import TMDBTitle
-from sam.storage.models import Mention, Title
+from sam.storage.models import Lease, Mention, MetricsSnapshot, PipelineRun, Title
 
 
 async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
@@ -106,19 +106,303 @@ async def get_title_by_name(session: AsyncSession, title: str) -> Title | None:
     return result.scalars().first()
 
 
+async def list_active_titles(
+    session: AsyncSession,
+    *,
+    limit: int = 500,
+    offset: int = 0,
+) -> list[Title]:
+    """List active titles (for backfills / maintenance jobs)."""
+    stmt = (
+        select(Title)
+        .where(Title.is_active.is_(True))
+        .order_by(Title.popularity.desc().nullslast())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_titles(
+    session: AsyncSession,
+    *,
+    query: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Title]:
+    """List titles from the DB (optionally filtered by substring match)."""
+    stmt = select(Title).where(Title.is_active.is_(True))
+    if query:
+        pattern = f"%{query.strip()}%"
+        stmt = stmt.where(Title.title.ilike(pattern))
+    stmt = stmt.order_by(Title.popularity.desc().nullslast()).offset(offset).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def get_mentions_for_title(
     session: AsyncSession,
     *,
     title_id: uuid.UUID,
     platform: str,
     limit: int,
+    offset: int = 0,
 ) -> list[Mention]:
     """Get latest mentions for a title and platform."""
     stmt = (
         select(Mention)
         .where(Mention.title_id == title_id, Mention.platform == platform)
         .order_by(Mention.created_at.desc())
+        .offset(offset)
         .limit(limit)
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def get_mentions_in_window(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    window_start: datetime,
+    window_end: datetime,
+) -> list[Mention]:
+    """Get mentions for a title within a time window."""
+    stmt = (
+        select(Mention)
+        .where(
+            Mention.title_id == title_id,
+            Mention.created_at >= window_start,
+            Mention.created_at < window_end,
+        )
+        .order_by(Mention.created_at.asc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_latest_metrics_snapshot(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    window_hours: int,
+    before: datetime | None = None,
+) -> MetricsSnapshot | None:
+    """Get the latest metrics snapshot for a title and window size."""
+    stmt = select(MetricsSnapshot).where(
+        MetricsSnapshot.title_id == title_id,
+        MetricsSnapshot.window_hours == window_hours,
+    )
+    if before is not None:
+        stmt = stmt.where(MetricsSnapshot.snapshot_time < before)
+    stmt = stmt.order_by(MetricsSnapshot.snapshot_time.desc()).limit(1)
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
+async def get_metrics_timeseries(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    window_hours: int,
+    since: datetime,
+    until: datetime | None = None,
+    limit: int = 2000,
+) -> list[MetricsSnapshot]:
+    """Get metrics snapshots for a title since a timestamp."""
+    stmt = select(MetricsSnapshot).where(
+        MetricsSnapshot.title_id == title_id,
+        MetricsSnapshot.window_hours == window_hours,
+        MetricsSnapshot.snapshot_time >= since,
+    )
+    if until is not None:
+        stmt = stmt.where(MetricsSnapshot.snapshot_time <= until)
+    stmt = stmt.order_by(MetricsSnapshot.snapshot_time.asc()).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_trending_by_attention_index(
+    session: AsyncSession,
+    *,
+    window_hours: int,
+    limit: int = 10,
+) -> list[tuple[Title, MetricsSnapshot]]:
+    """
+    Return titles ordered by latest Attention Index for the given window size.
+    """
+    latest = (
+        select(
+            MetricsSnapshot.title_id.label("title_id"),
+            func.max(MetricsSnapshot.snapshot_time).label("max_time"),
+        )
+        .where(MetricsSnapshot.window_hours == window_hours)
+        .group_by(MetricsSnapshot.title_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(Title, MetricsSnapshot)
+        .join(latest, Title.id == latest.c.title_id)
+        .join(
+            MetricsSnapshot,
+            and_(
+                MetricsSnapshot.title_id == latest.c.title_id,
+                MetricsSnapshot.snapshot_time == latest.c.max_time,
+                MetricsSnapshot.window_hours == window_hours,
+            ),
+        )
+        .order_by(MetricsSnapshot.attention_index.desc().nullslast(), Title.popularity.desc().nullslast())
+        .limit(limit)
+    )
+
+    result = await session.execute(stmt)
+    rows = result.all()
+    return [(row[0], row[1]) for row in rows]
+
+
+async def upsert_metrics_snapshot(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    snapshot_time: datetime,
+    window_hours: int,
+    metrics: dict[str, Any],
+) -> None:
+    """
+    Upsert a metrics snapshot row.
+
+    `metrics` is expected to contain normalized/aggregated values (counts, ratios, scores),
+    plus an optional `raw_metrics` dict for flexibility.
+    """
+    values: dict[str, Any] = {
+        "title_id": title_id,
+        "snapshot_time": snapshot_time,
+        "window_hours": window_hours,
+        "mention_count": int(metrics.get("mention_count", 0)),
+        "unique_authors": int(metrics.get("unique_authors", 0)),
+        "reddit_mentions": int(metrics.get("reddit_mentions", 0)),
+        "youtube_mentions": int(metrics.get("youtube_mentions", 0)),
+        "mention_velocity": metrics.get("mention_velocity"),
+        "velocity_change": metrics.get("velocity_change"),
+        "avg_sentiment": metrics.get("avg_sentiment"),
+        "sentiment_volatility": metrics.get("sentiment_volatility"),
+        "positive_ratio": metrics.get("positive_ratio"),
+        "attention_index": metrics.get("attention_index"),
+        "hype_acceleration": metrics.get("hype_acceleration"),
+        "raw_metrics": metrics.get("raw_metrics"),
+    }
+
+    stmt = (
+        insert(MetricsSnapshot)
+        .values(**values)
+        .on_conflict_do_update(
+            constraint="uq_title_snapshot",
+            set_={k: v for k, v in values.items() if k not in {"title_id", "snapshot_time", "window_hours"}},
+        )
+    )
+    await session.execute(stmt)
+
+
+async def acquire_lease(
+    session: AsyncSession,
+    *,
+    name: str,
+    owner_id: uuid.UUID,
+    ttl_seconds: int,
+) -> bool:
+    """
+    Acquire or renew a lease.
+
+    Returns True if acquired/renewed, False if another owner currently holds it.
+    """
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+
+    # Only steal the lease if it's expired, otherwise keep current owner.
+    stmt = (
+        insert(Lease)
+        .values(
+            name=name,
+            owner_id=owner_id,
+            acquired_at=now,
+            expires_at=expires_at,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[Lease.name],
+            set_={
+                "owner_id": owner_id,
+                "acquired_at": now,
+                "expires_at": expires_at,
+                "updated_at": now,
+            },
+            where=or_(Lease.expires_at < func.now(), Lease.owner_id == owner_id),
+        )
+    )
+
+    result = await session.execute(stmt)
+    # For PostgreSQL, rowcount should be 1 if inserted/updated, 0 otherwise.
+    rowcount = getattr(result, "rowcount", 0) or 0
+    return int(rowcount) > 0
+
+
+async def release_lease(
+    session: AsyncSession,
+    *,
+    name: str,
+    owner_id: uuid.UUID,
+) -> bool:
+    """Release a lease if owned by owner_id."""
+    stmt = text("DELETE FROM leases WHERE name = :name AND owner_id = :owner_id")
+    result = await session.execute(stmt, {"name": name, "owner_id": owner_id})
+    rowcount = getattr(result, "rowcount", 0) or 0
+    return int(rowcount) > 0
+
+
+async def start_pipeline_run(
+    session: AsyncSession,
+    *,
+    job_name: str,
+    owner_id: uuid.UUID,
+    started_at: datetime | None = None,
+    stats: dict[str, Any] | None = None,
+) -> PipelineRun:
+    """Create and return a PipelineRun row."""
+    started_at = started_at or datetime.now(UTC)
+    run = PipelineRun(
+        job_name=job_name,
+        owner_id=owner_id,
+        status="running",
+        started_at=started_at,
+        finished_at=None,
+        error=None,
+        stats=stats,
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+async def finish_pipeline_run(
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    status: str,
+    finished_at: datetime | None = None,
+    error: str | None = None,
+    stats: dict[str, Any] | None = None,
+) -> None:
+    """Mark a run as finished."""
+    finished_at = finished_at or datetime.now(UTC)
+    result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
+    run = result.scalar_one_or_none()
+    if run is None:
+        return
+
+    run.status = status
+    run.finished_at = finished_at
+    run.error = error
+    if stats is not None:
+        run.stats = {**(run.stats or {}), **stats}
