@@ -18,7 +18,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from sam.config import get_settings
 
 
-def _should_retry(exc: Exception) -> bool:
+def _should_retry(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, httpx.TimeoutException)
@@ -105,7 +105,7 @@ class TMDBCollector:
 
         response = await self._client.get(path, params=params)
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
     async def get_trending(
         self,

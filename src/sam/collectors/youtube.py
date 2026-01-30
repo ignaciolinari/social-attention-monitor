@@ -6,7 +6,7 @@ Collects video data from YouTube using the Data API v3.
 
 import random
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -16,7 +16,7 @@ from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
 from sam.config import get_settings
 
 
-def _should_retry(exc: Exception) -> bool:
+def _should_retry(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, httpx.TimeoutException)
@@ -72,7 +72,7 @@ class YouTubeCollector(BaseCollector):
 
         response = await self._client.get(path, params=params)
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
     async def collect(
         self,
@@ -93,10 +93,10 @@ class YouTubeCollector(BaseCollector):
             CollectionResult with collected posts
         """
         if self.demo_mode:
-            posts = self._generate_demo_data(query, limit)
+            demo_posts = self._generate_demo_data(query, limit)
             result = CollectionResult(
                 platform=self.platform_name,
-                posts=posts,
+                posts=demo_posts,
                 collected_at=datetime.now(UTC),
                 success=True,
             )
