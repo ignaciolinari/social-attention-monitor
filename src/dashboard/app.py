@@ -4,6 +4,15 @@ SAM Dashboard
 Streamlit-based dashboard for visualizing social attention data.
 """
 
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from typing import Any
+
+import httpx
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 st.set_page_config(
@@ -12,6 +21,40 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def _api_base_url() -> str:
+    # Allow explicit override
+    override = os.getenv("SAM_API_BASE_URL")
+    if override:
+        return override.rstrip("/")
+
+    host = os.getenv("API_HOST", "127.0.0.1")
+    port = os.getenv("API_PORT", "8000")
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
+@st.cache_data(ttl=30)
+def _get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = _api_base_url() + path
+    r = httpx.get(url, params=params, timeout=10.0)
+    r.raise_for_status()
+    data: Any = r.json()
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object from API")
+    return data
+
+
+def _time_range_to_hours(label: str) -> int:
+    if label == "Last 24 hours":
+        return 24
+    if label == "Last 7 days":
+        return 7 * 24
+    if label == "Last 30 days":
+        return 30 * 24
+    return 24
 
 
 def main() -> None:
@@ -30,59 +73,197 @@ def main() -> None:
 
         st.divider()
         st.header("⚙️ Settings")
-        st.selectbox("Time Range", ["Last 24 hours", "Last 7 days", "Last 30 days"])
+        time_range = st.selectbox("Time Range", ["Last 24 hours", "Last 7 days", "Last 30 days"])
+        window_hours = st.selectbox("Metrics Window", [1, 24], index=1)
+
+        st.divider()
+        st.header("🔌 API")
+        api_base = _api_base_url()
+        st.caption(api_base)
+        try:
+            health = _get_json("/health")
+            st.success(
+                f"API OK (demo={health.get('demo_mode')}, db={health.get('database_ok')}, redis={health.get('redis_ok')})"
+            )
+        except Exception as e:
+            st.error(f"API unreachable: {e}")
+
+        st.divider()
+        if st.button("Refresh data"):
+            _get_json.clear()
 
     # Main content
+    hours = _time_range_to_hours(time_range)
+
+    trending: dict[str, Any] | None = None
+    try:
+        trending = _get_json(
+            "/api/v1/metrics/trending",
+            params={"window_hours": window_hours, "limit": 20},
+        )
+    except Exception as e:
+        st.error(f"Failed to load trending metrics: {e}")
+
     if page == "🔥 Trending Now":
         st.header("🔥 Trending Now")
-        st.info("This view will show top titles ranked by Attention Index.")
-        st.markdown("""
-        **Coming soon:**
-        - Top 10 trending titles
-        - Attention Index scores
-        - Velocity indicators
-        - Quick sentiment overview
-        """)
+        if not trending:
+            st.info("No trending data available yet. Run the collector first.")
+            return
+
+        items = trending.get("items", [])
+        if not items:
+            st.info("No metrics snapshots found. Run the collector to populate metrics.")
+            return
+
+        rows = []
+        for it in items:
+            t = it["title"]
+            m = it["metrics"]
+            rows.append(
+                {
+                    "title": t["title"],
+                    "media_type": t["media_type"],
+                    "attention_index": m.get("attention_index"),
+                    "mention_count": m.get("mention_count"),
+                    "mention_velocity": m.get("mention_velocity"),
+                    "avg_sentiment": m.get("avg_sentiment"),
+                    "reddit_mentions": m.get("reddit_mentions"),
+                    "youtube_mentions": m.get("youtube_mentions"),
+                    "snapshot_time": m.get("snapshot_time"),
+                    "title_id": t["id"],
+                }
+            )
+
+        df = pd.DataFrame(rows).sort_values(by="attention_index", ascending=False, na_position="last")
+        st.dataframe(
+            df.drop(columns=["title_id"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(f"Updated: {trending.get('collected_at')}")
 
     elif page == "📈 Time Series":
         st.header("📈 Time Series Analysis")
-        st.info("This view will show engagement and sentiment over time.")
-        st.markdown("""
-        **Coming soon:**
-        - Mentions over time
-        - Sentiment trajectory
-        - Engagement velocity
-        - Release date markers
-        """)
+        if not trending or not trending.get("items"):
+            st.info("No titles available yet. Populate the DB first.")
+            return
+
+        title_options = [
+            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
+        ]
+        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
+        selected_id = dict(title_options)[selected_label]
+
+        try:
+            ts = _get_json(
+                "/api/v1/metrics/timeseries",
+                params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+            )
+        except Exception as e:
+            st.error(f"Failed to load time series: {e}")
+            return
+
+        points = ts.get("points", [])
+        if not points:
+            st.info("No snapshots found for this title.")
+            return
+
+        df = pd.DataFrame(points)
+        df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+        df = df.sort_values("snapshot_time")
+
+        st.subheader("Mentions over time")
+        fig1 = px.line(df, x="snapshot_time", y="mention_count", markers=True)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        st.subheader("Attention Index over time")
+        fig2 = px.line(df, x="snapshot_time", y="attention_index", markers=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
     elif page == "🔄 Platform Comparison":
         st.header("🔄 Platform Comparison")
-        st.info("This view will compare engagement across Reddit and YouTube.")
-        st.markdown("""
-        **Coming soon:**
-        - Side-by-side platform metrics
-        - Correlation analysis
-        - Platform-specific trends
-        """)
+        if not trending or not trending.get("items"):
+            st.info("No titles available yet. Populate the DB first.")
+            return
+
+        title_options = [
+            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
+        ]
+        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
+        selected_id = dict(title_options)[selected_label]
+
+        ts = _get_json(
+            "/api/v1/metrics/timeseries",
+            params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+        )
+        points = ts.get("points", [])
+        if not points:
+            st.info("No snapshots found for this title.")
+            return
+
+        df = pd.DataFrame(points)
+        df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+        df = df.sort_values("snapshot_time")
+        long = df.melt(
+            id_vars=["snapshot_time"],
+            value_vars=["reddit_mentions", "youtube_mentions"],
+            var_name="platform",
+            value_name="mentions",
+        )
+        fig = px.area(long, x="snapshot_time", y="mentions", color="platform", groupnorm=None)
+        st.plotly_chart(fig, use_container_width=True)
 
     elif page == "💬 Sentiment":
         st.header("💬 Sentiment Distribution")
-        st.info("This view will show sentiment breakdown for selected titles.")
-        st.markdown("""
-        **Coming soon:**
-        - Positive/Neutral/Negative distribution
-        - Sentiment volatility
-        - Word clouds
-        - Top positive/negative comments
-        """)
+        if not trending or not trending.get("items"):
+            st.info("No titles available yet. Populate the DB first.")
+            return
+
+        title_options = [
+            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
+        ]
+        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
+        selected_id = dict(title_options)[selected_label]
+
+        ts = _get_json(
+            "/api/v1/metrics/timeseries",
+            params={"title_id": selected_id, "window_hours": 1, "hours": hours},
+        )
+        points = ts.get("points", [])
+        if not points:
+            st.info("No snapshots found for this title.")
+            return
+
+        df = pd.DataFrame(points)
+        df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+        df = df.sort_values("snapshot_time")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Latest avg sentiment", value=f"{df['avg_sentiment'].iloc[-1]:.2f}")
+        with c2:
+            pr = df["positive_ratio"].iloc[-1]
+            st.metric("Latest positive ratio", value=f"{(pr or 0.0) * 100:.1f}%")
+
+        fig1 = px.line(df, x="snapshot_time", y="avg_sentiment", markers=True)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        fig2 = px.line(df, x="snapshot_time", y="positive_ratio", markers=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
     # Footer
     st.divider()
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.caption("🟢 Demo Mode Active")
+        try:
+            h = _get_json("/health")
+            demo = h.get("demo_mode")
+            st.caption("🟢 Demo Mode Active" if demo else "🔵 Live Mode Active")
+        except Exception:
+            st.caption("—")
     with col2:
-        st.caption("Last updated: --")
+        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     with col3:
         st.caption("SAM v0.1.0")
 
