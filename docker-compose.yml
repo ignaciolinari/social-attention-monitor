@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-sam}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sam}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - sam-postgres-data:/var/lib/postgresql/data
     healthcheck:

@@ -1,4 +1,4 @@
-.PHONY: help install dev test lint format typecheck run-api run-dashboard run-collector \
+.PHONY: help install dev test test-integration lint format typecheck run-api run-dashboard run-collector \
 	db-up db-down db-logs db-reset db-migrate db-upgrade db-downgrade db-setup clean demo lock audit
 
 # Default target
@@ -8,6 +8,7 @@ help:
 	@echo "  install       Install production dependencies"
 	@echo "  dev           Install development dependencies"
 	@echo "  test          Run tests with coverage"
+	@echo "  test-integration Run tests with Docker Postgres"
 	@echo "  lint          Run linter (ruff)"
 	@echo "  format        Format code (ruff)"
 	@echo "  run-api       Start FastAPI server"
@@ -25,6 +26,12 @@ help:
 	@echo "  audit         Run dependency vulnerability scan (pip-audit)"
 	@echo ""
 
+# Postgres defaults for integration tests
+POSTGRES_USER ?= sam
+POSTGRES_PASSWORD ?= sam
+TEST_DB ?= sam_test
+POSTGRES_PORT ?= 5432
+
 # Installation
 install:
 	pip install -e .
@@ -34,8 +41,23 @@ dev:
 	pre-commit install
 
 # Testing
+VENV_PY := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
+
 test:
-	pytest tests/ -v --cov=sam --cov-report=term-missing
+	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
+
+test-integration:
+	@echo "Starting Postgres for integration tests..."
+	POSTGRES_PORT=5433 docker compose up -d postgres
+	@echo "Waiting for Postgres to be ready..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		docker exec sam-postgres pg_isready -U $(POSTGRES_USER) -d postgres >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@docker exec sam-postgres sh -c 'psql -U "$(POSTGRES_USER)" -d postgres -c "ALTER USER \"$(POSTGRES_USER)\" CREATEDB" >/dev/null 2>&1 || true'
+	@docker exec sam-postgres sh -c 'createdb -U "$(POSTGRES_USER)" "$(TEST_DB)" 2>/dev/null || true'
+	SAM_TEST_DATABASE_URL=postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@127.0.0.1:5433/$(TEST_DB) \
+	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
 
 test-fast:
 	pytest tests/ -v -x --no-cov

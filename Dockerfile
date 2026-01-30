@@ -20,4 +20,3 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install .
 
 EXPOSE 8000 8501
-
