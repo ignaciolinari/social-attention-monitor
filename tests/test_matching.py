@@ -10,4 +10,3 @@ def test_match_best_finds_candidate() -> None:
     m = match_best("Just watched dune part 2 trailer!", candidates=candidates, min_score=0.6)
     assert m is not None
     assert m.candidate == "Dune: Part Two"
-

@@ -27,3 +27,29 @@ def test_cors_allow_origins_list() -> None:
             os.environ.pop("CORS_ALLOW_ORIGINS", None)
         else:
             os.environ["CORS_ALLOW_ORIGINS"] = old
+
+
+def test_log_json_alias() -> None:
+    old = os.environ.get("SAM_LOG_JSON")
+    try:
+        os.environ["SAM_LOG_JSON"] = "true"
+        s = Settings()
+        assert s.log_json is True
+    finally:
+        if old is None:
+            os.environ.pop("SAM_LOG_JSON", None)
+        else:
+            os.environ["SAM_LOG_JSON"] = old
+
+
+def test_dashboard_http_timeout_alias() -> None:
+    old = os.environ.get("SAM_DASHBOARD_HTTP_TIMEOUT")
+    try:
+        os.environ["SAM_DASHBOARD_HTTP_TIMEOUT"] = "12.5"
+        s = Settings()
+        assert s.dashboard_http_timeout_seconds == 12.5
+    finally:
+        if old is None:
+            os.environ.pop("SAM_DASHBOARD_HTTP_TIMEOUT", None)
+        else:
+            os.environ["SAM_DASHBOARD_HTTP_TIMEOUT"] = old

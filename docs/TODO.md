@@ -21,21 +21,21 @@
 
 ---
 
-## Phase 2: Core Pipeline
+## Phase 2: Core Pipeline ✅
 
-- [ ] Scheduled polling with APScheduler
-- [ ] Scheduler safety: prevent overlapping runs (DB advisory lock/lease) + record job run status (started/finished/error)
-- [ ] Collector resilience: rate limiting + retries/backoff + explicit 429/quota handling
-- [ ] Title matching algorithm
-- [ ] Raw data storage to filesystem
-- [ ] Text cleaning pipeline
-- [ ] VADER sentiment integration
-- [ ] Metrics calculation engine
-- [ ] Attention Index calculation
-- [ ] Hype Acceleration calculation
-- [ ] Metrics snapshots persistence (metrics_snapshots)
-- [ ] Idempotent ingestion: stable mention identity + upsert/dedup + required DB indexes/constraints
-- [ ] Backfill/recompute command: recompute metrics snapshots for a date range
+- [x] Scheduled polling with APScheduler
+- [x] Scheduler safety: prevent overlapping runs (DB advisory lock/lease) + record job run status (started/finished/error)
+- [x] Collector resilience: rate limiting + retries/backoff + explicit 429/quota handling
+- [x] Title matching algorithm
+- [x] Raw data storage to filesystem
+- [x] Text cleaning pipeline
+- [x] VADER sentiment integration
+- [x] Metrics calculation engine
+- [x] Attention Index calculation
+- [x] Hype Acceleration calculation
+- [x] Metrics snapshots persistence (metrics_snapshots)
+- [x] Idempotent ingestion: stable mention identity + upsert/dedup + required DB indexes/constraints
+- [x] Backfill/recompute command: recompute metrics snapshots for a date range
 
 ---
 

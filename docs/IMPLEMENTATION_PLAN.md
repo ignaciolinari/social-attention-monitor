@@ -15,30 +15,30 @@ graph TB
         Y[YouTube API]
         T[TMDB API]
     end
-    
+
     subgraph Ingestion
         S[Scheduler - APScheduler]
         C[Collectors]
     end
-    
+
     subgraph Processing
         N[NLP Pipeline]
         M[Metrics Calculator]
     end
-    
+
     subgraph Storage
         PG[(PostgreSQL)]
         CACHE[(Redis Cache)]
     end
-    
+
     subgraph Serving
         API[FastAPI]
     end
-    
+
     subgraph Presentation
         D[Dashboard - Streamlit]
     end
-    
+
     R --> S
     Y --> S
     T --> S
