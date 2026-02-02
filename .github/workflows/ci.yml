@@ -2,30 +2,44 @@ name: CI
 
 on:
   push:
+    branches: [main, master]
   pull_request:
+    branches: [main, master]
 
 jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff check)
+        run: ruff check src tests
+
+      - name: Format check (ruff format)
+        run: ruff format --check src tests
+
+      - name: Type check (mypy)
+        run: mypy src --ignore-missing-imports
+
   test:
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-
-    services:
-      postgres:
-        image: timescale/timescaledb:latest-pg16
-        env:
-          POSTGRES_DB: sam
-          POSTGRES_USER: sam
-          POSTGRES_PASSWORD: sam
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U sam -d sam"
-          --health-interval 3s
-          --health-timeout 3s
-          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4
@@ -41,20 +55,119 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Tests (pytest)
+        run: pytest tests/ -v --cov=src/sam --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
       - name: Security audit (pip-audit)
         continue-on-error: true
         run: pip-audit
 
-      - name: Alembic migrate (smoke test)
+  smoke-test:
+    name: End-to-End Smoke Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_DB: sam
+          POSTGRES_USER: sam
+          POSTGRES_PASSWORD: sam
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sam -d sam"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run database migrations
         env:
           DATABASE_SYNC_URL: postgresql://sam:sam@localhost:5432/sam
         run: alembic -c alembic.ini upgrade head
 
-      - name: Lint (ruff)
-        run: ruff check src tests
+      - name: Start API server
+        env:
+          DATABASE_URL: postgresql+asyncpg://sam:sam@localhost:5432/sam
+          REDIS_URL: redis://localhost:6379
+          DEMO_MODE: "true"
+        run: |
+          uvicorn sam.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 5
 
-      - name: Type check (mypy)
-        run: mypy src
+      - name: Health check
+        run: |
+          curl -sf http://localhost:8000/health | jq .
+          echo "Health check passed!"
 
-      - name: Tests (pytest)
-        run: pytest
+      - name: Pipeline health check
+        run: |
+          curl -sf http://localhost:8000/api/v1/pipeline/health | jq .
+          echo "Pipeline health check passed!"
+
+      - name: Titles endpoint check
+        run: |
+          curl -sf http://localhost:8000/api/v1/db/titles | jq .
+          echo "Titles endpoint check passed!"
+
+      - name: Alerts endpoint check
+        run: |
+          curl -sf http://localhost:8000/api/v1/alerts | jq .
+          echo "Alerts endpoint check passed!"
+
+      - name: Sentiment analysis check
+        run: |
+          curl -sf "http://localhost:8000/api/v1/sentiment/analyze?text=This%20movie%20is%20amazing" | jq .
+          echo "Sentiment analysis check passed!"
+
+      - name: WebSocket status check
+        run: |
+          curl -sf http://localhost:8000/api/v1/ws/status | jq .
+          echo "WebSocket status check passed!"

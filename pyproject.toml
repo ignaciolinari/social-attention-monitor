@@ -136,6 +136,8 @@ module = [
     "prawcore",
     "prawcore.*",
     "vaderSentiment.*",
+    "nltk",
+    "nltk.*",
     "apscheduler.*",
     "pandas.*",
     "plotly.*",

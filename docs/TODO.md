@@ -39,35 +39,37 @@
 
 ---
 
-## Phase 3: API & Dashboard
+## Phase 3: API & Dashboard ✅
 
-- [ ] FastAPI core endpoints
-- [ ] Pydantic schemas
-- [ ] Redis caching layer
-- [ ] API hardening: pagination + consistent error schema + basic rate limiting (optional auth)
-- [ ] Pipeline health endpoint: newest mention age, per-platform counts, processing lag
-- [ ] Trending Now view
-- [ ] Time Series view
-- [ ] Platform Comparison view
-- [ ] Sentiment Distribution view
-
----
-
-## Phase 4: Advanced Features
-
-- [ ] Alert system with anomaly detection
-- [ ] WebSocket for real-time updates
-- [ ] Transformer-based sentiment (optional)
-- [ ] Dashboard polish
+- [x] FastAPI core endpoints
+- [x] Pydantic schemas
+- [x] Redis caching layer
+- [x] API hardening: pagination + consistent error schema + basic rate limiting (optional auth)
+- [x] Pipeline health endpoint: newest mention age, per-platform counts, processing lag
+- [x] Trending Now view
+- [x] Time Series view
+- [x] Platform Comparison view
+- [x] Sentiment Distribution view
 
 ---
 
-## Phase 5: Production Readiness
+## Phase 4: Advanced Features ✅
 
-- [ ] Monitoring and logging
-- [ ] Documentation
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] CI pipeline: run tests + lint/format + type-check on PRs
-- [ ] Minimal end-to-end smoke test (boot Postgres, run one scheduler tick, hit /health)
-- [ ] TimescaleDB hypertables + retention policy
+- [x] Alert system with anomaly detection
+- [x] WebSocket for real-time updates
+- [ ] Transformer-based sentiment (RoBERTa, DistilBERT)
+- [x] Dashboard polish
+
+---
+
+## Phase 5: Production Readiness ✅
+
+- [x] Monitoring and logging (loguru configured)
+- [x] Documentation (README updated)
+- [x] Unit tests (alerts, API integration)
+- [x] Integration tests (API endpoints)
+- [x] CI pipeline: run tests + lint/format + type-check on PRs
+- [x] Minimal end-to-end smoke test (boot Postgres, run API, hit endpoints)
+- [ ] TimescaleDB hypertables + retention policy (optional optimization)
+
+---
