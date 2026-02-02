@@ -4,6 +4,11 @@ FastAPI Application
 Main API server for Social Attention Monitor.
 """
 
+import asyncio
+import contextlib
+import json
+import time
+from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -12,7 +17,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,8 +27,18 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.status import HTTP_422_UNPROCESSABLE_CONTENT
+from starlette.websockets import WebSocketState
 
 from sam import __version__
+from sam.alerts import (
+    AlertManager,
+    acknowledge_alert,
+    count_alerts,
+    count_unacknowledged_alerts,
+    get_alert_counts_by_severity,
+    get_recent_alerts,
+    get_unacknowledged_count,
+)
 from sam.cache import cache_get_json, cache_set_json, close_redis, get_redis
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
@@ -37,6 +52,7 @@ from sam.storage.repository import (
     get_mentions_count,
     get_mentions_for_title,
     get_metrics_timeseries,
+    get_pipeline_health_stats,
     get_title_by_name,
     get_trending_by_attention_index,
     insert_mentions,
@@ -66,6 +82,28 @@ class HealthResponse(BaseModel):
     tmdb_reachable: bool | None = None
     database_ok: bool
     redis_ok: bool
+
+
+class PipelineRunInfo(BaseModel):
+    """Pipeline run information."""
+
+    job_name: str
+    status: str
+    started_at: str | None
+    finished_at: str | None
+    error: str | None
+
+
+class PipelineHealthResponse(BaseModel):
+    """Pipeline health statistics."""
+
+    timestamp: str
+    active_titles: int
+    total_mentions: int
+    mentions_last_24h: dict[str, int]
+    newest_mention_age_seconds: dict[str, float | None]
+    newest_mention_at: dict[str, str | None]
+    latest_pipeline_runs: list[PipelineRunInfo]
 
 
 class TitleResponse(BaseModel):
@@ -166,6 +204,210 @@ class MetricsTimeseriesResponse(BaseModel):
     since: str
     until: str
     points: list[MetricsSnapshotResponse]
+
+
+class AlertResponse(BaseModel):
+    """Alert response schema."""
+
+    id: str
+    title_id: str
+    alert_type: str
+    severity: str
+    message: str
+    details: dict[str, Any] | None
+    created_at: str
+    acknowledged_at: str | None
+
+
+class AlertsListResponse(BaseModel):
+    """List of alerts response."""
+
+    alerts: list[AlertResponse]
+    total_count: int
+    next_offset: int | None = None
+    unacknowledged_count_total: int
+    unacknowledged_count: int
+
+
+class AlertCountsResponse(BaseModel):
+    """Alert counts by severity."""
+
+    counts: dict[str, int]
+    total: int
+    unacknowledged: int
+    unacknowledged_in_window: int
+
+
+class AlertAckResponse(BaseModel):
+    """Alert acknowledgment response."""
+
+    acknowledged: bool
+    alert_id: str
+
+
+# ============================================================================
+# WebSocket Connection Manager
+# ============================================================================
+
+
+class ConnectionManager:
+    """
+    Manages WebSocket connections for real-time updates.
+
+    Supports:
+    - Multiple concurrent connections
+    - Topic-based subscriptions (alerts, metrics, all)
+    - Broadcast to all or filtered subscribers
+    - Periodic cleanup of dead connections
+    """
+
+    def __init__(self) -> None:
+        self.active_connections: dict[str, WebSocket] = {}
+        self.subscriptions: dict[str, set[str]] = defaultdict(set)  # topic -> connection_ids
+        self._lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    async def connect(self, websocket: WebSocket, connection_id: str) -> None:
+        """Accept a new WebSocket connection."""
+        await websocket.accept()
+        async with self._lock:
+            self.active_connections[connection_id] = websocket
+        logger.info(f"[ws] Client connected: {connection_id}")
+
+    async def disconnect(self, connection_id: str) -> None:
+        """Remove a disconnected client."""
+        async with self._lock:
+            self.active_connections.pop(connection_id, None)
+            for topic in list(self.subscriptions.keys()):
+                self.subscriptions[topic].discard(connection_id)
+        logger.info(f"[ws] Client disconnected: {connection_id}")
+
+    async def subscribe(self, connection_id: str, topic: str) -> None:
+        """Subscribe a connection to a topic."""
+        async with self._lock:
+            self.subscriptions[topic].add(connection_id)
+        logger.debug(f"[ws] {connection_id} subscribed to {topic}")
+
+    async def unsubscribe(self, connection_id: str, topic: str) -> None:
+        """Unsubscribe a connection from a topic."""
+        async with self._lock:
+            self.subscriptions[topic].discard(connection_id)
+
+    async def broadcast(self, message: dict[str, Any], topic: str = "all") -> int:
+        """
+        Broadcast a message to all subscribers of a topic.
+
+        Returns the number of successful sends.
+        """
+        sent = 0
+        to_send: list[tuple[str, WebSocket]] = []
+        async with self._lock:
+            subscribers = self.subscriptions.get(topic, set()) | self.subscriptions.get(
+                "all", set()
+            )
+            for conn_id in subscribers:
+                websocket = self.active_connections.get(conn_id)
+                if websocket is not None:
+                    to_send.append((conn_id, websocket))
+
+        dead: list[str] = []
+        for conn_id, websocket in to_send:
+            try:
+                await websocket.send_json(message)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"[ws] Failed to send to {conn_id}: {e}")
+                dead.append(conn_id)
+
+        if dead:
+            async with self._lock:
+                for conn_id in dead:
+                    self.active_connections.pop(conn_id, None)
+                    for t in self.subscriptions:
+                        self.subscriptions[t].discard(conn_id)
+        return sent
+
+    @property
+    def connection_count(self) -> int:
+        """Get current number of active connections."""
+        return len(self.active_connections)
+
+    async def snapshot_status(self) -> dict[str, Any]:
+        """Return a lock-safe snapshot of current connections/subscriptions."""
+        async with self._lock:
+            return {
+                "active_connections": len(self.active_connections),
+                "subscriptions": {
+                    topic: len(conn_ids) for topic, conn_ids in self.subscriptions.items()
+                },
+            }
+
+    async def start_cleanup_task(self, interval_seconds: int = 60) -> None:
+        """Start periodic cleanup of dead connections."""
+        if self._cleanup_task is not None:
+            return
+
+        async def _cleanup_loop() -> None:
+            while True:
+                await asyncio.sleep(interval_seconds)
+                await self._cleanup_dead_connections()
+
+        self._cleanup_task = asyncio.create_task(_cleanup_loop())
+        logger.info(f"[ws] Started cleanup task (interval={interval_seconds}s)")
+
+    async def stop_cleanup_task(self) -> None:
+        """Stop the periodic cleanup task."""
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._cleanup_task
+            self._cleanup_task = None
+            logger.info("[ws] Stopped cleanup task")
+
+    async def _cleanup_dead_connections(self) -> None:
+        """Remove connections that are no longer alive."""
+        dead_connections: list[str] = []
+
+        async with self._lock:
+            for conn_id, websocket in list(self.active_connections.items()):
+                try:
+                    # Check if connection is still open by inspecting state
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        dead_connections.append(conn_id)
+                except Exception:
+                    dead_connections.append(conn_id)
+
+            for conn_id in dead_connections:
+                self.active_connections.pop(conn_id, None)
+                for topic in self.subscriptions:
+                    self.subscriptions[topic].discard(conn_id)
+
+        if dead_connections:
+            logger.info(f"[ws] Cleaned up {len(dead_connections)} dead connections")
+
+
+# Global connection manager
+ws_manager = ConnectionManager()
+
+
+async def broadcast_alert(alert: dict[str, Any]) -> None:
+    """Broadcast a new alert to WebSocket subscribers."""
+    await ws_manager.broadcast(
+        {"type": "alert", "data": alert, "timestamp": datetime.now(UTC).isoformat()},
+        topic="alerts",
+    )
+
+
+async def broadcast_metrics_update(title_id: str, metrics: dict[str, Any]) -> None:
+    """Broadcast a metrics update to WebSocket subscribers."""
+    await ws_manager.broadcast(
+        {
+            "type": "metrics_update",
+            "data": {"title_id": title_id, "metrics": metrics},
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+        topic="metrics",
+    )
 
 
 @dataclass
@@ -354,10 +596,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _youtube_collector = YouTubeCollector()
     _tmdb_collector = TMDBCollector()
 
+    # Start WebSocket cleanup task
+    await ws_manager.start_cleanup_task(settings.ws_cleanup_interval_seconds)
+
     yield
 
     # Cleanup
     logger.info("[api] Shutting down...")
+    await ws_manager.stop_cleanup_task()
+    if _reddit_collector:
+        await _reddit_collector.close()
     if _youtube_collector:
         await _youtube_collector.close()
     if _tmdb_collector:
@@ -411,6 +659,49 @@ async def request_validation_error_handler(
     )
 
 
+# Rate limiter (simple in-memory sliding window)
+class RateLimiter:
+    """
+    Simple in-memory rate limiter using sliding window.
+
+    Thread-safe for async usage (single-threaded event loop).
+    For production with multiple workers, use Redis-based limiting.
+    """
+
+    def __init__(self, requests_per_minute: int = 60, window_seconds: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.window_seconds = window_seconds
+        self._requests: dict[str, list[float]] = defaultdict(list)
+
+    def _cleanup_old(self, key: str, now: float) -> None:
+        cutoff = now - self.window_seconds
+        self._requests[key] = [ts for ts in self._requests[key] if ts > cutoff]
+
+    def is_allowed(self, key: str) -> tuple[bool, int]:
+        """Check if request is allowed. Returns (allowed, remaining)."""
+        now = time.time()
+        self._cleanup_old(key, now)
+
+        count = len(self._requests[key])
+        remaining = max(0, self.requests_per_minute - count)
+
+        if count >= self.requests_per_minute:
+            return False, remaining
+
+        self._requests[key].append(now)
+        return True, remaining - 1
+
+    def get_retry_after(self, key: str) -> int:
+        """Get seconds until oldest request expires."""
+        if not self._requests.get(key):
+            return 0
+        oldest = min(self._requests[key])
+        return max(1, int(self.window_seconds - (time.time() - oldest)))
+
+
+_rate_limiter = RateLimiter(requests_per_minute=120)  # 2 req/sec average
+
+
 # CORS middleware
 settings = get_settings()
 cors_origins = settings.cors_allow_origins_list
@@ -425,6 +716,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next: Any) -> Any:
+    """Apply rate limiting to API endpoints (skip health checks)."""
+    # Skip rate limiting for health endpoints
+    if request.url.path in ("/health", "/api/v1/pipeline/health"):
+        return await call_next(request)
+
+    # Use IP as key (or X-Forwarded-For if behind proxy)
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not client_ip:
+        client_ip = request.client.host if request.client else "unknown"
+
+    allowed, remaining = _rate_limiter.is_allowed(client_ip)
+
+    if not allowed:
+        retry_after = _rate_limiter.get_retry_after(client_ip)
+        return JSONResponse(
+            status_code=429,
+            content=ErrorResponse(
+                error="rate_limit_exceeded",
+                detail=f"Too many requests. Retry after {retry_after} seconds.",
+            ).model_dump(),
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(_rate_limiter.requests_per_minute),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(_rate_limiter.requests_per_minute)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -507,6 +833,40 @@ async def health_check(
     )
 
 
+@app.get("/api/v1/pipeline/health", response_model=PipelineHealthResponse)
+async def pipeline_health() -> PipelineHealthResponse:
+    """
+    Pipeline health endpoint.
+
+    Returns:
+    - newest mention age (per platform)
+    - per-platform mention counts (last 24h)
+    - latest pipeline run status
+    - processing lag indicators
+    """
+    cache_key = "sam:pipeline:health"
+    cached = await cache_get_json(cache_key)
+    if isinstance(cached, dict) and "timestamp" in cached:
+        return PipelineHealthResponse(**cached)
+
+    async with get_session() as session:
+        stats = await get_pipeline_health_stats(session)
+
+    payload = PipelineHealthResponse(
+        timestamp=stats["timestamp"],
+        active_titles=stats["active_titles"],
+        total_mentions=stats["total_mentions"],
+        mentions_last_24h=stats["mentions_last_24h"],
+        newest_mention_age_seconds=stats["newest_mention_age_seconds"],
+        newest_mention_at=stats["newest_mention_at"],
+        latest_pipeline_runs=[PipelineRunInfo(**run) for run in stats["latest_pipeline_runs"]],
+    )
+    await cache_set_json(
+        cache_key, payload.model_dump(), ttl_seconds=settings.cache_ttl_pipeline_health
+    )
+    return payload
+
+
 @app.get("/api/v1/trending", response_model=TrendingResponse)
 async def get_trending(
     media_type: str = Query("all", description="Filter by media type: all, movie, tv"),
@@ -541,7 +901,7 @@ async def get_trending(
         ],
         collected_at=datetime.now(UTC).isoformat(),
     )
-    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=300)
+    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=settings.cache_ttl_trending)
     return payload
 
 
@@ -581,7 +941,7 @@ async def search_titles(
         ],
         collected_at=datetime.now(UTC).isoformat(),
     )
-    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=300)
+    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=settings.cache_ttl_search)
     return payload
 
 
@@ -815,7 +1175,7 @@ async def metrics_trending(
             for t, m in rows
         ],
     )
-    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=60)
+    await cache_set_json(cache_key, payload.model_dump(), ttl_seconds=settings.cache_ttl_metrics)
     return payload
 
 
@@ -877,3 +1237,247 @@ async def metrics_timeseries(
             for p in points
         ],
     )
+
+
+# ============================================================================
+# Alerts API
+# ============================================================================
+
+
+@app.get("/api/v1/alerts", response_model=AlertsListResponse)
+async def list_alerts(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    title_id: UUID | None = Query(None, description="Filter by title"),
+    severity: str | None = Query(None, description="Filter by severity: info, warning, critical"),
+    hours: int = Query(24, ge=1, le=24 * 30, description="Look back period in hours"),
+) -> AlertsListResponse:
+    """Get recent alerts with optional filtering."""
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    async with get_session() as session:
+        total_matching = await count_alerts(
+            session,
+            title_id=title_id,
+            severity=severity,
+            since=since,
+        )
+        unack_total = await get_unacknowledged_count(session)
+        unack_filtered = await count_unacknowledged_alerts(
+            session,
+            title_id=title_id,
+            severity=severity,
+            since=since,
+        )
+        alerts = await get_recent_alerts(
+            session,
+            limit=limit,
+            offset=offset,
+            title_id=title_id,
+            severity=severity,
+            since=since,
+        )
+
+    has_more = (offset + len(alerts)) < total_matching
+
+    return AlertsListResponse(
+        alerts=[
+            AlertResponse(
+                id=str(a.id),
+                title_id=str(a.title_id),
+                alert_type=a.alert_type,
+                severity=a.severity,
+                message=a.message,
+                details=a.details,
+                created_at=a.created_at.isoformat(),
+                acknowledged_at=a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+            )
+            for a in alerts
+        ],
+        total_count=total_matching,
+        next_offset=offset + limit if has_more else None,
+        unacknowledged_count_total=unack_total,
+        unacknowledged_count=unack_filtered,
+    )
+
+
+@app.get("/api/v1/alerts/counts", response_model=AlertCountsResponse)
+async def alert_counts(
+    hours: int = Query(24, ge=1, le=24 * 30, description="Look back period in hours"),
+) -> AlertCountsResponse:
+    """Get alert counts by severity."""
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    async with get_session() as session:
+        counts = await get_alert_counts_by_severity(session, since=since)
+        unack_count = await get_unacknowledged_count(session)
+        unack_in_window = await count_unacknowledged_alerts(session, since=since)
+
+    return AlertCountsResponse(
+        counts=counts,
+        total=sum(counts.values()),
+        unacknowledged=unack_count,
+        unacknowledged_in_window=unack_in_window,
+    )
+
+
+@app.post("/api/v1/alerts/{alert_id}/acknowledge", response_model=AlertAckResponse)
+async def ack_alert(alert_id: UUID) -> AlertAckResponse:
+    """Acknowledge an alert."""
+    async with get_session() as session:
+        success = await acknowledge_alert(session, alert_id=alert_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+    return AlertAckResponse(acknowledged=True, alert_id=str(alert_id))
+
+
+@app.post("/api/v1/alerts/run-detection")
+async def run_alert_detection(
+    window_hours: int = Query(1, ge=1, le=24),
+    history_points: int = Query(24, ge=5, le=168),
+) -> dict[str, Any]:
+    """
+    Manually trigger anomaly detection cycle.
+
+    This is primarily for testing/debugging. In production,
+    detection runs automatically via the scheduler.
+    """
+    manager = AlertManager()
+
+    async with get_session() as session:
+        detected, created_alerts = await manager.run_detection_cycle(
+            session, window_hours=window_hours, history_points=history_points
+        )
+
+    # Broadcast after commit (session context exited)
+    for alert in created_alerts:
+        await broadcast_alert(alert)
+
+    return {
+        "anomalies_detected": detected,
+        "alerts_created": len(created_alerts),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+# ============================================================================
+# WebSocket Endpoints
+# ============================================================================
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint for real-time updates.
+
+    Clients can subscribe to topics:
+    - "alerts": Receive new alert notifications
+    - "metrics": Receive metrics updates
+    - "all": Receive all updates
+
+    Send JSON messages to subscribe/unsubscribe:
+    {"action": "subscribe", "topic": "alerts"}
+    {"action": "unsubscribe", "topic": "alerts"}
+    {"action": "ping"}
+    """
+    import uuid as uuid_mod
+
+    connection_id = str(uuid_mod.uuid4())[:8]
+
+    await ws_manager.connect(websocket, connection_id)
+
+    # Auto-subscribe to "all" by default
+    await ws_manager.subscribe(connection_id, "all")
+
+    # Send welcome message
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "connection_id": connection_id,
+            "subscribed": ["all"],
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
+
+    try:
+        while True:
+            try:
+                data = await websocket.receive_json()
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                continue
+
+            action = data.get("action")
+
+            if action == "ping":
+                await websocket.send_json(
+                    {"type": "pong", "timestamp": datetime.now(UTC).isoformat()}
+                )
+
+            elif action == "subscribe":
+                topic = data.get("topic", "all")
+                if topic in ("alerts", "metrics", "all"):
+                    await ws_manager.subscribe(connection_id, topic)
+                    await websocket.send_json(
+                        {
+                            "type": "subscribed",
+                            "topic": topic,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                    )
+                else:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": f"Unknown topic: {topic}. Valid: alerts, metrics, all",
+                        }
+                    )
+
+            elif action == "unsubscribe":
+                topic = data.get("topic")
+                if topic:
+                    await ws_manager.unsubscribe(connection_id, topic)
+                    await websocket.send_json(
+                        {
+                            "type": "unsubscribed",
+                            "topic": topic,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                    )
+
+            elif action == "status":
+                status = await ws_manager.snapshot_status()
+                await websocket.send_json(
+                    {
+                        "type": "status",
+                        "connections": status["active_connections"],
+                        "subscriptions": status["subscriptions"],
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                )
+
+            else:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"Unknown action: {action}. Valid: subscribe, unsubscribe, ping, status",
+                    }
+                )
+
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(connection_id)
+    except Exception as e:
+        logger.warning(f"[ws] Connection {connection_id} error: {e}")
+        await ws_manager.disconnect(connection_id)
+
+
+@app.get("/api/v1/ws/status")
+async def websocket_status() -> dict[str, Any]:
+    """Get WebSocket connection status."""
+    status = await ws_manager.snapshot_status()
+    return {
+        "active_connections": status["active_connections"],
+        "subscriptions": status["subscriptions"],
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
