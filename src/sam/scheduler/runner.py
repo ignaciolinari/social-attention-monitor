@@ -25,6 +25,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sam.alerts import AlertManager
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
@@ -213,12 +214,30 @@ async def _collection_job(
                 limit_youtube=limit_youtube,
                 run_id=run.id,
             )
+            alert_stats = {"alerts_detected": 0, "alerts_created": 0}
+            try:
+                manager = AlertManager()
+                detected, created_alerts = await manager.run_detection_cycle(
+                    session, window_hours=1, history_points=24
+                )
+                alert_stats["alerts_detected"] = detected
+                alert_stats["alerts_created"] = len(created_alerts)
+                if created_alerts:
+                    logger.info(f"[alerts] Created {len(created_alerts)} alerts")
+            except Exception as e:
+                logger.warning(f"[alerts] Detection cycle failed: {e}")
+
             elapsed = (datetime.now(UTC) - started).total_seconds()
             await finish_pipeline_run(
                 session,
                 run_id=run.id,
                 status="success",
-                stats={**(run.stats or {}), **stats, "elapsed_seconds": int(elapsed)},
+                stats={
+                    **(run.stats or {}),
+                    **stats,
+                    **alert_stats,
+                    "elapsed_seconds": int(elapsed),
+                },
             )
         except Exception as e:
             logger.exception(f"[runner] collection cycle failed: {e}")

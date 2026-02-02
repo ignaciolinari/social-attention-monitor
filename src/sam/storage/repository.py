@@ -440,3 +440,92 @@ async def finish_pipeline_run(
     run.error = error
     if stats is not None:
         run.stats = {**(run.stats or {}), **stats}
+
+
+async def get_pipeline_health_stats(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    """
+    Get pipeline health statistics:
+    - newest mention age (per platform)
+    - per-platform counts (last 24h)
+    - latest pipeline run status
+    - processing lag
+    """
+    now = datetime.now(UTC)
+    cutoff_24h = now - timedelta(hours=24)
+
+    # Get newest mention per platform
+    newest_mention_stmt = select(
+        Mention.platform, func.max(Mention.collected_at).label("latest")
+    ).group_by(Mention.platform)
+    result = await session.execute(newest_mention_stmt)
+    newest_by_platform: dict[str, datetime | None] = {}
+    for row in result.all():
+        newest_by_platform[row.platform] = row.latest
+
+    # Get mention counts per platform (last 24h)
+    counts_stmt = (
+        select(Mention.platform, func.count().label("cnt"))
+        .where(Mention.collected_at >= cutoff_24h)
+        .group_by(Mention.platform)
+    )
+    result = await session.execute(counts_stmt)
+    counts_by_platform: dict[str, int] = {}
+    for row in result.all():
+        counts_by_platform[row.platform] = row.cnt
+
+    # Total mention count
+    total_stmt = select(func.count()).select_from(Mention)
+    result = await session.execute(total_stmt)
+    total_mentions = result.scalar_one()
+
+    # Latest pipeline runs (by job_name)
+    latest_runs_stmt = (
+        select(
+            PipelineRun.job_name,
+            PipelineRun.status,
+            PipelineRun.started_at,
+            PipelineRun.finished_at,
+            PipelineRun.error,
+        )
+        .distinct(PipelineRun.job_name)
+        .order_by(PipelineRun.job_name, PipelineRun.started_at.desc())
+    )
+    result = await session.execute(latest_runs_stmt)
+    latest_runs: list[dict[str, Any]] = []
+    for row in result.all():
+        latest_runs.append(
+            {
+                "job_name": row.job_name,
+                "status": row.status,
+                "started_at": row.started_at.isoformat() if row.started_at else None,
+                "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                "error": row.error,
+            }
+        )
+
+    # Active titles count
+    active_titles_stmt = select(func.count()).where(Title.is_active.is_(True))
+    result = await session.execute(active_titles_stmt)
+    active_titles = result.scalar_one()
+
+    # Compute newest mention age per platform
+    newest_age_seconds: dict[str, float | None] = {}
+    for platform, ts in newest_by_platform.items():
+        if ts:
+            newest_age_seconds[platform] = (now - ts).total_seconds()
+        else:
+            newest_age_seconds[platform] = None
+
+    return {
+        "timestamp": now.isoformat(),
+        "active_titles": active_titles,
+        "total_mentions": total_mentions,
+        "mentions_last_24h": counts_by_platform,
+        "newest_mention_age_seconds": newest_age_seconds,
+        "newest_mention_at": {
+            p: ts.isoformat() if ts else None for p, ts in newest_by_platform.items()
+        },
+        "latest_pipeline_runs": latest_runs,
+    }

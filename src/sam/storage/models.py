@@ -116,7 +116,7 @@ class Mention(Base):
         DateTime(timezone=True), nullable=False, index=True
     )
     collected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
     )
 
     # Platform-specific metrics (stored as JSONB for flexibility)

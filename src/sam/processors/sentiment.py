@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import nltk
 from loguru import logger
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -190,10 +191,21 @@ class SentimentAnalyzer:
         return results
 
     def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences."""
-        # Simple sentence splitting
-        sentences = re.split(r"[.!?]+", text)
-        return [s.strip() for s in sentences if s.strip()]
+        """
+        Split text into sentences.
+
+        Prefer NLTK when its tokenizer data is available; otherwise fall back to
+        a lightweight regex splitter. We intentionally avoid downloading NLTK
+        data at runtime (can fail in CI/production).
+        """
+        try:
+            sentences = nltk.sent_tokenize(text)
+            # NLTK is not typed (returns Any); ensure we always return list[str].
+            return [str(s) for s in sentences]
+        except LookupError:
+            # Simple sentence splitting fallback.
+            sentences = re.split(r"[.!?]+", text)
+            return [s.strip() for s in sentences if s.strip()]
 
 
 # Convenience functions

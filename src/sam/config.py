@@ -181,6 +181,35 @@ class Settings(BaseSettings):
         description="Minutes after which mentions data is considered stale",
     )
 
+    # Cache TTLs (seconds)
+    cache_ttl_trending: int = Field(
+        default=300,
+        validation_alias=AliasChoices("SAM_CACHE_TTL_TRENDING"),
+        description="Cache TTL for trending endpoints (seconds)",
+    )
+    cache_ttl_search: int = Field(
+        default=300,
+        validation_alias=AliasChoices("SAM_CACHE_TTL_SEARCH"),
+        description="Cache TTL for search endpoints (seconds)",
+    )
+    cache_ttl_metrics: int = Field(
+        default=60,
+        validation_alias=AliasChoices("SAM_CACHE_TTL_METRICS"),
+        description="Cache TTL for metrics endpoints (seconds)",
+    )
+    cache_ttl_pipeline_health: int = Field(
+        default=30,
+        validation_alias=AliasChoices("SAM_CACHE_TTL_PIPELINE_HEALTH"),
+        description="Cache TTL for pipeline health endpoint (seconds)",
+    )
+
+    # WebSocket settings
+    ws_cleanup_interval_seconds: int = Field(
+        default=60,
+        validation_alias=AliasChoices("SAM_WS_CLEANUP_INTERVAL"),
+        description="Interval for WebSocket dead connection cleanup (seconds)",
+    )
+
     # Nested settings
     reddit: RedditSettings = Field(default_factory=RedditSettings)
     youtube: YouTubeSettings = Field(default_factory=YouTubeSettings)

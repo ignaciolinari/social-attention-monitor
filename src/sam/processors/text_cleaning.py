@@ -10,7 +10,7 @@ import html
 import re
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-_MD_LINK_RE = re.compile(r"\[(?P<text>[^\]]+)\]\((?P<url>[^\)]+)\)")
+_MD_LINK_RE = re.compile(r"\[(?P<text>[^\]]+?)\]\((?P<url>[^\)]+?)\)")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _REDDIT_QUOTE_RE = re.compile(r"(?m)^\s*(?:&gt;|>).*?$")
 _SUBREDDIT_RE = re.compile(r"/r/\w+", re.IGNORECASE)

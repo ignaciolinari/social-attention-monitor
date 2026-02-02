@@ -70,7 +70,13 @@ def main() -> None:
         st.header("🎯 Navigation")
         page = st.radio(
             "Select View",
-            ["🔥 Trending Now", "📈 Time Series", "🔄 Platform Comparison", "💬 Sentiment"],
+            [
+                "🔥 Trending Now",
+                "📈 Time Series",
+                "🔄 Platform Comparison",
+                "💬 Sentiment",
+                "🚨 Alerts",
+            ],
             label_visibility="collapsed",
         )
 
@@ -90,6 +96,15 @@ def main() -> None:
             )
         except Exception as e:
             st.error(f"API unreachable: {e}")
+
+        # Show alert badge
+        try:
+            alert_counts = _get_json("/api/v1/alerts/counts", params={"hours": 24})
+            unack = alert_counts.get("unacknowledged", 0)
+            if unack > 0:
+                st.warning(f"🚨 {unack} unacknowledged alerts")
+        except Exception:
+            pass
 
         st.divider()
         if st.button("Refresh data"):
@@ -256,6 +271,122 @@ def main() -> None:
 
         fig2 = px.line(df, x="snapshot_time", y="positive_ratio", markers=True)
         st.plotly_chart(fig2, use_container_width=True)
+
+    elif page == "🚨 Alerts":
+        st.header("🚨 Alerts & Anomalies")
+        st.markdown("*Real-time anomaly detection for tracked titles*")
+
+        # Alert summary cards
+        try:
+            counts_data = _get_json("/api/v1/alerts/counts", params={"hours": hours})
+            counts = counts_data.get("counts", {})
+            total = counts_data.get("total", 0)
+            unack = counts_data.get("unacknowledged", 0)
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Total Alerts", total)
+            with c2:
+                st.metric("🔴 Critical", counts.get("critical", 0))
+            with c3:
+                st.metric("🟡 Warning", counts.get("warning", 0))
+            with c4:
+                st.metric("🟢 Info", counts.get("info", 0))
+
+            if unack > 0:
+                st.warning(f"⚠️ {unack} unacknowledged alert(s) require attention")
+
+        except Exception as e:
+            st.error(f"Failed to load alert counts: {e}")
+
+        st.divider()
+
+        # Recent alerts list
+        st.subheader("Recent Alerts")
+
+        severity_filter = st.selectbox("Filter by severity", ["All", "critical", "warning", "info"])
+
+        try:
+            params: dict[str, Any] = {"hours": hours, "limit": 50}
+            if severity_filter != "All":
+                params["severity"] = severity_filter
+
+            alerts_data = _get_json("/api/v1/alerts", params=params)
+            alerts = alerts_data.get("alerts", [])
+
+            if not alerts:
+                st.info("No alerts in the selected time range. 🎉")
+            else:
+                for alert in alerts:
+                    severity = alert.get("severity", "info")
+                    icon = {"critical": "🔴", "warning": "🟡", "info": "🟢"}.get(severity, "⚪")
+                    ack_status = "✅" if alert.get("acknowledged_at") else "⏳"
+
+                    with st.expander(
+                        f"{icon} {ack_status} {alert.get('message', 'Unknown alert')[:80]}",
+                        expanded=severity == "critical" and not alert.get("acknowledged_at"),
+                    ):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**Type:** `{alert.get('alert_type')}`")
+                            st.markdown(f"**Severity:** {severity}")
+                            st.markdown(f"**Created:** {alert.get('created_at')}")
+                            if alert.get("acknowledged_at"):
+                                st.markdown(f"**Acknowledged:** {alert.get('acknowledged_at')}")
+
+                        with col2:
+                            details = alert.get("details", {})
+                            if details:
+                                st.json(details)
+
+        except Exception as e:
+            st.error(f"Failed to load alerts: {e}")
+
+        st.divider()
+
+        # Pipeline health
+        st.subheader("🔧 Pipeline Health")
+        try:
+            pipeline = _get_json("/api/v1/pipeline/health")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Active Titles", pipeline.get("active_titles", 0))
+            with c2:
+                st.metric("Total Mentions", pipeline.get("total_mentions", 0))
+            with c3:
+                mentions_24h = pipeline.get("mentions_last_24h", {})
+                total_24h = sum(mentions_24h.values())
+                st.metric("Mentions (24h)", total_24h)
+
+            # Newest mention ages
+            ages = pipeline.get("newest_mention_age_seconds", {})
+            if ages:
+                st.markdown("**Data Freshness:**")
+                for platform, age_sec in ages.items():
+                    if age_sec is not None:
+                        if age_sec < 60:
+                            age_str = f"{int(age_sec)}s ago"
+                        elif age_sec < 3600:
+                            age_str = f"{int(age_sec / 60)}m ago"
+                        else:
+                            age_str = f"{age_sec / 3600:.1f}h ago"
+                        st.caption(f"  • {platform}: {age_str}")
+                    else:
+                        st.caption(f"  • {platform}: No data")
+
+            # Latest pipeline runs
+            runs = pipeline.get("latest_pipeline_runs", [])
+            if runs:
+                st.markdown("**Latest Pipeline Runs:**")
+                for run in runs[:5]:
+                    status_icon = {"success": "✅", "failed": "❌", "running": "🔄"}.get(
+                        run.get("status"), "⚪"
+                    )
+                    st.caption(f"  • {run.get('job_name')}: {status_icon} {run.get('status')}")
+
+        except Exception as e:
+            st.error(f"Failed to load pipeline health: {e}")
 
     # Footer
     st.divider()

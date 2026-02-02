@@ -46,6 +46,11 @@ class RedditCollector(BaseCollector):
     def is_configured(self) -> bool:
         return self._settings.is_configured
 
+    async def close(self) -> None:
+        """Close the Reddit client (PRAW is sync, so this is a no-op for cleanup symmetry)."""
+        # PRAW doesn't require explicit cleanup, but we provide this for interface consistency
+        self._client = None
+
     def _setup_client(self) -> None:
         """Initialize PRAW client."""
         try:
@@ -126,32 +131,53 @@ class RedditCollector(BaseCollector):
         time_filter: str,
         max_attempts: int = 3,
     ) -> CollectionResult:
-        """Run sync PRAW collection with explicit retry/backoff on 429s."""
+        """
+        Run sync PRAW collection with explicit retry/backoff on 429s.
+
+        Note: PRAW clients are not thread-safe, so we collect subreddits sequentially
+        (still offloading each sync call to a thread).
+        """
         attempt = 0
         while True:
             attempt += 1
             try:
-                # PRAW is synchronous; run collection in a thread to preserve async API.
-                return await asyncio.to_thread(
-                    self._collect_sync,
-                    query,
-                    limit,
-                    target_subreddits,
-                    time_filter,
+                all_posts: list[CollectedPost] = []
+                for subreddit in target_subreddits:
+                    posts = await asyncio.to_thread(
+                        self._collect_subreddit_sync,
+                        subreddit,
+                        query,
+                        limit,
+                        time_filter,
+                    )
+                    all_posts.extend(posts)
+
+                return CollectionResult(
+                    platform=self.platform_name,
+                    posts=all_posts,
+                    collected_at=datetime.now(UTC),
+                    success=True,
+                    rate_limit_remaining=self._get_rate_limit(),
                 )
-            except RedditRateLimitError as e:
+
+            except (RedditRateLimitError, prawcore.exceptions.TooManyRequests) as e:
+                # Unwrap if it's a PRAW error that got through
+                error_obj = e
+                if isinstance(e, prawcore.exceptions.TooManyRequests):
+                    error_obj = RedditRateLimitError.from_praw(e)
+
                 if attempt >= max_attempts:
                     return CollectionResult(
                         platform=self.platform_name,
                         posts=[],
                         collected_at=datetime.now(UTC),
                         success=False,
-                        error=f"rate limited by Reddit API; retry_after={e.retry_after_seconds}s",
+                        error=f"rate limited by Reddit API; retry_after={error_obj.retry_after_seconds}s",
                     )
 
                 # Respect Retry-After when available; otherwise exponential backoff with jitter.
-                if e.retry_after_seconds is not None:
-                    sleep_s = max(1.0, float(e.retry_after_seconds))
+                if error_obj.retry_after_seconds is not None:
+                    sleep_s = max(1.0, float(error_obj.retry_after_seconds))
                 else:
                     sleep_s = min(60.0, (2 ** (attempt - 1)) * 2.0) + random.uniform(0.0, 1.0)
 
@@ -159,7 +185,10 @@ class RedditCollector(BaseCollector):
                     f"[reddit] Rate limited (attempt {attempt}/{max_attempts}); sleeping {sleep_s:.1f}s"
                 )
                 await asyncio.sleep(sleep_s)
+
             except Exception as e:
+                # Capture other errors (e.g. auth failure)
+                logger.error(f"[reddit] Collection failed: {e}")
                 return CollectionResult(
                     platform=self.platform_name,
                     posts=[],
@@ -168,64 +197,45 @@ class RedditCollector(BaseCollector):
                     error=str(e),
                 )
 
-    def _collect_sync(
+    def _collect_subreddit_sync(
         self,
+        subreddit_name: str,
         query: str | None,
         limit: int,
-        target_subreddits: list[str],
         time_filter: str,
-    ) -> CollectionResult:
+    ) -> list[CollectedPost]:
+        """Collect from a single subreddit (sync)."""
         collected_posts: list[CollectedPost] = []
-        successes = 0
-        errors = 0
-        for subreddit_name in target_subreddits:
-            try:
-                subreddit = self._client.subreddit(subreddit_name)
+        try:
+            subreddit = self._client.subreddit(subreddit_name)
 
-                if query:
-                    submissions = subreddit.search(
-                        query=query,
-                        sort="new",
-                        time_filter=time_filter,
-                        limit=limit,
-                    )
-                else:
-                    submissions = subreddit.hot(limit=limit)
-
-                for submission in submissions:
-                    if query and query.lower() not in submission.title.lower():
-                        continue
-
-                    post = self._parse_submission(submission, subreddit_name)
-                    collected_posts.append(post)
-
-                logger.debug(
-                    f"[reddit] Collected from r/{subreddit_name}: "
-                    f"{len([p for p in collected_posts if p.metrics.get('subreddit') == subreddit_name])} posts"
+            if query:
+                submissions = subreddit.search(
+                    query=query,
+                    sort="new",
+                    time_filter=time_filter,
+                    limit=limit,
                 )
-                successes += 1
-            except prawcore.exceptions.TooManyRequests as e:
-                raise RedditRateLimitError.from_praw(e) from e
-            except Exception as e:
-                errors += 1
-                logger.warning(f"[reddit] Error collecting from r/{subreddit_name}: {e}")
+            else:
+                submissions = subreddit.hot(limit=limit)
 
-        if successes == 0 and errors > 0:
-            return CollectionResult(
-                platform=self.platform_name,
-                posts=[],
-                collected_at=datetime.now(UTC),
-                success=False,
-                error="failed to collect from all target subreddits",
-            )
+            for submission in submissions:
+                if query and query.lower() not in submission.title.lower():
+                    continue
 
-        return CollectionResult(
-            platform=self.platform_name,
-            posts=collected_posts,
-            collected_at=datetime.now(UTC),
-            success=True,
-            rate_limit_remaining=self._get_rate_limit(),
-        )
+                post = self._parse_submission(submission, subreddit_name)
+                collected_posts.append(post)
+
+            logger.debug(f"[reddit] Collected {len(collected_posts)} posts from r/{subreddit_name}")
+            return collected_posts
+
+        except prawcore.exceptions.TooManyRequests as e:
+            # Re-raise to be caught by the main retry loop
+            raise RedditRateLimitError.from_praw(e) from e
+        except Exception as e:
+            # Log individual subreddit failures but don't fail the whole batch
+            logger.warning(f"[reddit] Error collecting from r/{subreddit_name}: {e}")
+            return []
 
     def _parse_submission(self, submission: Any, subreddit: str) -> CollectedPost:
         """Parse a PRAW submission into a CollectedPost."""
