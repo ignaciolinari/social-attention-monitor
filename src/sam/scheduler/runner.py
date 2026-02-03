@@ -63,6 +63,11 @@ async def collect_once(
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
 
+    if not settings.demo_mode and not settings.tmdb.is_configured:
+        # TMDB is the source of truth for which titles to track. Without it, the pipeline
+        # will "succeed" with 0 titles and give confusing feedback.
+        raise RuntimeError("TMDB not configured. Set TMDB_API_KEY or TMDB_ACCESS_TOKEN in .env")
+
     tmdb = TMDBCollector()
     reddit = RedditCollector()
     youtube = YouTubeCollector()

@@ -231,9 +231,7 @@ class AnomalyDetector:
             return None
 
         # Compare to recent average
-        recent_sentiments = [
-            h.avg_sentiment for h in history[-5:] if h.avg_sentiment is not None
-        ]
+        recent_sentiments = [h.avg_sentiment for h in history[-5:] if h.avg_sentiment is not None]
         if len(recent_sentiments) < min(self.min_history_points, 5):
             return None
         recent_mean = float(np.mean(recent_sentiments))

@@ -36,6 +36,30 @@ class YouTubeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="YOUTUBE_")
 
     api_key: str = Field(default="", description="YouTube Data API v3 key")
+    search_order: str = Field(
+        default="relevance",
+        description="YouTube search order (relevance, date, rating, viewCount, title, videoCount)",
+    )
+    published_after_days: int = Field(
+        default=30,
+        description="Only fetch videos published in the last N days",
+    )
+
+    @field_validator("published_after_days")
+    @classmethod
+    def _validate_published_after_days(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("YOUTUBE_PUBLISHED_AFTER_DAYS must be > 0")
+        # Guardrails: huge windows are rarely useful for polling and can increase duplicates.
+        return min(int(v), 3650)
+
+    @field_validator("search_order")
+    @classmethod
+    def _validate_search_order(cls, v: str) -> str:
+        allowed = {"relevance", "date", "rating", "viewCount", "title", "videoCount"}
+        if v not in allowed:
+            raise ValueError(f"YOUTUBE_SEARCH_ORDER must be one of: {', '.join(sorted(allowed))}")
+        return v
 
     @property
     def is_configured(self) -> bool:

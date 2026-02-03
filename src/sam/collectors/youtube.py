@@ -134,7 +134,9 @@ class YouTubeCollector(BaseCollector):
             posts: list[CollectedPost] = []
             next_page: str | None = None
             published_after = (
-                (datetime.now(UTC) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+                (datetime.now(UTC) - timedelta(days=self._settings.published_after_days))
+                .isoformat()
+                .replace("+00:00", "Z")
             )
 
             while len(posts) < limit:
@@ -143,7 +145,7 @@ class YouTubeCollector(BaseCollector):
                     "q": search_query,
                     "type": "video",
                     "maxResults": min(50, limit - len(posts)),
-                    "order": "relevance",
+                    "order": self._settings.search_order,
                     "publishedAfter": published_after,
                 }
                 if next_page:

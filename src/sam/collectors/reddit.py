@@ -220,8 +220,15 @@ class RedditCollector(BaseCollector):
                 submissions = subreddit.hot(limit=limit)
 
             for submission in submissions:
-                if query and query.lower() not in submission.title.lower():
-                    continue
+                # Reddit search can return fuzzy-ish results. We keep a lightweight guard to
+                # filter obvious false positives, but ensure we don't drop legitimate matches
+                # where the query appears in the selftext/body instead of the title.
+                if query:
+                    q = query.lower()
+                    title = str(getattr(submission, "title", "") or "").lower()
+                    body = str(getattr(submission, "selftext", "") or "").lower()
+                    if q not in title and q not in body:
+                        continue
 
                 post = self._parse_submission(submission, subreddit_name)
                 collected_posts.append(post)
