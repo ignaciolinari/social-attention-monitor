@@ -7,7 +7,7 @@ Designed for PostgreSQL with TimescaleDB extension for time-series optimization.
 
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -32,14 +32,14 @@ class Base(DeclarativeBase):
     }
 
 
-class MediaType(str, Enum):
+class MediaType(StrEnum):
     """Type of media content."""
 
     MOVIE = "movie"
     TV = "tv"
 
 
-class Platform(str, Enum):
+class Platform(StrEnum):
     """Social media platform."""
 
     REDDIT = "reddit"

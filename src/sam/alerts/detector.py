@@ -10,14 +10,14 @@ Detects unusual patterns in engagement metrics:
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
 from loguru import logger
 
 
-class AlertType(str, Enum):
+class AlertType(StrEnum):
     """Types of anomalies that can be detected."""
 
     MENTION_SPIKE = "mention_spike"
@@ -27,7 +27,7 @@ class AlertType(str, Enum):
     ATTENTION_SPIKE = "attention_spike"
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Alert severity levels."""
 
     INFO = "info"

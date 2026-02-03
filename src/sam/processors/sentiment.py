@@ -7,7 +7,7 @@ Extensible to support transformer-based models.
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import nltk
@@ -17,7 +17,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sam.processors.text_cleaning import clean_text_for_sentiment
 
 
-class SentimentModel(str, Enum):
+class SentimentModel(StrEnum):
     """Available sentiment analysis models."""
 
     VADER = "vader"
