@@ -35,6 +35,7 @@ def _should_skip_youtube_error(error: str | None) -> bool:
         )
     )
 
+
 # Skip the entire module when keys are not configured.
 pytestmark = pytest.mark.skipif(
     not get_settings().tmdb.is_configured or not get_settings().youtube.is_configured,
@@ -170,10 +171,14 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
 
             # -- Verify YouTube mentions --
             yt_mentions = (
-                await session.execute(
-                    select(Mention).where(Mention.platform == "youtube").limit(20)
+                (
+                    await session.execute(
+                        select(Mention).where(Mention.platform == "youtube").limit(20)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
 
             if stats["youtube_mentions_inserted"] > 0:
                 assert len(yt_mentions) >= 1, "Stats say mentions inserted but DB is empty"
@@ -188,9 +193,7 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
                     if m.sentiment:
                         compound = m.sentiment.get("compound", None)
                         assert compound is not None, "sentiment should have 'compound'"
-                        assert -1.0 <= compound <= 1.0, (
-                            f"compound={compound} out of VADER range"
-                        )
+                        assert -1.0 <= compound <= 1.0, f"compound={compound} out of VADER range"
 
                     # YouTube metrics should include view_count
                     if m.metrics:
@@ -199,17 +202,11 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
                         )
 
             # -- Verify metrics snapshots --
-            snapshot_count = await session.scalar(
-                select(func.count()).select_from(MetricsSnapshot)
-            )
+            snapshot_count = await session.scalar(select(func.count()).select_from(MetricsSnapshot))
             assert snapshot_count >= 1, "No metrics snapshots after collect_once"
 
             # Check that at least one snapshot has real data
-            snapshots = (
-                await session.execute(
-                    select(MetricsSnapshot).limit(10)
-                )
-            ).scalars().all()
+            snapshots = (await session.execute(select(MetricsSnapshot).limit(10))).scalars().all()
 
             for snap in snapshots:
                 assert snap.window_hours in (1, 24)

@@ -172,7 +172,9 @@ class YouTubeDailyQuota:
 
     @property
     def budget_used_pct(self) -> float:
-        return round(self.total_units / YOUTUBE_DAILY_BUDGET * 100, 1) if YOUTUBE_DAILY_BUDGET else 0.0
+        return (
+            round(self.total_units / YOUTUBE_DAILY_BUDGET * 100, 1) if YOUTUBE_DAILY_BUDGET else 0.0
+        )
 
     @property
     def budget_remaining(self) -> int:
@@ -192,7 +194,7 @@ class YouTubeDailyQuota:
 
 
 async def aggregate_youtube_quota_from_db(
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> YouTubeDailyQuota:
     """Aggregate YouTube quota usage across all successful pipeline runs today (PT).
 
@@ -208,7 +210,6 @@ async def aggregate_youtube_quota_from_db(
     endpoint to avoid duplicating the aggregation logic.
     """
     from sqlalchemy import select
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from sam.storage.database import get_session
     from sam.storage.models import PipelineRun
@@ -306,8 +307,6 @@ async def seed_quota_from_db() -> None:
     if quota.total_units > 0:
         tracker = get_quota_tracker()
         tracker.seed("youtube", quota.total_units, quota.calls_by_endpoint)
-        logger.info(
-            f"[quota] Loaded {quota.total_units} YouTube units from DB today"
-        )
+        logger.info(f"[quota] Loaded {quota.total_units} YouTube units from DB today")
     else:
         logger.debug("[quota] No prior YouTube usage found for today")
