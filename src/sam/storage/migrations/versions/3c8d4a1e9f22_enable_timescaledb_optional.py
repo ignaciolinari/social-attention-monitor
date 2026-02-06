@@ -25,11 +25,36 @@ def upgrade() -> None:
     op.execute(
         """
         DO $$
+        DECLARE
+          libs text;
         BEGIN
-          CREATE EXTENSION IF NOT EXISTS timescaledb;
-        EXCEPTION
-          WHEN undefined_file OR feature_not_supported THEN
-            RAISE NOTICE 'timescaledb extension not available, skipping';
+          BEGIN
+            libs := current_setting('shared_preload_libraries', true);
+          EXCEPTION
+            WHEN insufficient_privilege THEN
+              RAISE NOTICE 'insufficient privilege to read shared_preload_libraries, skipping timescaledb';
+              RETURN;
+            WHEN others THEN
+              RAISE NOTICE 'could not read shared_preload_libraries: %, skipping', SQLERRM;
+              RETURN;
+          END;
+
+          -- Some environments require preloading TimescaleDB via shared_preload_libraries.
+          -- Attempting CREATE EXTENSION without preload can terminate the session (FATAL),
+          -- aborting the migration transaction. Detect and skip instead.
+          IF libs IS NULL OR position('timescaledb' in libs) = 0 THEN
+            RAISE NOTICE 'timescaledb not preloaded (shared_preload_libraries=%), skipping', libs;
+            RETURN;
+          END IF;
+
+          BEGIN
+            CREATE EXTENSION IF NOT EXISTS timescaledb;
+          EXCEPTION
+            WHEN undefined_file OR feature_not_supported THEN
+              RAISE NOTICE 'timescaledb extension not available, skipping';
+            WHEN others THEN
+              RAISE NOTICE 'timescaledb extension enable failed, skipping: %', SQLERRM;
+          END;
         END $$;
         """
     )

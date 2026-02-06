@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import signal
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -26,6 +26,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.alerts import AlertManager
+from sam.collectors.base import CollectedPost
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
@@ -33,8 +34,9 @@ from sam.config import get_settings
 from sam.logging import setup_logging
 from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
 from sam.pipeline.raw_storage import persist_collection_result
-from sam.processors.sentiment import analyze_sentiment_batch
-from sam.storage.database import close_db, get_session, init_db
+from sam.processors.sentiment import SentimentResult, analyze_sentiment_batch
+from sam.quota import get_quota_tracker, seed_quota_from_db
+from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
 from sam.storage.repository import (
     acquire_lease,
     finish_pipeline_run,
@@ -49,7 +51,34 @@ JOB_NAME = "collector-cycle"
 
 
 def _snapshot_hour(dt: datetime) -> datetime:
-    return dt.replace(minute=0, second=0, microsecond=0)
+    """Round *up* to the next hour boundary so that mentions collected during
+    the current hour always fall inside the (snapshot_time - window, snapshot_time] range.
+
+    E.g. if now is 14:37, snapshot_time becomes 15:00.  The 1-hour window then
+    covers 14:00-15:00, which includes the mentions we just ingested at ~14:37.
+    If the current time is already exactly on the hour, keep it as-is.
+    """
+    if dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+        return dt
+    return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
+def _build_sentiment_map(
+    posts: list[CollectedPost],
+    sentiments: list[SentimentResult],
+) -> dict[str, dict[str, object]]:
+    """Build a source_id -> sentiment dict from parallel lists."""
+    return {
+        post.source_id: {
+            "compound": s.compound,
+            "positive": s.positive,
+            "negative": s.negative,
+            "neutral": s.neutral,
+            "label": s.label,
+            "model": s.model,
+        }
+        for post, s in zip(posts, sentiments, strict=True)
+    }
 
 
 async def collect_once(
@@ -59,25 +88,39 @@ async def collect_once(
     limit_reddit: int,
     limit_youtube: int,
     run_id: uuid.UUID | None = None,
+    # Allow callers to pass pre-built collectors so they can be reused.
+    tmdb: TMDBCollector | None = None,
+    reddit: RedditCollector | None = None,
+    youtube: YouTubeCollector | None = None,
 ) -> dict[str, int]:
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
 
     if not settings.demo_mode and not settings.tmdb.is_configured:
-        # TMDB is the source of truth for which titles to track. Without it, the pipeline
-        # will "succeed" with 0 titles and give confusing feedback.
         raise RuntimeError("TMDB not configured. Set TMDB_API_KEY or TMDB_ACCESS_TOKEN in .env")
 
-    tmdb = TMDBCollector()
-    reddit = RedditCollector()
-    youtube = YouTubeCollector()
+    # Re-use passed collectors or create new ones.  Callers that want to reuse
+    # HTTP connections across cycles can pass already-initialised instances.
+    own_tmdb = tmdb is None
+    own_reddit = reddit is None
+    own_youtube = youtube is None
+    tmdb = tmdb or TMDBCollector()
+    reddit = reddit or RedditCollector()
+    youtube = youtube or YouTubeCollector()
+
+    quota = get_quota_tracker()
 
     stats: dict[str, int] = {
         "titles": 0,
         "reddit_mentions_inserted": 0,
         "youtube_mentions_inserted": 0,
+        "youtube_skipped_quota": 0,
         "metrics_snapshots_upserted": 0,
     }
+
+    # Track YouTube video IDs already seen during *this* cycle to avoid
+    # burning quota on the same video discovered via different title queries.
+    seen_yt_video_ids: set[str] = set()
 
     try:
         titles = await tmdb.get_trending(media_type="all", time_window="week", limit=limit_titles)
@@ -86,92 +129,132 @@ async def collect_once(
 
         snapshot_time = _snapshot_hour(datetime.now(UTC))
         for t in titles:
-            db_title = await upsert_title(session, t)
+            try:
+                db_title = await upsert_title(session, t)
 
-            # Reddit
-            reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
-            if reddit_result.success and reddit_result.posts:
-                if settings.storage.enable_raw_data_storage:
-                    await persist_collection_result(
-                        reddit_result,
-                        raw_data_dir=settings.storage.raw_data_dir,
-                        title=t.title,
+                # -- Reddit --
+                # Only attempt collection if the platform is actually configured.
+                if reddit.is_configured or settings.demo_mode:
+                    reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
+                    if reddit_result.success and reddit_result.posts:
+                        if settings.storage.enable_raw_data_storage:
+                            await persist_collection_result(
+                                reddit_result,
+                                raw_data_dir=settings.storage.raw_data_dir,
+                                title=t.title,
+                                title_id=db_title.id,
+                                query=t.title,
+                                run_id=run_id,
+                            )
+                        # Run CPU-bound VADER sentiment in a thread to avoid
+                        # blocking the async event loop.
+                        sentiments = await asyncio.to_thread(
+                            analyze_sentiment_batch,
+                            [p.content for p in reddit_result.posts],
+                        )
+                        inserted = await insert_mentions(
+                            session,
+                            title_id=db_title.id,
+                            platform="reddit",
+                            posts=reddit_result.posts,
+                            sentiment_by_source_id=_build_sentiment_map(
+                                reddit_result.posts, sentiments
+                            ),
+                        )
+                        stats["reddit_mentions_inserted"] += inserted
+                        logger.info(f"[runner] {t.title} reddit mentions inserted: {inserted}")
+
+                # -- YouTube --
+                # Only attempt collection if the platform is actually configured.
+                if youtube.is_configured or settings.demo_mode:
+                    # Guard: skip YouTube for this title if we'd exceed the daily budget.
+                    estimated_cost = 100 + 1  # search.list (100) + videos.list (1)
+                    if not quota.youtube_has_budget(cost=estimated_cost) and not settings.demo_mode:
+                        stats["youtube_skipped_quota"] += 1
+                        logger.warning(
+                            f"[runner] Skipping YouTube for '{t.title}' — daily quota budget exhausted"
+                        )
+                        yt_result = None
+                    else:
+                        yt_query = t.title
+                        yt_result = await youtube.collect(
+                            query=yt_query,
+                            limit=limit_youtube,
+                            exclude_source_ids=seen_yt_video_ids,
+                        )
+                else:
+                    yt_result = None
+
+                if yt_result:
+                    yt_query = t.title
+                    if yt_result.success and yt_result.posts:
+                        # Track IDs so subsequent titles skip already-seen videos.
+                        seen_yt_video_ids.update(p.source_id for p in yt_result.posts)
+
+                    if yt_result.success and yt_result.posts:
+                        if settings.storage.enable_raw_data_storage:
+                            await persist_collection_result(
+                                yt_result,
+                                raw_data_dir=settings.storage.raw_data_dir,
+                                title=t.title,
+                                title_id=db_title.id,
+                                query=yt_query,
+                                run_id=run_id,
+                            )
+                        sentiments = await asyncio.to_thread(
+                            analyze_sentiment_batch,
+                            [p.content for p in yt_result.posts],
+                        )
+                        inserted = await insert_mentions(
+                            session,
+                            title_id=db_title.id,
+                            platform="youtube",
+                            posts=yt_result.posts,
+                            sentiment_by_source_id=_build_sentiment_map(
+                                yt_result.posts, sentiments
+                            ),
+                        )
+                        stats["youtube_mentions_inserted"] += inserted
+                        logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
+
+                # Persist metrics snapshots (hourly buckets).
+                for window_hours in (1, 24):
+                    await compute_and_upsert_metrics_snapshot(
+                        session,
                         title_id=db_title.id,
-                        query=t.title,
-                        run_id=run_id,
+                        snapshot_time=snapshot_time,
+                        window_hours=window_hours,
                     )
-                sentiments = analyze_sentiment_batch([p.content for p in reddit_result.posts])
-                sentiment_map = {
-                    post.source_id: {
-                        "compound": s.compound,
-                        "positive": s.positive,
-                        "negative": s.negative,
-                        "neutral": s.neutral,
-                        "label": s.label,
-                        "model": s.model,
-                    }
-                    for post, s in zip(reddit_result.posts, sentiments, strict=False)
-                }
-                inserted = await insert_mentions(
-                    session,
-                    title_id=db_title.id,
-                    platform="reddit",
-                    posts=reddit_result.posts,
-                    sentiment_by_source_id=sentiment_map,
-                )
-                stats["reddit_mentions_inserted"] += inserted
-                logger.info(f"[runner] {t.title} reddit mentions inserted: {inserted}")
+                    stats["metrics_snapshots_upserted"] += 1
 
-            # YouTube
-            yt_query = f"{t.title} trailer"
-            yt_result = await youtube.collect(query=yt_query, limit=limit_youtube)
-            if yt_result.success and yt_result.posts:
-                if settings.storage.enable_raw_data_storage:
-                    await persist_collection_result(
-                        yt_result,
-                        raw_data_dir=settings.storage.raw_data_dir,
-                        title=t.title,
-                        title_id=db_title.id,
-                        query=yt_query,
-                        run_id=run_id,
-                    )
-                sentiments = analyze_sentiment_batch([p.content for p in yt_result.posts])
-                sentiment_map = {
-                    post.source_id: {
-                        "compound": s.compound,
-                        "positive": s.positive,
-                        "negative": s.negative,
-                        "neutral": s.neutral,
-                        "label": s.label,
-                        "model": s.model,
-                    }
-                    for post, s in zip(yt_result.posts, sentiments, strict=False)
-                }
-                inserted = await insert_mentions(
-                    session,
-                    title_id=db_title.id,
-                    platform="youtube",
-                    posts=yt_result.posts,
-                    sentiment_by_source_id=sentiment_map,
-                )
-                stats["youtube_mentions_inserted"] += inserted
-                logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
-
-            # Persist metrics snapshots (hourly buckets).
-            for window_hours in (1, 24):
-                await compute_and_upsert_metrics_snapshot(
-                    session,
-                    title_id=db_title.id,
-                    snapshot_time=snapshot_time,
-                    window_hours=window_hours,
-                )
-                stats["metrics_snapshots_upserted"] += 1
+            except Exception as exc:
+                logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
+                # Continue with the next title instead of aborting the entire run.
+                continue
 
     finally:
-        for collector in (reddit, youtube, tmdb):
+        # Only close collectors we created ourselves.
+        closeable: list[TMDBCollector | RedditCollector | YouTubeCollector] = []
+        if own_reddit:
+            closeable.append(reddit)
+        if own_youtube:
+            closeable.append(youtube)
+        if own_tmdb:
+            closeable.append(tmdb)
+        for collector in closeable:
             with contextlib.suppress(Exception):
                 await collector.close()
 
+    yt_quota = quota.get_usage("youtube")
+    logger.info(
+        f"[runner] YouTube API quota: {yt_quota.get('total_units', 0)} units used today "
+        f"({yt_quota.get('total_calls', 0)} calls)"
+    )
+    if stats["youtube_skipped_quota"]:
+        logger.warning(
+            f"[runner] Skipped YouTube for {stats['youtube_skipped_quota']} title(s) "
+            "due to quota budget"
+        )
     return stats
 
 
@@ -182,9 +265,14 @@ async def _collection_job(
     limit_titles: int,
     limit_reddit: int,
     limit_youtube: int,
+    tmdb: TMDBCollector | None = None,
+    reddit: RedditCollector | None = None,
+    youtube: YouTubeCollector | None = None,
 ) -> None:
     lease_ttl = max(60, interval_minutes * 60 * 2)
     started = datetime.now(UTC)
+
+    quota_tracker = get_quota_tracker()
 
     async with get_session() as session:
         acquired = await acquire_lease(
@@ -212,12 +300,16 @@ async def _collection_job(
         )
 
         try:
+            quota_start = quota_tracker.get_usage("youtube")
             stats = await collect_once(
                 session,
                 limit_titles=limit_titles,
                 limit_reddit=limit_reddit,
                 limit_youtube=limit_youtube,
                 run_id=run.id,
+                tmdb=tmdb,
+                reddit=reddit,
+                youtube=youtube,
             )
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
             try:
@@ -233,6 +325,37 @@ async def _collection_job(
                 logger.warning(f"[alerts] Detection cycle failed: {e}")
 
             elapsed = (datetime.now(UTC) - started).total_seconds()
+
+            # Persist per-run quota deltas so daily totals can be summed across runs.
+            quota_end = quota_tracker.get_usage("youtube")
+            _start_units = quota_start.get("total_units", 0)
+            _end_units = quota_end.get("total_units", 0)
+            _start_calls = quota_start.get("total_calls", 0)
+            _end_calls = quota_end.get("total_calls", 0)
+            start_units = int(_start_units) if isinstance(_start_units, (int, str)) else 0
+            end_units = int(_end_units) if isinstance(_end_units, (int, str)) else 0
+            start_calls = int(_start_calls) if isinstance(_start_calls, (int, str)) else 0
+            end_calls = int(_end_calls) if isinstance(_end_calls, (int, str)) else 0
+
+            start_eps = quota_start.get("calls_by_endpoint", {})
+            end_eps = quota_end.get("calls_by_endpoint", {})
+            if not isinstance(start_eps, dict):
+                start_eps = {}
+            if not isinstance(end_eps, dict):
+                end_eps = {}
+
+            quota_stats = {
+                "mode": "delta",
+                "youtube": {
+                    "date": quota_end.get("date"),
+                    "total_units": max(0, end_units - start_units),
+                    "total_calls": max(0, end_calls - start_calls),
+                    "calls_by_endpoint": {
+                        ep: max(0, int(cnt) - int(start_eps.get(ep, 0)))
+                        for ep, cnt in end_eps.items()
+                    },
+                },
+            }
             await finish_pipeline_run(
                 session,
                 run_id=run.id,
@@ -242,6 +365,7 @@ async def _collection_job(
                     **stats,
                     **alert_stats,
                     "elapsed_seconds": int(elapsed),
+                    "api_quota": quota_stats,
                 },
             )
         except Exception as e:
@@ -261,17 +385,27 @@ async def run_forever(
     logger.info(f"[runner] Scheduling collection every {interval_minutes} minutes")
     owner_id = uuid.uuid4()
 
+    # Create collectors once so HTTP connections are reused across cycles.
+    tmdb = TMDBCollector()
+    reddit = RedditCollector()
+    youtube = YouTubeCollector()
+
+    job_kwargs: dict[str, object] = {
+        "owner_id": owner_id,
+        "interval_minutes": interval_minutes,
+        "limit_titles": limit_titles,
+        "limit_reddit": limit_reddit,
+        "limit_youtube": limit_youtube,
+        "tmdb": tmdb,
+        "reddit": reddit,
+        "youtube": youtube,
+    }
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         _collection_job,
         trigger=IntervalTrigger(minutes=interval_minutes),
-        kwargs={
-            "owner_id": owner_id,
-            "interval_minutes": interval_minutes,
-            "limit_titles": limit_titles,
-            "limit_reddit": limit_reddit,
-            "limit_youtube": limit_youtube,
-        },
+        kwargs=job_kwargs,
         id=JOB_NAME,
         name=JOB_NAME,
         replace_existing=True,
@@ -288,6 +422,9 @@ async def run_forever(
         limit_titles=limit_titles,
         limit_reddit=limit_reddit,
         limit_youtube=limit_youtube,
+        tmdb=tmdb,
+        reddit=reddit,
+        youtube=youtube,
     )
 
     stop_event = asyncio.Event()
@@ -299,6 +436,9 @@ async def run_forever(
         await stop_event.wait()
     finally:
         scheduler.shutdown(wait=False)
+        for collector in (reddit, youtube, tmdb):
+            with contextlib.suppress(Exception):
+                await collector.close()
 
 
 def main() -> None:
@@ -321,6 +461,13 @@ def main() -> None:
     async def _run() -> None:
         if args.init_db:
             await init_db()
+
+        # Clean up stale leases / orphan runs left by killed processes.
+        await cleanup_stale_state()
+
+        # Seed the in-memory quota tracker from previous runs today so the
+        # quota guard knows how many units have already been consumed.
+        await seed_quota_from_db()
 
         try:
             if args.once:

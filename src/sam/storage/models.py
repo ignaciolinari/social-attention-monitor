@@ -113,7 +113,8 @@ class Mention(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        DateTime(timezone=True),
+        nullable=False,
     )
     collected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
@@ -134,7 +135,7 @@ class Mention(Base):
     __table_args__ = (
         UniqueConstraint("platform", "source_id", "title_id", name="uq_platform_source_title"),
         Index("ix_mentions_title_platform", "title_id", "platform"),
-        Index("ix_mentions_created_at_title", "created_at", "title_id"),
+        Index("ix_mentions_collected_at_title", "collected_at", "title_id"),
     )
 
     def __repr__(self) -> str:
@@ -168,6 +169,9 @@ class MetricsSnapshot(Base):
     reddit_mentions: Mapped[int] = mapped_column(Integer, default=0)
     youtube_mentions: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Engagement
+    total_engagement: Mapped[int] = mapped_column(Integer, default=0)  # likes + comments + shares
+
     # Velocity metrics
     mention_velocity: Mapped[float | None] = mapped_column(Float)  # mentions per hour
     velocity_change: Mapped[float | None] = mapped_column(Float)  # acceleration
@@ -176,6 +180,7 @@ class MetricsSnapshot(Base):
     avg_sentiment: Mapped[float | None] = mapped_column(Float)
     sentiment_volatility: Mapped[float | None] = mapped_column(Float)
     positive_ratio: Mapped[float | None] = mapped_column(Float)
+    negative_ratio: Mapped[float | None] = mapped_column(Float)
 
     # Composite scores
     attention_index: Mapped[float | None] = mapped_column(Float)
@@ -236,7 +241,7 @@ class Lease(Base):
     __tablename__ = "leases"
 
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
-    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
@@ -258,8 +263,8 @@ class PipelineRun(Base):
     __tablename__ = "pipeline_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    job_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
 
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="running"

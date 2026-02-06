@@ -45,6 +45,7 @@ class MetricsPayload(TypedDict, total=False):
     num_comments: int
     like_count: int
     comment_count: int
+    view_count: int
 
 
 class SentimentPayload(TypedDict, total=False):
@@ -72,7 +73,6 @@ class MetricsCalculator:
 
     def __init__(self) -> None:
         """Initialize the metrics calculator."""
-        self._historical_stats: dict[str, dict[str, float]] = {}
 
     def calculate(
         self,
@@ -119,14 +119,30 @@ class MetricsCalculator:
             platform = m.get("platform", "unknown")
             platform_breakdown[platform] = platform_breakdown.get(platform, 0) + 1
 
-        # Total engagement
-        total_engagement = sum(
-            m.get("metrics", {}).get("score", 0)
-            + m.get("metrics", {}).get("num_comments", 0)
-            + m.get("metrics", {}).get("like_count", 0)
-            + m.get("metrics", {}).get("comment_count", 0)
-            for m in in_window
-        )
+        # Total engagement — platform-aware summation.
+        # Reddit:  score + num_comments
+        # YouTube: view_count + like_count + comment_count
+        total_engagement = 0
+        for m in in_window:
+            metrics = m.get("metrics", {})
+            platform = m.get("platform", "unknown")
+            if platform == "reddit":
+                total_engagement += metrics.get("score", 0) + metrics.get("num_comments", 0)
+            elif platform == "youtube":
+                total_engagement += (
+                    metrics.get("view_count", 0)
+                    + metrics.get("like_count", 0)
+                    + metrics.get("comment_count", 0)
+                )
+            else:
+                # Fallback: sum all known engagement keys.
+                total_engagement += (
+                    metrics.get("score", 0)
+                    + metrics.get("num_comments", 0)
+                    + metrics.get("like_count", 0)
+                    + metrics.get("comment_count", 0)
+                    + metrics.get("view_count", 0)
+                )
 
         # Velocity
         mention_velocity = mention_count / window_hours if window_hours > 0 else 0

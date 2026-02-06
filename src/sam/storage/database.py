@@ -34,6 +34,9 @@ def get_engine() -> AsyncEngine:
             echo=settings.database.echo,
             pool_size=settings.database.pool_size,
             pool_pre_ping=True,
+            # Guard against zombie connections: if a query doesn't complete
+            # within 30s, the connection is killed rather than hanging forever.
+            connect_args={"timeout": 10, "command_timeout": 30},
         )
         logger.info(f"[db] Created async engine for {settings.database.url.split('@')[-1]}")
 
@@ -92,6 +95,39 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     logger.info("[db] Database tables initialized")
+
+
+async def cleanup_stale_state() -> None:
+    """Clean up stale leases and orphan pipeline runs on startup.
+
+    This handles the case where a previous process was killed (SIGKILL / OOM)
+    without releasing its lease or finishing its pipeline run.  Without this,
+    the next runner would block forever trying to acquire the same lease row.
+    """
+    from sqlalchemy import text
+
+    async with get_session() as session:
+        # Expire any lease whose TTL has passed
+        result = await session.execute(text("DELETE FROM leases WHERE expires_at < now()"))
+        expired = getattr(result, "rowcount", 0) or 0
+
+        # Mark any "running" pipeline runs older than 10 minutes as failed
+        result = await session.execute(
+            text(
+                "UPDATE pipeline_runs SET status = 'failed', "
+                "error = 'process terminated abnormally (stale run cleaned up)', "
+                "finished_at = now() "
+                "WHERE status = 'running' "
+                "AND started_at < now() - interval '10 minutes'"
+            )
+        )
+        orphans = getattr(result, "rowcount", 0) or 0
+
+        if expired or orphans:
+            logger.warning(
+                f"[db] Startup cleanup: expired {expired} stale lease(s), "
+                f"marked {orphans} orphan run(s) as failed"
+            )
 
 
 async def close_db() -> None:

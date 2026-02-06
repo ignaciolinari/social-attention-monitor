@@ -14,20 +14,28 @@ from sam.scheduler import runner
 class TestSnapshotHour:
     """Tests for _snapshot_hour helper."""
 
-    def test_truncates_to_hour(self) -> None:
+    def test_rounds_up_to_next_hour(self) -> None:
         dt = datetime(2026, 1, 30, 14, 35, 22, 123456, tzinfo=UTC)
         result = runner._snapshot_hour(dt)
-        assert result.hour == 14
+        # Rounds *up* so mentions collected at 14:35 fall inside the window.
+        assert result.hour == 15
         assert result.minute == 0
         assert result.second == 0
         assert result.microsecond == 0
 
+    def test_exact_hour_unchanged(self) -> None:
+        dt = datetime(2026, 1, 30, 14, 0, 0, 0, tzinfo=UTC)
+        result = runner._snapshot_hour(dt)
+        assert result == dt
+
     def test_preserves_date(self) -> None:
         dt = datetime(2026, 6, 15, 23, 59, 59, tzinfo=UTC)
         result = runner._snapshot_hour(dt)
+        # 23:59 rounds up to next day 00:00.
         assert result.year == 2026
         assert result.month == 6
-        assert result.day == 15
+        assert result.day == 16
+        assert result.hour == 0
 
 
 class TestCollectOnce:
@@ -62,6 +70,7 @@ class TestCollectOnce:
 
             # Mock Reddit
             mock_reddit = AsyncMock()
+            mock_reddit.is_configured = True
             mock_post = MagicMock()
             mock_post.source_id = "abc123"
             mock_post.content = "Great!"
@@ -89,7 +98,9 @@ class TestCollectOnce:
             mock_db_title.id = uuid.uuid4()
             mock_upsert.return_value = mock_db_title
 
-            # Mock sentiment
+            # Mock sentiment -- return one result per post.
+            # analyze_sentiment_batch is called separately for reddit (1 post)
+            # and youtube (1 post), each returning a single-element list.
             mock_sentiment_result = MagicMock()
             mock_sentiment_result.compound = 0.5
             mock_sentiment_result.positive = 0.7
@@ -97,7 +108,8 @@ class TestCollectOnce:
             mock_sentiment_result.neutral = 0.2
             mock_sentiment_result.label = "positive"
             mock_sentiment_result.model = "vader"
-            mock_sentiment.return_value = [mock_sentiment_result]
+            # Side effect: each call returns one result per input text
+            mock_sentiment.side_effect = lambda texts: [mock_sentiment_result] * len(texts)
 
             # Mock insert returns count
             mock_insert.return_value = 1
@@ -138,6 +150,7 @@ class TestCollectOnce:
             mock_tmdb_cls.return_value = mock_tmdb
 
             mock_reddit = AsyncMock()
+            mock_reddit.is_configured = True
             mock_reddit.close = AsyncMock()
             mock_reddit_cls.return_value = mock_reddit
 
@@ -184,6 +197,7 @@ class TestCollectOnce:
             mock_tmdb_cls.return_value = mock_tmdb
 
             mock_reddit = AsyncMock()
+            mock_reddit.is_configured = True
             mock_post = MagicMock()
             mock_post.source_id = "r1"
             mock_post.content = "text"
@@ -213,7 +227,7 @@ class TestCollectOnce:
             mock_sentiment_result.neutral = 0.4
             mock_sentiment_result.label = "neutral"
             mock_sentiment_result.model = "vader"
-            mock_sentiment.return_value = [mock_sentiment_result]
+            mock_sentiment.side_effect = lambda texts: [mock_sentiment_result] * len(texts)
 
             mock_insert.return_value = 1
 
@@ -237,6 +251,7 @@ class TestCollectionJob:
         with (
             patch("sam.scheduler.runner.get_session") as mock_session_ctx,
             patch("sam.scheduler.runner.acquire_lease") as mock_acquire,
+            patch("sam.scheduler.runner.collect_once") as mock_collect,
         ):
             mock_session = AsyncMock()
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
@@ -250,8 +265,9 @@ class TestCollectionJob:
                 limit_youtube=10,
             )
 
-            # collect_once should NOT be called
             mock_acquire.assert_called_once()
+            # collect_once should NOT have been called when lease was not acquired
+            mock_collect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_runs_collection_when_lease_acquired(self) -> None:
@@ -339,6 +355,8 @@ class TestMain:
             patch("sam.scheduler.runner.setup_logging"),
             patch("sam.scheduler.runner.get_settings") as mock_settings,
             patch("sam.scheduler.runner.init_db", new_callable=AsyncMock) as mock_init_db,
+            patch("sam.scheduler.runner.cleanup_stale_state", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.seed_quota_from_db", new_callable=AsyncMock),
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
@@ -361,6 +379,8 @@ class TestMain:
             patch("sam.scheduler.runner.setup_logging"),
             patch("sam.scheduler.runner.get_settings") as mock_settings,
             patch("sam.scheduler.runner.init_db", new_callable=AsyncMock) as mock_init_db,
+            patch("sam.scheduler.runner.cleanup_stale_state", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.seed_quota_from_db", new_callable=AsyncMock),
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
@@ -383,6 +403,8 @@ class TestMain:
             patch("sam.scheduler.runner.setup_logging"),
             patch("sam.scheduler.runner.get_settings") as mock_settings,
             patch("sam.scheduler.runner.init_db", new_callable=AsyncMock) as mock_init_db,
+            patch("sam.scheduler.runner.cleanup_stale_state", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.seed_quota_from_db", new_callable=AsyncMock),
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
