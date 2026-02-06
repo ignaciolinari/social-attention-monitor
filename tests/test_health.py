@@ -24,6 +24,22 @@ async def _fake_get_session():
 
 
 def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
+    # Override API key env vars with empty strings so pydantic-settings doesn't
+    # pick up real values from .env.  monkeypatch.setenv takes priority over
+    # file-based sources.
+    for key in (
+        "REDDIT_CLIENT_ID",
+        "REDDIT_CLIENT_SECRET",
+        "YOUTUBE_API_KEY",
+        "TMDB_API_KEY",
+        "TMDB_ACCESS_TOKEN",
+        "TMDB_BEARER_TOKEN",
+    ):
+        monkeypatch.setenv(key, "")
+
+    api.get_settings.cache_clear()
+    api.settings = api.get_settings()
+
     monkeypatch.setattr(api, "get_session", _fake_get_session)
     monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
 
@@ -50,7 +66,7 @@ def test_health_external_checks(monkeypatch) -> None:
     api.settings = api.get_settings()
 
     respx.get("https://api.themoviedb.org/3/configuration").respond(200, json={})
-    respx.get("https://www.googleapis.com/youtube/v3/search").respond(200, json={"items": []})
+    respx.get("https://www.googleapis.com/youtube/v3/videos").respond(200, json={"items": []})
 
     with TestClient(api.app) as client:
         response = client.get("/health", params={"external": "true"})

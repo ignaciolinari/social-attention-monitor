@@ -8,7 +8,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -22,8 +22,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
-from sqlalchemy import text
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select, text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.status import HTTP_422_UNPROCESSABLE_CONTENT
@@ -45,9 +45,12 @@ from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
-from sam.processors.sentiment import analyze_sentiment
+from sam.processors.sentiment import analyze_sentiment, analyze_sentiment_batch
+from sam.quota import aggregate_youtube_quota_from_db
 from sam.storage.database import get_session
+from sam.storage.models import Title as TitleModel
 from sam.storage.repository import (
+    escape_like,
     get_latest_mention_collected_at,
     get_mentions_count,
     get_mentions_for_title,
@@ -94,6 +97,25 @@ class PipelineRunInfo(BaseModel):
     error: str | None
 
 
+class ApiQuotaInfo(BaseModel):
+    """API quota usage for a single platform."""
+
+    date: str
+    total_units: int
+    total_calls: int
+    calls_by_endpoint: dict[str, int]
+    daily_budget: int | None = None
+    budget_used_pct: float | None = None
+    budget_remaining: int | None = None
+
+
+class PipelineQuotaResponse(BaseModel):
+    """API quota usage summary across all platforms."""
+
+    youtube: ApiQuotaInfo
+    last_run_at: str | None = None
+
+
 class PipelineHealthResponse(BaseModel):
     """Pipeline health statistics."""
 
@@ -104,6 +126,7 @@ class PipelineHealthResponse(BaseModel):
     newest_mention_age_seconds: dict[str, float | None]
     newest_mention_at: dict[str, str | None]
     latest_pipeline_runs: list[PipelineRunInfo]
+    api_quota: dict[str, ApiQuotaInfo] = Field(default_factory=dict)
 
 
 class TitleResponse(BaseModel):
@@ -513,11 +536,16 @@ async def _collect_mentions_live(
     if not result.success:
         raise HTTPException(status_code=500, detail=result.error)
 
+    # Use batch sentiment to avoid N sequential VADER calls.
+    # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
+    sentiment_results = await asyncio.to_thread(
+        analyze_sentiment_batch,
+        [post.content for post in result.posts],
+    )
+
     mentions: list[MentionResponse] = []
     sentiment_by_source_id: dict[str, dict[str, Any]] = {}
-    for post in result.posts:
-        sentiment_result = analyze_sentiment(post.content)
-
+    for post, sentiment_result in zip(result.posts, sentiment_results, strict=True):
         sentiment_payload = {
             "compound": sentiment_result.compound,
             "label": sentiment_result.label,
@@ -558,12 +586,22 @@ async def _refresh_mentions_background(
             logger.warning(f"[api] {platform} refresh failed: {result.error}")
             return
 
+        # Use batch sentiment (consistent with the foreground path and the
+        # pipeline runner) and persist all sentiment fields.
+        # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
+        sentiment_results = await asyncio.to_thread(
+            analyze_sentiment_batch,
+            [post.content for post in result.posts],
+        )
         sentiment_by_source_id: dict[str, dict[str, Any]] = {}
-        for post in result.posts:
-            sentiment_result = analyze_sentiment(post.content)
+        for post, sr in zip(result.posts, sentiment_results, strict=True):
             sentiment_by_source_id[post.source_id] = {
-                "compound": sentiment_result.compound,
-                "label": sentiment_result.label,
+                "compound": sr.compound,
+                "positive": sr.positive,
+                "negative": sr.negative,
+                "neutral": sr.neutral,
+                "label": sr.label,
+                "model": sr.model,
             }
 
         await _persist_mentions(
@@ -635,9 +673,13 @@ async def http_exception_handler(_request: Request, exc: StarletteHTTPException)
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     logger.exception(f"[api] unhandled error: {exc}")
+    # Avoid leaking internal details (SQL, connection strings, stack traces)
+    # in production.  Only expose the raw message in development mode.
+    _settings = get_settings()
+    detail = str(exc) if _settings.is_development else "An unexpected error occurred."
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(error="internal_server_error", detail=str(exc)).model_dump(),
+        content=ErrorResponse(error="internal_server_error", detail=detail).model_dump(),
     )
 
 
@@ -666,21 +708,41 @@ class RateLimiter:
 
     Thread-safe for async usage (single-threaded event loop).
     For production with multiple workers, use Redis-based limiting.
+
+    Uses ``collections.deque`` for O(1) amortised cleanup (timestamps are
+    always appended in order, so expired entries are always at the left).
+    Periodically evicts keys with empty deques to prevent unbounded memory
+    growth from unique IPs that stop making requests.
     """
+
+    _EVICT_EVERY = 1000  # run full eviction every N ``is_allowed`` calls
 
     def __init__(self, requests_per_minute: int = 60, window_seconds: int = 60):
         self.requests_per_minute = requests_per_minute
         self.window_seconds = window_seconds
-        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._requests: dict[str, deque[float]] = defaultdict(deque)
+        self._call_count = 0
 
     def _cleanup_old(self, key: str, now: float) -> None:
         cutoff = now - self.window_seconds
-        self._requests[key] = [ts for ts in self._requests[key] if ts > cutoff]
+        dq = self._requests[key]
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+
+    def _maybe_evict(self) -> None:
+        """Remove keys whose deques are empty to bound memory."""
+        self._call_count += 1
+        if self._call_count >= self._EVICT_EVERY:
+            self._call_count = 0
+            empty_keys = [k for k, dq in self._requests.items() if not dq]
+            for k in empty_keys:
+                del self._requests[k]
 
     def is_allowed(self, key: str) -> tuple[bool, int]:
         """Check if request is allowed. Returns (allowed, remaining)."""
         now = time.time()
         self._cleanup_old(key, now)
+        self._maybe_evict()
 
         count = len(self._requests[key])
         remaining = max(0, self.requests_per_minute - count)
@@ -693,9 +755,10 @@ class RateLimiter:
 
     def get_retry_after(self, key: str) -> int:
         """Get seconds until oldest request expires."""
-        if not self._requests.get(key):
+        dq = self._requests.get(key)
+        if not dq:
             return 0
-        oldest = min(self._requests[key])
+        oldest = dq[0]
         return max(1, int(self.window_seconds - (time.time() - oldest)))
 
 
@@ -801,16 +864,17 @@ async def health_check(
 
         if settings.youtube.is_configured:
             try:
+                # Use videos.list with a well-known video ID (1 quota unit)
+                # instead of search.list (100 quota units) to avoid burning
+                # budget on health checks.
                 params = {
-                    "part": "snippet",
-                    "q": "test",
-                    "type": "video",
-                    "maxResults": 1,
+                    "part": "id",
+                    "id": "dQw4w9WgXcQ",
                     "key": settings.youtube.api_key,
                 }
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.get(
-                        "https://www.googleapis.com/youtube/v3/search", params=params
+                        "https://www.googleapis.com/youtube/v3/videos", params=params
                     )
                 youtube_reachable = resp.status_code == 200
             except Exception:
@@ -849,8 +913,13 @@ async def pipeline_health() -> PipelineHealthResponse:
     if isinstance(cached, dict) and "timestamp" in cached:
         return PipelineHealthResponse(**cached)
 
+    api_quota: dict[str, ApiQuotaInfo] = {}
     async with get_session() as session:
         stats = await get_pipeline_health_stats(session)
+
+        # Use DB aggregation so this endpoint is correct across processes.
+        quota = await aggregate_youtube_quota_from_db(session)
+        api_quota["youtube"] = ApiQuotaInfo(**quota.to_api_dict())
 
     payload = PipelineHealthResponse(
         timestamp=stats["timestamp"],
@@ -860,11 +929,30 @@ async def pipeline_health() -> PipelineHealthResponse:
         newest_mention_age_seconds=stats["newest_mention_age_seconds"],
         newest_mention_at=stats["newest_mention_at"],
         latest_pipeline_runs=[PipelineRunInfo(**run) for run in stats["latest_pipeline_runs"]],
+        api_quota=api_quota,
     )
     await cache_set_json(
         cache_key, payload.model_dump(), ttl_seconds=settings.cache_ttl_pipeline_health
     )
     return payload
+
+
+@app.get("/api/v1/pipeline/quota", response_model=PipelineQuotaResponse)
+async def pipeline_quota() -> PipelineQuotaResponse:
+    """
+    API quota usage summary.
+
+    Aggregates quota usage from **all** pipeline runs today (PT), not just the
+    latest one.  Each ``--once`` run persists its own usage in
+    ``pipeline_runs.stats.api_quota``; this endpoint sums them to get the true
+    daily total.  YouTube Data API v3 daily budget: 10,000 units.
+    """
+    quota = await aggregate_youtube_quota_from_db()
+
+    return PipelineQuotaResponse(
+        youtube=ApiQuotaInfo(**quota.to_api_dict()),
+        last_run_at=quota.last_run_at,
+    )
 
 
 @app.get("/api/v1/trending", response_model=TrendingResponse)
@@ -1103,6 +1191,15 @@ async def db_list_titles(
     offset: int = Query(0, ge=0),
 ) -> TitlesResponse:
     async with get_session() as session:
+        # Compute the true total count for the same filter.
+        count_stmt = select(func.count()).where(TitleModel.is_active.is_(True))
+        if q:
+            count_stmt = count_stmt.where(
+                TitleModel.title.ilike(f"%{escape_like(q)}%", escape="\\")
+            )
+        count_result = await session.execute(count_stmt)
+        total_count = int(count_result.scalar_one())
+
         # Fetch one extra to compute next_offset.
         rows = await list_titles(session, query=q, limit=limit + 1, offset=offset)
         has_more = len(rows) > limit
@@ -1121,7 +1218,7 @@ async def db_list_titles(
                 )
                 for t in page
             ],
-            total_count=len(page),
+            total_count=total_count,
             next_offset=next_offset,
         )
 
@@ -1187,8 +1284,12 @@ async def metrics_timeseries(
     window_hours: int = Query(1, ge=1, le=168),
     hours: int = Query(24, ge=1, le=24 * 30),
 ) -> MetricsTimeseriesResponse:
-    until = datetime.now(UTC)
-    since = until - timedelta(hours=hours)
+    # Add a 1-hour buffer to `until` because _snapshot_hour() rounds up to the
+    # next hour boundary.  Without this, snapshots from the current collection
+    # cycle are invisible until the clock passes the snapshot hour.
+    now = datetime.now(UTC)
+    until = now + timedelta(hours=1)
+    since = now - timedelta(hours=hours)
 
     async with get_session() as session:
         res = await session.execute(

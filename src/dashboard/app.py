@@ -7,7 +7,7 @@ Streamlit-based dashboard for visualizing social attention data.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -60,6 +60,21 @@ def _time_range_to_hours(label: str) -> int:
     return 24
 
 
+def _youtube_quota_reset_text() -> str:
+    """Return a human-readable countdown to the YouTube quota reset (midnight PT)."""
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    now_pt = datetime.now(pacific)
+    next_midnight_pt = (now_pt + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    remaining = next_midnight_pt - now_pt
+    hours_left = int(remaining.total_seconds() // 3600)
+    mins_left = int((remaining.total_seconds() % 3600) // 60)
+    return f"Resets in {hours_left}h {mins_left}m (midnight PT)"
+
+
 def main() -> None:
     """Main dashboard entry point."""
     st.title("📊 Social Attention Monitor")
@@ -76,6 +91,7 @@ def main() -> None:
                 "🔄 Platform Comparison",
                 "💬 Sentiment",
                 "🚨 Alerts",
+                "📡 API Quota",
             ],
             label_visibility="collapsed",
         )
@@ -96,6 +112,19 @@ def main() -> None:
             )
         except Exception as e:
             st.error(f"API unreachable: {e}")
+
+        # YouTube quota mini-bar
+        try:
+            quota_data = _get_json("/api/v1/pipeline/quota")
+            yt = quota_data.get("youtube", {})
+            used = yt.get("total_units", 0)
+            budget = yt.get("daily_budget", 10_000)
+            used_pct = yt.get("budget_used_pct", 0)
+            st.caption(f"YouTube API (PT day): {used:,} / {budget:,} units used ({used_pct:.0f}%)")
+            st.progress(min(used_pct / 100, 1.0))
+            st.caption(_youtube_quota_reset_text())
+        except Exception:
+            pass
 
         # Show alert badge
         try:
@@ -157,7 +186,7 @@ def main() -> None:
         )
         st.dataframe(
             df.drop(columns=["title_id"]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -195,11 +224,11 @@ def main() -> None:
 
         st.subheader("Mentions over time")
         fig1 = px.line(df, x="snapshot_time", y="mention_count", markers=True)
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width="stretch")
 
         st.subheader("Attention Index over time")
         fig2 = px.line(df, x="snapshot_time", y="attention_index", markers=True)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     elif page == "🔄 Platform Comparison":
         st.header("🔄 Platform Comparison")
@@ -213,10 +242,14 @@ def main() -> None:
         selected_label = st.selectbox("Select title", [t[0] for t in title_options])
         selected_id = dict(title_options)[selected_label]
 
-        ts = _get_json(
-            "/api/v1/metrics/timeseries",
-            params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
-        )
+        try:
+            ts = _get_json(
+                "/api/v1/metrics/timeseries",
+                params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
+            )
+        except Exception as e:
+            st.error(f"Failed to load platform comparison data: {e}")
+            return
         points = ts.get("points", [])
         if not points:
             st.info("No snapshots found for this title.")
@@ -232,7 +265,7 @@ def main() -> None:
             value_name="mentions",
         )
         fig = px.area(long, x="snapshot_time", y="mentions", color="platform", groupnorm=None)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     elif page == "💬 Sentiment":
         st.header("💬 Sentiment Distribution")
@@ -261,16 +294,19 @@ def main() -> None:
 
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("Latest avg sentiment", value=f"{df['avg_sentiment'].iloc[-1]:.2f}")
+            avg_s = df["avg_sentiment"].iloc[-1]
+            st.metric("Latest avg sentiment", value=f"{(avg_s if avg_s is not None else 0.0):.2f}")
         with c2:
             pr = df["positive_ratio"].iloc[-1]
-            st.metric("Latest positive ratio", value=f"{(pr or 0.0) * 100:.1f}%")
+            st.metric(
+                "Latest positive ratio", value=f"{(pr if pr is not None else 0.0) * 100:.1f}%"
+            )
 
         fig1 = px.line(df, x="snapshot_time", y="avg_sentiment", markers=True)
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width="stretch")
 
         fig2 = px.line(df, x="snapshot_time", y="positive_ratio", markers=True)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     elif page == "🚨 Alerts":
         st.header("🚨 Alerts & Anomalies")
@@ -388,6 +424,94 @@ def main() -> None:
         except Exception as e:
             st.error(f"Failed to load pipeline health: {e}")
 
+    elif page == "📡 API Quota":
+        st.header("📡 API Quota Usage")
+        st.markdown("*Track API usage to stay within daily limits*")
+
+        try:
+            quota_data = _get_json("/api/v1/pipeline/quota")
+        except Exception as e:
+            st.error(f"Failed to load quota data: {e}")
+            quota_data = {}
+
+        if quota_data:
+            yt = quota_data.get("youtube", {})
+
+            # YouTube section
+            st.subheader("YouTube Data API v3")
+
+            budget = yt.get("daily_budget", 10_000)
+            used = yt.get("total_units", 0)
+            remaining = yt.get("budget_remaining", budget)
+            used_pct = yt.get("budget_used_pct", 0.0)
+            total_calls = yt.get("total_calls", 0)
+            quota_date = yt.get("date", "—")
+
+            # Status color
+            if used_pct < 50:
+                status_color = "🟢"
+                status_text = "Healthy"
+            elif used_pct < 80:
+                status_color = "🟡"
+                status_text = "Moderate"
+            else:
+                status_color = "🔴"
+                status_text = "Critical"
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Units Used", f"{used:,}")
+            with c2:
+                st.metric("Remaining", f"{remaining:,}")
+            with c3:
+                st.metric("Total Calls", f"{total_calls:,}")
+            with c4:
+                st.metric("Status", f"{status_color} {status_text}")
+
+            # Big progress bar
+            st.markdown(f"**Daily Budget (PT day): {used:,} / {budget:,} units ({used_pct:.1f}%)**")
+            st.progress(min(used_pct / 100, 1.0))
+
+            # Call breakdown
+            calls_by_endpoint = yt.get("calls_by_endpoint", {})
+            if calls_by_endpoint:
+                st.markdown("**Calls by endpoint:**")
+                for endpoint, count in sorted(calls_by_endpoint.items()):
+                    cost_per_call = 100 if "search" in endpoint else 1
+                    st.caption(
+                        f"  • `{endpoint}`: {count} calls "
+                        f"({count * cost_per_call:,} units @ {cost_per_call} units/call)"
+                    )
+
+            # YouTube resets at midnight Pacific Time, not UTC.
+            st.caption(f"Quota date (PT): {quota_date} — {_youtube_quota_reset_text()}")
+            if quota_data.get("last_run_at"):
+                st.caption(f"Last collection run: {quota_data['last_run_at']}")
+
+            st.divider()
+
+            # Cost reference
+            st.subheader("Cost Reference")
+            st.markdown("""
+| Endpoint | Cost | Description |
+|---|---|---|
+| `search.list` | 100 units | Search for videos by query |
+| `videos.list` | 1 unit | Get video statistics/details |
+
+**Daily budget:** 10,000 units (default YouTube project quota)
+
+**Tip:** Each title costs ~101 units (1 search + 1 video details batch).
+With 20 titles, that's ~2,020 units per collection cycle.
+At 5-minute polling, budget allows ~4 full cycles per day.
+""")
+
+            st.divider()
+            st.subheader("TMDB API")
+            st.info(
+                "TMDB uses per-second rate limiting (~40 req/s), not a daily quota. "
+                "No tracking needed — the built-in retry-on-429 handles it."
+            )
+
     # Footer
     st.divider()
     col1, col2, col3 = st.columns(3)
@@ -399,7 +523,7 @@ def main() -> None:
         except Exception:
             st.caption("—")
     with col2:
-        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"Last updated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     with col3:
         st.caption("SAM v0.1.0")
 
