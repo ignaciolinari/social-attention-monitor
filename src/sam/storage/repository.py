@@ -4,10 +4,12 @@ Small, focused helpers to persist Titles and Mentions.
 Keeps the scheduler runner simple and testable.
 """
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,8 +49,8 @@ async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
     result = await session.execute(stmt)
     title_id = result.scalar_one()
 
-    title_result = await session.execute(select(Title).where(Title.id == title_id))
-    return title_result.scalar_one()
+    # Use the ORM identity map (and a SELECT if needed) to return a fully-tracked ORM object.
+    return await session.get(Title, title_id)  # type: ignore[return-value]
 
 
 async def insert_mentions(
@@ -96,12 +98,17 @@ async def insert_mentions(
     return len(inserted_ids)
 
 
+def escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE special characters (%, _, \\) in a search term."""
+    return re.sub(r"([%_\\])", r"\\\1", value.strip())
+
+
 async def get_title_by_name(session: AsyncSession, title: str) -> Title | None:
     """Find a title by case-insensitive match."""
-    pattern = f"%{title.strip()}%"
+    pattern = f"%{escape_like(title)}%"
     stmt = (
         select(Title)
-        .where(Title.title.ilike(pattern))
+        .where(Title.title.ilike(pattern, escape="\\"))
         .order_by(Title.popularity.desc().nullslast())
     )
     result = await session.execute(stmt)
@@ -136,8 +143,8 @@ async def list_titles(
     """List titles from the DB (optionally filtered by substring match)."""
     stmt = select(Title).where(Title.is_active.is_(True))
     if query:
-        pattern = f"%{query.strip()}%"
-        stmt = stmt.where(Title.title.ilike(pattern))
+        pattern = f"%{escape_like(query)}%"
+        stmt = stmt.where(Title.title.ilike(pattern, escape="\\"))
     stmt = stmt.order_by(Title.popularity.desc().nullslast()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -155,7 +162,7 @@ async def get_mentions_for_title(
     stmt = (
         select(Mention)
         .where(Mention.title_id == title_id, Mention.platform == platform)
-        .order_by(Mention.created_at.desc())
+        .order_by(Mention.collected_at.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -196,15 +203,21 @@ async def get_mentions_in_window(
     window_start: datetime,
     window_end: datetime,
 ) -> list[Mention]:
-    """Get mentions for a title within a time window."""
+    """Get mentions for a title within a time window.
+
+    Uses ``collected_at`` (when the pipeline ingested the mention) rather than
+    ``created_at`` (when the content was originally published).  This matters
+    because YouTube videos are often published days/weeks before we discover
+    them, so ``created_at`` would place them outside the snapshot window.
+    """
     stmt = (
         select(Mention)
         .where(
             Mention.title_id == title_id,
-            Mention.created_at >= window_start,
-            Mention.created_at < window_end,
+            Mention.collected_at >= window_start,
+            Mention.collected_at < window_end,
         )
-        .order_by(Mention.created_at.asc())
+        .order_by(Mention.collected_at.asc())
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -314,11 +327,13 @@ async def upsert_metrics_snapshot(
         "unique_authors": int(metrics.get("unique_authors", 0)),
         "reddit_mentions": int(metrics.get("reddit_mentions", 0)),
         "youtube_mentions": int(metrics.get("youtube_mentions", 0)),
+        "total_engagement": int(metrics.get("total_engagement", 0)),
         "mention_velocity": metrics.get("mention_velocity"),
         "velocity_change": metrics.get("velocity_change"),
         "avg_sentiment": metrics.get("avg_sentiment"),
         "sentiment_volatility": metrics.get("sentiment_volatility"),
         "positive_ratio": metrics.get("positive_ratio"),
+        "negative_ratio": metrics.get("negative_ratio"),
         "attention_index": metrics.get("attention_index"),
         "hype_acceleration": metrics.get("hype_acceleration"),
         "raw_metrics": metrics.get("raw_metrics"),
@@ -351,8 +366,10 @@ async def acquire_lease(
 
     Returns True if acquired/renewed, False if another owner currently holds it.
     """
-    now = datetime.now(UTC)
-    expires_at = now + timedelta(seconds=ttl_seconds)
+    # Use database-side timestamps consistently to avoid clock skew between
+    # the application server and the database server.
+    db_now = func.now()
+    db_expires = func.now() + timedelta(seconds=ttl_seconds)
 
     # Only steal the lease if it's expired, otherwise keep current owner.
     stmt = (
@@ -360,17 +377,17 @@ async def acquire_lease(
         .values(
             name=name,
             owner_id=owner_id,
-            acquired_at=now,
-            expires_at=expires_at,
-            updated_at=now,
+            acquired_at=db_now,
+            expires_at=db_expires,
+            updated_at=db_now,
         )
         .on_conflict_do_update(
             index_elements=[Lease.name],
             set_={
                 "owner_id": owner_id,
-                "acquired_at": now,
-                "expires_at": expires_at,
-                "updated_at": now,
+                "acquired_at": db_now,
+                "expires_at": db_expires,
+                "updated_at": db_now,
             },
             where=or_(Lease.expires_at < func.now(), Lease.owner_id == owner_id),
         )
@@ -433,6 +450,7 @@ async def finish_pipeline_run(
     result = await session.execute(select(PipelineRun).where(PipelineRun.id == run_id))
     run = result.scalar_one_or_none()
     if run is None:
+        logger.warning(f"[repository] finish_pipeline_run: run_id={run_id} not found, ignoring")
         return
 
     run.status = status
@@ -451,6 +469,9 @@ async def get_pipeline_health_stats(
     - per-platform counts (last 24h)
     - latest pipeline run status
     - processing lag
+
+    Uses pg_class.reltuples for an approximate total mention count to avoid
+    a full sequential scan on the (potentially large) mentions table.
     """
     now = datetime.now(UTC)
     cutoff_24h = now - timedelta(hours=24)
@@ -460,9 +481,9 @@ async def get_pipeline_health_stats(
         Mention.platform, func.max(Mention.collected_at).label("latest")
     ).group_by(Mention.platform)
     result = await session.execute(newest_mention_stmt)
-    newest_by_platform: dict[str, datetime | None] = {}
-    for row in result.all():
-        newest_by_platform[row.platform] = row.latest
+    newest_by_platform: dict[str, datetime | None] = {
+        row.platform: row.latest for row in result.all()
+    }
 
     # Get mention counts per platform (last 24h)
     counts_stmt = (
@@ -471,14 +492,16 @@ async def get_pipeline_health_stats(
         .group_by(Mention.platform)
     )
     result = await session.execute(counts_stmt)
-    counts_by_platform: dict[str, int] = {}
-    for row in result.all():
-        counts_by_platform[row.platform] = row.cnt
+    counts_by_platform: dict[str, int] = {row.platform: row.cnt for row in result.all()}
 
-    # Total mention count
-    total_stmt = select(func.count()).select_from(Mention)
+    # Approximate total mention count using pg_class.reltuples (O(1)) instead
+    # of SELECT COUNT(*) which is a full sequential scan on PostgreSQL.
+    total_stmt = text(
+        "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE relname = 'mentions'"
+    )
     result = await session.execute(total_stmt)
-    total_mentions = result.scalar_one()
+    total_row = result.scalar_one_or_none()
+    total_mentions = max(0, int(total_row)) if total_row is not None else 0
 
     # Latest pipeline runs (by job_name)
     latest_runs_stmt = (
@@ -493,22 +516,21 @@ async def get_pipeline_health_stats(
         .order_by(PipelineRun.job_name, PipelineRun.started_at.desc())
     )
     result = await session.execute(latest_runs_stmt)
-    latest_runs: list[dict[str, Any]] = []
-    for row in result.all():
-        latest_runs.append(
-            {
-                "job_name": row.job_name,
-                "status": row.status,
-                "started_at": row.started_at.isoformat() if row.started_at else None,
-                "finished_at": row.finished_at.isoformat() if row.finished_at else None,
-                "error": row.error,
-            }
-        )
+    latest_runs: list[dict[str, Any]] = [
+        {
+            "job_name": row.job_name,
+            "status": row.status,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "error": row.error,
+        }
+        for row in result.all()
+    ]
 
     # Active titles count
     active_titles_stmt = select(func.count()).where(Title.is_active.is_(True))
     result = await session.execute(active_titles_stmt)
-    active_titles = result.scalar_one()
+    active_titles = int(result.scalar_one())
 
     # Compute newest mention age per platform
     newest_age_seconds: dict[str, float | None] = {}

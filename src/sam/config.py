@@ -11,11 +11,35 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_ENV_FILE = ".env"
+_ENV_FILE_ENCODING = "utf-8"
+
+# Keep "configured" checks honest when users copy `.env.example` without filling values.
+_PLACEHOLDER_VALUES = {
+    "your_client_id_here",
+    "your_client_secret_here",
+    "your_youtube_api_key_here",
+    "your_tmdb_api_key_here",
+    "your_tmdb_access_token_here",
+}
+
+
+def _is_effectively_set(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return False
+    return v.lower() not in _PLACEHOLDER_VALUES
+
 
 class RedditSettings(BaseSettings):
     """Reddit API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="REDDIT_")
+    model_config = SettingsConfigDict(
+        env_prefix="REDDIT_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     client_id: str = Field(default="", description="Reddit OAuth client ID")
     client_secret: str = Field(default="", description="Reddit OAuth client secret")
@@ -27,13 +51,18 @@ class RedditSettings(BaseSettings):
     @property
     def is_configured(self) -> bool:
         """Check if Reddit credentials are configured."""
-        return bool(self.client_id and self.client_secret)
+        return _is_effectively_set(self.client_id) and _is_effectively_set(self.client_secret)
 
 
 class YouTubeSettings(BaseSettings):
     """YouTube Data API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="YOUTUBE_")
+    model_config = SettingsConfigDict(
+        env_prefix="YOUTUBE_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="", description="YouTube Data API v3 key")
     search_order: str = Field(
@@ -64,13 +93,18 @@ class YouTubeSettings(BaseSettings):
     @property
     def is_configured(self) -> bool:
         """Check if YouTube API is configured."""
-        return bool(self.api_key)
+        return _is_effectively_set(self.api_key)
 
 
 class TMDBSettings(BaseSettings):
     """TMDB API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="TMDB_")
+    model_config = SettingsConfigDict(
+        env_prefix="TMDB_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     api_key: str = Field(default="", description="TMDB API key (v3) for query param auth")
     access_token: str = Field(
@@ -83,13 +117,18 @@ class TMDBSettings(BaseSettings):
     @property
     def is_configured(self) -> bool:
         """Check if TMDB API is configured."""
-        return bool(self.api_key or self.access_token)
+        return _is_effectively_set(self.api_key) or _is_effectively_set(self.access_token)
 
 
 class DatabaseSettings(BaseSettings):
     """Database configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="DATABASE_")
+    model_config = SettingsConfigDict(
+        env_prefix="DATABASE_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     url: str = Field(
         default="postgresql+asyncpg://sam:sam@localhost:5432/sam",
@@ -106,7 +145,12 @@ class DatabaseSettings(BaseSettings):
 class RedisSettings(BaseSettings):
     """Redis configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="REDIS_")
+    model_config = SettingsConfigDict(
+        env_prefix="REDIS_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     url: str = Field(default="redis://localhost:6379/0", description="Redis URL")
 
@@ -114,7 +158,12 @@ class RedisSettings(BaseSettings):
 class CollectorSettings(BaseSettings):
     """Data collection configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     polling_interval_minutes: int = Field(default=5, description="Polling interval in minutes")
     target_subreddits: str = Field(
@@ -134,7 +183,12 @@ class CollectorSettings(BaseSettings):
 class StorageSettings(BaseSettings):
     """Local filesystem storage settings (raw data, artifacts)."""
 
-    model_config = SettingsConfigDict(env_prefix="SAM_STORAGE_")
+    model_config = SettingsConfigDict(
+        env_prefix="SAM_STORAGE_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
 
     enable_raw_data_storage: bool = Field(
         default=False,
@@ -150,8 +204,8 @@ class Settings(BaseSettings):
     """Main application settings."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
         extra="ignore",
     )
 
