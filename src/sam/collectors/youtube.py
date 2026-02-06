@@ -15,12 +15,38 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
 from sam.config import get_settings
+from sam.quota import YOUTUBE_SEARCH_COST, YOUTUBE_VIDEOS_COST, get_quota_tracker
 
 
 def _should_retry(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return isinstance(exc, httpx.TimeoutException)
+
+
+def _truncate_description(text: str, max_chars: int = 300) -> str:
+    """Truncate a YouTube description at a sentence or word boundary.
+
+    Prefers cutting at the last sentence-ending punctuation (.!?) within
+    *max_chars*.  Falls back to the last space so we never split mid-word.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Look for the last sentence boundary within the limit.
+    candidate = text[:max_chars]
+    for sep in (".\n", ". ", "! ", "? ", ".\t"):
+        idx = candidate.rfind(sep)
+        if idx > 0:
+            return candidate[: idx + 1].rstrip()
+
+    # No sentence boundary — fall back to last whitespace.
+    space_idx = candidate.rfind(" ")
+    if space_idx > 0:
+        return candidate[:space_idx].rstrip()
+
+    # Degenerate case: one giant token.
+    return candidate
 
 
 def _youtube_quota_reason(payload: dict[str, Any] | None) -> str | None:
@@ -79,11 +105,23 @@ class YouTubeCollector(BaseCollector):
         wait=wait_exponential(multiplier=1, min=2, max=20),
         retry=retry_if_exception(_should_retry),
     )
-    async def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _get_json(
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        quota_endpoint: str | None = None,
+        quota_units: int = 0,
+    ) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError("YouTube client not initialized")
 
         response = await self._client.get(path, params=params)
+        # Record quota on response receipt (even if it's an error like 403 quotaExceeded).
+        # If we never got a response (timeouts, network errors), we don't record.
+        if quota_endpoint and quota_units:
+            quota = get_quota_tracker()
+            quota.record("youtube", quota_endpoint, quota_units)
         response.raise_for_status()
         return cast(dict[str, Any], response.json())
 
@@ -92,6 +130,7 @@ class YouTubeCollector(BaseCollector):
         query: str | None = None,
         limit: int = 50,
         video_type: str | None = None,
+        exclude_source_ids: set[str] | None = None,
         **_kwargs: Any,
     ) -> CollectionResult:
         """
@@ -151,11 +190,25 @@ class YouTubeCollector(BaseCollector):
                 if next_page:
                     search_params["pageToken"] = next_page
 
-                search_data = await self._get_json("/search", params=search_params)
+                search_data = await self._get_json(
+                    "/search",
+                    params=search_params,
+                    quota_endpoint="search.list",
+                    quota_units=YOUTUBE_SEARCH_COST,
+                )
 
                 video_ids = [item["id"]["videoId"] for item in search_data.get("items", [])]
                 if not video_ids:
                     break
+
+                if exclude_source_ids:
+                    video_ids = [vid for vid in video_ids if vid not in exclude_source_ids]
+                    # If this page only returned already-seen videos, try the next page.
+                    if not video_ids:
+                        next_page = search_data.get("nextPageToken")
+                        if not next_page:
+                            break
+                        continue
 
                 stats_data = await self._get_json(
                     "/videos",
@@ -163,9 +216,16 @@ class YouTubeCollector(BaseCollector):
                         "part": "statistics,snippet",
                         "id": ",".join(video_ids),
                     },
+                    quota_endpoint="videos.list",
+                    quota_units=YOUTUBE_VIDEOS_COST,
                 )
 
                 posts.extend(self._parse_video(video) for video in stats_data.get("items", []))
+                # Defensive cap: APIs can occasionally return more items than requested
+                # (or we may overshoot within a single batch). Ensure we never exceed `limit`.
+                if len(posts) >= limit:
+                    posts = posts[:limit]
+                    break
 
                 next_page = search_data.get("nextPageToken")
                 if not next_page:
@@ -238,11 +298,17 @@ class YouTubeCollector(BaseCollector):
         else:
             created_at = datetime.now(UTC)
 
+        # YouTube descriptions are often SEO spam, timestamps, and boilerplate
+        # channel info.  Truncate to ~300 chars at the nearest sentence or word
+        # boundary so sentiment analysis focuses on meaningful introductory text.
+        description = _truncate_description(snippet.get("description") or "", max_chars=300)
+        title_text = snippet.get("title", "")
+
         return CollectedPost(
             platform=self.platform_name,
             source_id=video["id"],
             source_type="video",
-            content=f"{snippet.get('title', '')}\n\n{snippet.get('description', '')}",
+            content=f"{title_text}\n\n{description}",
             author=snippet.get("channelTitle"),
             url=f"https://youtube.com/watch?v={video['id']}",
             created_at=created_at,
