@@ -48,6 +48,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
             patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
             patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
             patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
@@ -93,6 +94,18 @@ class TestCollectOnce:
             mock_youtube.close = AsyncMock()
             mock_youtube_cls.return_value = mock_youtube
 
+            # Mock Bluesky
+            mock_bluesky = AsyncMock()
+            mock_bsky_post = MagicMock()
+            mock_bsky_post.source_id = "bsky456"
+            mock_bsky_post.content = "Cool!"
+            mock_bsky_result = MagicMock()
+            mock_bsky_result.success = True
+            mock_bsky_result.posts = [mock_bsky_post]
+            mock_bluesky.collect.return_value = mock_bsky_result
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
             # Mock DB title
             mock_db_title = MagicMock()
             mock_db_title.id = uuid.uuid4()
@@ -121,11 +134,13 @@ class TestCollectOnce:
                 limit_titles=1,
                 limit_reddit=5,
                 limit_youtube=5,
+                limit_bluesky=5,
             )
 
             assert stats["titles"] == 1
             assert stats["reddit_mentions_inserted"] == 1
             assert stats["youtube_mentions_inserted"] == 1
+            assert stats["bluesky_mentions_inserted"] == 1
             assert stats["metrics_snapshots_upserted"] == 2  # 1-hour and 24-hour
 
     @pytest.mark.asyncio
@@ -135,6 +150,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
             patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
             patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title"),
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
         ):
@@ -158,17 +174,23 @@ class TestCollectOnce:
             mock_youtube.close = AsyncMock()
             mock_youtube_cls.return_value = mock_youtube
 
+            mock_bluesky = AsyncMock()
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
             mock_session = AsyncMock()
             stats = await runner.collect_once(
                 mock_session,
                 limit_titles=10,
                 limit_reddit=10,
                 limit_youtube=10,
+                limit_bluesky=10,
             )
 
             assert stats["titles"] == 0
             assert stats["reddit_mentions_inserted"] == 0
             assert stats["youtube_mentions_inserted"] == 0
+            assert stats["bluesky_mentions_inserted"] == 0
 
     @pytest.mark.asyncio
     async def test_collect_once_with_raw_storage_enabled(self) -> None:
@@ -177,6 +199,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
             patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
             patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
             patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
@@ -216,6 +239,14 @@ class TestCollectOnce:
             mock_youtube.close = AsyncMock()
             mock_youtube_cls.return_value = mock_youtube
 
+            mock_bluesky = AsyncMock()
+            mock_bsky_result = MagicMock()
+            mock_bsky_result.success = False
+            mock_bsky_result.posts = []
+            mock_bluesky.collect.return_value = mock_bsky_result
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
             mock_db_title = MagicMock()
             mock_db_title.id = uuid.uuid4()
             mock_upsert.return_value = mock_db_title
@@ -237,6 +268,7 @@ class TestCollectOnce:
                 limit_titles=1,
                 limit_reddit=1,
                 limit_youtube=1,
+                limit_bluesky=1,
             )
 
             # Should have persisted raw Reddit data
@@ -263,6 +295,7 @@ class TestCollectionJob:
                 limit_titles=10,
                 limit_reddit=10,
                 limit_youtube=10,
+                limit_bluesky=10,
             )
 
             mock_acquire.assert_called_once()
@@ -299,6 +332,7 @@ class TestCollectionJob:
                 limit_titles=10,
                 limit_reddit=10,
                 limit_youtube=10,
+                limit_bluesky=10,
             )
 
             mock_collect.assert_called_once()
@@ -335,6 +369,7 @@ class TestCollectionJob:
                 limit_titles=10,
                 limit_reddit=10,
                 limit_youtube=10,
+                limit_bluesky=10,
             )
 
             # Should still finish with failed status

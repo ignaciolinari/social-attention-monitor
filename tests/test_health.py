@@ -34,6 +34,8 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
         "TMDB_API_KEY",
         "TMDB_ACCESS_TOKEN",
         "TMDB_BEARER_TOKEN",
+        "BLUESKY_IDENTIFIER",
+        "BLUESKY_APP_PASSWORD",
     ):
         monkeypatch.setenv(key, "")
 
@@ -54,6 +56,7 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
     assert payload["reddit_configured"] is False
     assert payload["youtube_configured"] is False
     assert payload["tmdb_configured"] is False
+    assert payload["bluesky_configured"] is False
 
 
 @respx.mock
@@ -61,12 +64,17 @@ def test_health_external_checks(monkeypatch) -> None:
     api.get_settings.cache_clear()
     monkeypatch.setenv("TMDB_API_KEY", "test-key")
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("BLUESKY_IDENTIFIER", "test.bsky.social")
+    monkeypatch.setenv("BLUESKY_APP_PASSWORD", "test-password")
     monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
     monkeypatch.setattr(api, "get_session", _fake_get_session)
     api.settings = api.get_settings()
 
     respx.get("https://api.themoviedb.org/3/configuration").respond(200, json={})
     respx.get("https://www.googleapis.com/youtube/v3/videos").respond(200, json={"items": []})
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors").respond(
+        200, json={"actors": []}
+    )
 
     with TestClient(api.app) as client:
         response = client.get("/health", params={"external": "true"})
@@ -75,3 +83,4 @@ def test_health_external_checks(monkeypatch) -> None:
     payload = response.json()
     assert payload["tmdb_reachable"] is True
     assert payload["youtube_reachable"] is True
+    assert payload["bluesky_reachable"] is True

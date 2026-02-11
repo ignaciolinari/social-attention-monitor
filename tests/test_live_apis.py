@@ -159,6 +159,7 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
                 limit_titles=2,
                 limit_reddit=0,  # Reddit not available
                 limit_youtube=3,
+                limit_bluesky=0,  # Keep this test scoped to TMDB + YouTube
             )
             await session.commit()
 

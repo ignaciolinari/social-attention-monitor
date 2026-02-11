@@ -119,6 +119,7 @@ class TestComputeAndUpsertMetricsSnapshot:
             assert call_kwargs["metrics"]["mention_count"] == 10
             assert call_kwargs["metrics"]["reddit_mentions"] == 7
             assert call_kwargs["metrics"]["youtube_mentions"] == 3
+            assert call_kwargs["metrics"]["bluesky_mentions"] == 0
 
     @pytest.mark.asyncio
     async def test_uses_previous_metrics_for_velocity(self) -> None:
