@@ -223,7 +223,9 @@ class BlueskyCollector(BaseCollector):
             # Parse created_at timestamp from record
             created_at_raw = getattr(record, "created_at", None)
             if isinstance(created_at_raw, datetime):
-                created_at = created_at_raw if created_at_raw.tzinfo else created_at_raw.replace(tzinfo=UTC)
+                created_at = (
+                    created_at_raw if created_at_raw.tzinfo else created_at_raw.replace(tzinfo=UTC)
+                )
             elif isinstance(created_at_raw, str):
                 # Handle ISO format with Z suffix
                 if created_at_raw.endswith("Z"):
