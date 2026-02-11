@@ -21,6 +21,8 @@ _PLACEHOLDER_VALUES = {
     "your_youtube_api_key_here",
     "your_tmdb_api_key_here",
     "your_tmdb_access_token_here",
+    "your_handle.bsky.social",
+    "your_app_password_here",
 }
 
 
@@ -120,6 +122,25 @@ class TMDBSettings(BaseSettings):
         return _is_effectively_set(self.api_key) or _is_effectively_set(self.access_token)
 
 
+class BlueskySettings(BaseSettings):
+    """Bluesky API configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="BLUESKY_",
+        env_file=_ENV_FILE,
+        env_file_encoding=_ENV_FILE_ENCODING,
+        extra="ignore",
+    )
+
+    identifier: str = Field(default="", description="Bluesky handle (e.g., user.bsky.social)")
+    app_password: str = Field(default="", description="Bluesky app password")
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Bluesky API is configured."""
+        return _is_effectively_set(self.identifier) and _is_effectively_set(self.app_password)
+
+
 class DatabaseSettings(BaseSettings):
     """Database configuration."""
 
@@ -134,12 +155,27 @@ class DatabaseSettings(BaseSettings):
         default="postgresql+asyncpg://sam:sam@localhost:5432/sam",
         description="Async database URL",
     )
+    demo_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("DATABASE_DEMO_URL", "SAM_DEMO_DATABASE_URL"),
+        description="Async database URL to use when DEMO_MODE=true (optional)",
+    )
     sync_url: str = Field(
         default="postgresql://sam:sam@localhost:5432/sam",
         description="Sync database URL (for migrations)",
     )
+    demo_sync_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("DATABASE_DEMO_SYNC_URL", "SAM_DEMO_DATABASE_SYNC_URL"),
+        description="Sync database URL to use when DEMO_MODE=true (optional)",
+    )
     echo: bool = Field(default=False, description="Echo SQL queries")
     pool_size: int = Field(default=5, description="Connection pool size")
+
+    def effective_url(self, *, demo_mode: bool) -> str:
+        if demo_mode and _is_effectively_set(self.demo_url):
+            return self.demo_url
+        return self.url
 
 
 class RedisSettings(BaseSettings):
@@ -292,6 +328,7 @@ class Settings(BaseSettings):
     reddit: RedditSettings = Field(default_factory=RedditSettings)
     youtube: YouTubeSettings = Field(default_factory=YouTubeSettings)
     tmdb: TMDBSettings = Field(default_factory=TMDBSettings)
+    bluesky: BlueskySettings = Field(default_factory=BlueskySettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     collector: CollectorSettings = Field(default_factory=CollectorSettings)

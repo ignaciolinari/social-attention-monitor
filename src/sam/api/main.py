@@ -40,6 +40,8 @@ from sam.alerts import (
     get_unacknowledged_count,
 )
 from sam.cache import cache_get_json, cache_set_json, close_redis, get_redis
+from sam.collectors.base import BaseCollector
+from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
@@ -81,8 +83,10 @@ class HealthResponse(BaseModel):
     reddit_configured: bool
     youtube_configured: bool
     tmdb_configured: bool
+    bluesky_configured: bool
     youtube_reachable: bool | None = None
     tmdb_reachable: bool | None = None
+    bluesky_reachable: bool | None = None
     database_ok: bool
     redis_ok: bool
 
@@ -198,6 +202,7 @@ class MetricsSnapshotResponse(BaseModel):
     unique_authors: int
     reddit_mentions: int
     youtube_mentions: int
+    bluesky_mentions: int = 0
 
     mention_velocity: float | None
     velocity_change: float | None
@@ -205,6 +210,7 @@ class MetricsSnapshotResponse(BaseModel):
     avg_sentiment: float | None
     sentiment_volatility: float | None
     positive_ratio: float | None
+    negative_ratio: float | None = None
 
     attention_index: float | None
     hype_acceleration: float | None
@@ -528,7 +534,16 @@ async def _collect_mentions_live(
     title: str,
     limit: int,
 ) -> tuple[list[MentionResponse], dict[str, dict[str, Any]], list[Any], datetime]:
-    collector = _reddit_collector if platform == "reddit" else _youtube_collector
+    collector: BaseCollector | None = None
+    if platform == "reddit":
+        collector = _reddit_collector
+    elif platform == "youtube":
+        collector = _youtube_collector
+    elif platform == "bluesky":
+        collector = _bluesky_collector
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported platform: {platform}")
+
     if not collector:
         raise HTTPException(status_code=503, detail=f"{platform} collector not initialized")
 
@@ -576,7 +591,17 @@ async def _refresh_mentions_background(
     limit: int,
 ) -> None:
     try:
-        collector = _reddit_collector if platform == "reddit" else _youtube_collector
+        collector: BaseCollector | None = None
+        if platform == "reddit":
+            collector = _reddit_collector
+        elif platform == "youtube":
+            collector = _youtube_collector
+        elif platform == "bluesky":
+            collector = _bluesky_collector
+        else:
+            logger.warning(f"[api] Unsupported platform for refresh: {platform}")
+            return
+
         if not collector:
             logger.warning(f"[api] {platform} collector not initialized for refresh")
             return
@@ -617,13 +642,14 @@ async def _refresh_mentions_background(
 # Collectors (initialized on startup)
 _reddit_collector: RedditCollector | None = None
 _youtube_collector: YouTubeCollector | None = None
+_bluesky_collector: BlueskyCollector | None = None
 _tmdb_collector: TMDBCollector | None = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan handler."""
-    global _reddit_collector, _youtube_collector, _tmdb_collector
+    global _reddit_collector, _youtube_collector, _bluesky_collector, _tmdb_collector
 
     settings = get_settings()
 
@@ -632,6 +658,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     _reddit_collector = RedditCollector()
     _youtube_collector = YouTubeCollector()
+    _bluesky_collector = BlueskyCollector()
     _tmdb_collector = TMDBCollector()
 
     # Start WebSocket cleanup task
@@ -646,6 +673,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await _reddit_collector.close()
     if _youtube_collector:
         await _youtube_collector.close()
+    if _bluesky_collector:
+        await _bluesky_collector.close()
     if _tmdb_collector:
         await _tmdb_collector.close()
     await close_redis()
@@ -825,6 +854,7 @@ async def health_check(
     redis_ok = False
     tmdb_reachable: bool | None = None
     youtube_reachable: bool | None = None
+    bluesky_reachable: bool | None = None
 
     # DB check
     try:
@@ -882,6 +912,20 @@ async def health_check(
         else:
             youtube_reachable = False
 
+        if settings.bluesky.is_configured:
+            try:
+                # Unauthenticated public endpoint — no credentials needed.
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.get(
+                        "https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors",
+                        params={"q": "test", "limit": 1},
+                    )
+                bluesky_reachable = resp.status_code == 200
+            except Exception:
+                bluesky_reachable = False
+        else:
+            bluesky_reachable = False
+
     return HealthResponse(
         status="healthy",
         version=__version__,
@@ -890,8 +934,10 @@ async def health_check(
         reddit_configured=settings.reddit.is_configured,
         youtube_configured=settings.youtube.is_configured,
         tmdb_configured=settings.tmdb.is_configured,
+        bluesky_configured=settings.bluesky.is_configured,
         youtube_reachable=youtube_reachable,
         tmdb_reachable=tmdb_reachable,
+        bluesky_reachable=bluesky_reachable,
         database_ok=database_ok,
         redis_ok=redis_ok,
     )
@@ -1165,6 +1211,72 @@ async def get_youtube_mentions(
     )
 
 
+@app.get("/api/v1/mentions/bluesky", response_model=MentionsResponse)
+async def get_bluesky_mentions(
+    background_tasks: BackgroundTasks,
+    title: str = Query(..., description="Title to search for"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> MentionsResponse:
+    """Get Bluesky posts for a title."""
+    db_result = await _get_mentions_from_db(
+        title=title, platform="bluesky", limit=limit, offset=offset
+    )
+    if db_result is not None:
+        if db_result.total_count > 0 or offset > 0:
+            if (
+                offset == 0
+                and db_result.title_id
+                and (
+                    db_result.last_collected_at is None
+                    or db_result.last_collected_at
+                    < datetime.now(UTC) - timedelta(minutes=settings.mentions_refresh_stale_minutes)
+                )
+            ):
+                background_tasks.add_task(
+                    _refresh_mentions_background,
+                    title=title,
+                    title_id=db_result.title_id,
+                    platform="bluesky",
+                    limit=limit,
+                )
+            return MentionsResponse(
+                title=title,
+                platform="bluesky",
+                mentions=db_result.mentions,
+                total_count=db_result.total_count,
+                next_offset=db_result.next_offset,
+                collected_at=datetime.now(UTC).isoformat(),
+            )
+    elif offset > 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Title not found in DB for paginated results",
+        )
+
+    mentions, sentiment_by_source_id, posts, collected_at = await _collect_mentions_live(
+        platform="bluesky",
+        title=title,
+        limit=limit,
+    )
+
+    if db_result is not None:
+        await _persist_mentions(
+            title_id=db_result.title_id,
+            platform="bluesky",
+            posts=posts,
+            sentiment_by_source_id=sentiment_by_source_id,
+        )
+
+    return MentionsResponse(
+        title=title,
+        platform="bluesky",
+        mentions=mentions,
+        total_count=len(mentions),
+        collected_at=collected_at.isoformat(),
+    )
+
+
 @app.get("/api/v1/sentiment/analyze")
 async def analyze_text_sentiment(
     text: str = Query(..., min_length=1, max_length=5000, description="Text to analyze"),
@@ -1260,11 +1372,13 @@ async def metrics_trending(
                     unique_authors=m.unique_authors,
                     reddit_mentions=m.reddit_mentions,
                     youtube_mentions=m.youtube_mentions,
+                    bluesky_mentions=getattr(m, "bluesky_mentions", 0) or 0,
                     mention_velocity=m.mention_velocity,
                     velocity_change=m.velocity_change,
                     avg_sentiment=m.avg_sentiment,
                     sentiment_volatility=m.sentiment_volatility,
                     positive_ratio=m.positive_ratio,
+                    negative_ratio=getattr(m, "negative_ratio", None),
                     attention_index=m.attention_index,
                     hype_acceleration=m.hype_acceleration,
                 ),
@@ -1327,11 +1441,13 @@ async def metrics_timeseries(
                 unique_authors=p.unique_authors,
                 reddit_mentions=p.reddit_mentions,
                 youtube_mentions=p.youtube_mentions,
+                bluesky_mentions=getattr(p, "bluesky_mentions", 0) or 0,
                 mention_velocity=p.mention_velocity,
                 velocity_change=p.velocity_change,
                 avg_sentiment=p.avg_sentiment,
                 sentiment_volatility=p.sentiment_volatility,
                 positive_ratio=p.positive_ratio,
+                negative_ratio=getattr(p, "negative_ratio", None),
                 attention_index=p.attention_index,
                 hype_acceleration=p.hype_acceleration,
             )

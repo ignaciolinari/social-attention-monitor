@@ -176,6 +176,7 @@ def main() -> None:
                     "avg_sentiment": m.get("avg_sentiment"),
                     "reddit_mentions": m.get("reddit_mentions"),
                     "youtube_mentions": m.get("youtube_mentions"),
+                    "bluesky_mentions": m.get("bluesky_mentions"),
                     "snapshot_time": m.get("snapshot_time"),
                     "title_id": t["id"],
                 }
@@ -260,7 +261,7 @@ def main() -> None:
         df = df.sort_values("snapshot_time")
         long = df.melt(
             id_vars=["snapshot_time"],
-            value_vars=["reddit_mentions", "youtube_mentions"],
+            value_vars=["reddit_mentions", "youtube_mentions", "bluesky_mentions"],
             var_name="platform",
             value_name="mentions",
         )
@@ -510,6 +511,13 @@ At 5-minute polling, budget allows ~4 full cycles per day.
             st.info(
                 "TMDB uses per-second rate limiting (~40 req/s), not a daily quota. "
                 "No tracking needed — the built-in retry-on-429 handles it."
+            )
+
+            st.subheader("Bluesky (AT Protocol) API")
+            st.info(
+                "Bluesky doesn't publish a clear daily quota like YouTube. "
+                "Treat it as rate-limited (429/5xx) rather than a fixed per-day budget. "
+                "No daily quota tracking needed — conservative pacing plus retry/backoff on 429 handles it."
             )
 
     # Footer

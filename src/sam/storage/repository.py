@@ -327,6 +327,7 @@ async def upsert_metrics_snapshot(
         "unique_authors": int(metrics.get("unique_authors", 0)),
         "reddit_mentions": int(metrics.get("reddit_mentions", 0)),
         "youtube_mentions": int(metrics.get("youtube_mentions", 0)),
+        "bluesky_mentions": int(metrics.get("bluesky_mentions", 0)),
         "total_engagement": int(metrics.get("total_engagement", 0)),
         "mention_velocity": metrics.get("mention_velocity"),
         "velocity_change": metrics.get("velocity_change"),

@@ -24,6 +24,7 @@ dependencies = [
     "praw>=7.7.0",                    # Reddit API
     "google-api-python-client>=2.0",  # YouTube API
     "httpx>=0.27.0",                  # Async HTTP client (TMDB, etc.)
+    "atproto>=0.0.55",                # Bluesky API
 
     # Database
     "sqlalchemy[asyncio]>=2.0",       # ORM
@@ -135,6 +136,8 @@ module = [
     "praw.*",
     "prawcore",
     "prawcore.*",
+    "atproto",
+    "atproto.*",
     "vaderSentiment.*",
     "nltk",
     "nltk.*",

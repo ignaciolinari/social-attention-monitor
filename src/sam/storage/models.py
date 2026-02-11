@@ -44,6 +44,7 @@ class Platform(StrEnum):
 
     REDDIT = "reddit"
     YOUTUBE = "youtube"
+    BLUESKY = "bluesky"
 
 
 class Title(Base):
@@ -168,6 +169,7 @@ class MetricsSnapshot(Base):
     # Platform breakdown
     reddit_mentions: Mapped[int] = mapped_column(Integer, default=0)
     youtube_mentions: Mapped[int] = mapped_column(Integer, default=0)
+    bluesky_mentions: Mapped[int] = mapped_column(Integer, default=0)
 
     # Engagement
     total_engagement: Mapped[int] = mapped_column(Integer, default=0)  # likes + comments + shares

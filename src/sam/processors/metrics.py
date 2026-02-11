@@ -46,6 +46,9 @@ class MetricsPayload(TypedDict, total=False):
     like_count: int
     comment_count: int
     view_count: int
+    likes: int
+    reposts: int
+    replies: int
 
 
 class SentimentPayload(TypedDict, total=False):
@@ -133,6 +136,10 @@ class MetricsCalculator:
                     metrics.get("view_count", 0)
                     + metrics.get("like_count", 0)
                     + metrics.get("comment_count", 0)
+                )
+            elif platform == "bluesky":
+                total_engagement += (
+                    metrics.get("likes", 0) + metrics.get("reposts", 0) + metrics.get("replies", 0)
                 )
             else:
                 # Fallback: sum all known engagement keys.
@@ -262,6 +269,7 @@ class MetricsCalculator:
         baselines = {
             "reddit": {"mentions": 100, "engagement": 5000},
             "youtube": {"mentions": 20, "engagement": 100000},
+            "bluesky": {"mentions": 50, "engagement": 2000},
         }
 
         normalized = {}

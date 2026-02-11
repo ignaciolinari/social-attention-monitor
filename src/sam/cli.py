@@ -70,6 +70,9 @@ def main() -> None:
         f"  YouTube: {'✅ Configured' if settings.youtube.is_configured else '❌ Not configured'}"
     )
     print(f"  TMDB:    {'✅ Configured' if settings.tmdb.is_configured else '❌ Not configured'}")
+    print(
+        f"  Bluesky: {'✅ Configured' if settings.bluesky.is_configured else '❌ Not configured'}"
+    )
     print()
 
     print("Available commands:")
@@ -99,6 +102,7 @@ async def demo() -> None:
     """Run a demo of the collectors."""
     setup_logging()
 
+    from sam.collectors.bluesky import BlueskyCollector
     from sam.collectors.reddit import RedditCollector
     from sam.collectors.tmdb import TMDBCollector
     from sam.collectors.youtube import YouTubeCollector
@@ -134,8 +138,19 @@ async def demo() -> None:
         print(f"  • {video.author} | Views: {views:,}")
     print()
 
+    # Bluesky posts
+    bluesky = BlueskyCollector(demo_mode=True)
+    bsky_result = await bluesky.collect(query="The Last of Us", limit=5)
+    print(f"🦋 Bluesky Posts ({len(bsky_result.posts)} posts):")
+    for post in bsky_result.posts[:3]:
+        sentiment = analyze_sentiment(post.content)
+        likes = post.metrics.get("likes", 0)
+        print(f"  • @{post.author} | Likes: {likes} | Sentiment: {sentiment.label}")
+    print()
+
     await tmdb.close()
     await youtube.close()
+    await bluesky.close()
 
     print("✅ Demo complete! Run 'make run-dashboard' to see the dashboard.\n")
 

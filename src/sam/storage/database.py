@@ -29,8 +29,15 @@ def get_engine() -> AsyncEngine:
 
     if _engine is None:
         settings = get_settings()
+
+        db_url = settings.database.effective_url(demo_mode=settings.demo_mode)
+        if settings.demo_mode and db_url == settings.database.url:
+            logger.warning(
+                "[db] DEMO_MODE=true but DATABASE_DEMO_URL not set; "
+                "demo data will be written into the primary database"
+            )
         _engine = create_async_engine(
-            settings.database.url,
+            db_url,
             echo=settings.database.echo,
             pool_size=settings.database.pool_size,
             pool_pre_ping=True,
@@ -38,7 +45,7 @@ def get_engine() -> AsyncEngine:
             # within 30s, the connection is killed rather than hanging forever.
             connect_args={"timeout": 10, "command_timeout": 30},
         )
-        logger.info(f"[db] Created async engine for {settings.database.url.split('@')[-1]}")
+        logger.info(f"[db] Created async engine for {db_url.split('@')[-1]}")
 
     return _engine
 

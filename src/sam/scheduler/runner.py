@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.alerts import AlertManager
 from sam.collectors.base import CollectedPost
+from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
@@ -87,11 +88,13 @@ async def collect_once(
     limit_titles: int,
     limit_reddit: int,
     limit_youtube: int,
+    limit_bluesky: int,
     run_id: uuid.UUID | None = None,
     # Allow callers to pass pre-built collectors so they can be reused.
     tmdb: TMDBCollector | None = None,
     reddit: RedditCollector | None = None,
     youtube: YouTubeCollector | None = None,
+    bluesky: BlueskyCollector | None = None,
 ) -> dict[str, int]:
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
@@ -104,9 +107,11 @@ async def collect_once(
     own_tmdb = tmdb is None
     own_reddit = reddit is None
     own_youtube = youtube is None
+    own_bluesky = bluesky is None
     tmdb = tmdb or TMDBCollector()
     reddit = reddit or RedditCollector()
     youtube = youtube or YouTubeCollector()
+    bluesky = bluesky or BlueskyCollector()
 
     quota = get_quota_tracker()
 
@@ -114,6 +119,7 @@ async def collect_once(
         "titles": 0,
         "reddit_mentions_inserted": 0,
         "youtube_mentions_inserted": 0,
+        "bluesky_mentions_inserted": 0,
         "youtube_skipped_quota": 0,
         "metrics_snapshots_upserted": 0,
     }
@@ -217,6 +223,37 @@ async def collect_once(
                         stats["youtube_mentions_inserted"] += inserted
                         logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
 
+                # -- Bluesky --
+                # Only attempt collection if the platform is actually configured.
+                if bluesky.is_configured or settings.demo_mode:
+                    bluesky_result = await bluesky.collect(query=t.title, limit=limit_bluesky)
+                    if bluesky_result.success and bluesky_result.posts:
+                        if settings.storage.enable_raw_data_storage:
+                            await persist_collection_result(
+                                bluesky_result,
+                                raw_data_dir=settings.storage.raw_data_dir,
+                                title=t.title,
+                                title_id=db_title.id,
+                                query=t.title,
+                                run_id=run_id,
+                            )
+                        # Run sentiment analysis
+                        sentiments = await asyncio.to_thread(
+                            analyze_sentiment_batch,
+                            [p.content for p in bluesky_result.posts],
+                        )
+                        inserted = await insert_mentions(
+                            session,
+                            title_id=db_title.id,
+                            platform="bluesky",
+                            posts=bluesky_result.posts,
+                            sentiment_by_source_id=_build_sentiment_map(
+                                bluesky_result.posts, sentiments
+                            ),
+                        )
+                        stats["bluesky_mentions_inserted"] += inserted
+                        logger.info(f"[runner] {t.title} bluesky mentions inserted: {inserted}")
+
                 # Persist metrics snapshots (hourly buckets).
                 for window_hours in (1, 24):
                     await compute_and_upsert_metrics_snapshot(
@@ -234,11 +271,13 @@ async def collect_once(
 
     finally:
         # Only close collectors we created ourselves.
-        closeable: list[TMDBCollector | RedditCollector | YouTubeCollector] = []
+        closeable: list[TMDBCollector | RedditCollector | YouTubeCollector | BlueskyCollector] = []
         if own_reddit:
             closeable.append(reddit)
         if own_youtube:
             closeable.append(youtube)
+        if own_bluesky:
+            closeable.append(bluesky)
         if own_tmdb:
             closeable.append(tmdb)
         for collector in closeable:
@@ -265,9 +304,11 @@ async def _collection_job(
     limit_titles: int,
     limit_reddit: int,
     limit_youtube: int,
+    limit_bluesky: int,
     tmdb: TMDBCollector | None = None,
     reddit: RedditCollector | None = None,
     youtube: YouTubeCollector | None = None,
+    bluesky: BlueskyCollector | None = None,
 ) -> None:
     lease_ttl = max(60, interval_minutes * 60 * 2)
     started = datetime.now(UTC)
@@ -296,6 +337,7 @@ async def _collection_job(
                 "limit_titles": limit_titles,
                 "limit_reddit": limit_reddit,
                 "limit_youtube": limit_youtube,
+                "limit_bluesky": limit_bluesky,
             },
         )
 
@@ -306,10 +348,12 @@ async def _collection_job(
                 limit_titles=limit_titles,
                 limit_reddit=limit_reddit,
                 limit_youtube=limit_youtube,
+                limit_bluesky=limit_bluesky,
                 run_id=run.id,
                 tmdb=tmdb,
                 reddit=reddit,
                 youtube=youtube,
+                bluesky=bluesky,
             )
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
             try:
@@ -381,6 +425,7 @@ async def run_forever(
     limit_titles: int,
     limit_reddit: int,
     limit_youtube: int,
+    limit_bluesky: int,
 ) -> None:
     logger.info(f"[runner] Scheduling collection every {interval_minutes} minutes")
     owner_id = uuid.uuid4()
@@ -389,6 +434,7 @@ async def run_forever(
     tmdb = TMDBCollector()
     reddit = RedditCollector()
     youtube = YouTubeCollector()
+    bluesky = BlueskyCollector()
 
     job_kwargs: dict[str, object] = {
         "owner_id": owner_id,
@@ -396,9 +442,11 @@ async def run_forever(
         "limit_titles": limit_titles,
         "limit_reddit": limit_reddit,
         "limit_youtube": limit_youtube,
+        "limit_bluesky": limit_bluesky,
         "tmdb": tmdb,
         "reddit": reddit,
         "youtube": youtube,
+        "bluesky": bluesky,
     }
 
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -422,9 +470,11 @@ async def run_forever(
         limit_titles=limit_titles,
         limit_reddit=limit_reddit,
         limit_youtube=limit_youtube,
+        limit_bluesky=limit_bluesky,
         tmdb=tmdb,
         reddit=reddit,
         youtube=youtube,
+        bluesky=bluesky,
     )
 
     stop_event = asyncio.Event()
@@ -436,7 +486,7 @@ async def run_forever(
         await stop_event.wait()
     finally:
         scheduler.shutdown(wait=False)
-        for collector in (reddit, youtube, tmdb):
+        for collector in (reddit, youtube, bluesky, tmdb):
             with contextlib.suppress(Exception):
                 await collector.close()
 
@@ -456,6 +506,7 @@ def main() -> None:
         "--limit-reddit", type=int, default=settings.collector.max_posts_per_subreddit
     )
     parser.add_argument("--limit-youtube", type=int, default=20)
+    parser.add_argument("--limit-bluesky", type=int, default=50)
     args = parser.parse_args()
 
     async def _run() -> None:
@@ -481,6 +532,7 @@ def main() -> None:
                     limit_titles=args.limit_titles,
                     limit_reddit=args.limit_reddit,
                     limit_youtube=args.limit_youtube,
+                    limit_bluesky=args.limit_bluesky,
                 )
             else:
                 await run_forever(
@@ -488,6 +540,7 @@ def main() -> None:
                     limit_titles=args.limit_titles,
                     limit_reddit=args.limit_reddit,
                     limit_youtube=args.limit_youtube,
+                    limit_bluesky=args.limit_bluesky,
                 )
         finally:
             await close_db()

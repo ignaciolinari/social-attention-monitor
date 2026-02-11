@@ -52,6 +52,8 @@ async def compute_and_upsert_metrics_snapshot(
             prev_breakdown["reddit"] = previous.reddit_mentions
         if previous.youtube_mentions:
             prev_breakdown["youtube"] = previous.youtube_mentions
+        if previous.bluesky_mentions:
+            prev_breakdown["bluesky"] = previous.bluesky_mentions
 
         previous_metrics = EngagementMetrics(
             mention_count=previous.mention_count,
@@ -103,6 +105,7 @@ async def compute_and_upsert_metrics_snapshot(
             "unique_authors": computed.unique_authors,
             "reddit_mentions": computed.platform_breakdown.get("reddit", 0),
             "youtube_mentions": computed.platform_breakdown.get("youtube", 0),
+            "bluesky_mentions": computed.platform_breakdown.get("bluesky", 0),
             "total_engagement": computed.total_engagement,
             "mention_velocity": computed.mention_velocity,
             "velocity_change": computed.velocity_change,
