@@ -43,6 +43,10 @@ class RedditSettings(BaseSettings):
         extra="ignore",
     )
 
+    enabled: bool = Field(
+        default=False,
+        description="Enable Reddit collector (set to true when you have valid API keys)",
+    )
     client_id: str = Field(default="", description="Reddit OAuth client ID")
     client_secret: str = Field(default="", description="Reddit OAuth client secret")
     user_agent: str = Field(
@@ -51,9 +55,14 @@ class RedditSettings(BaseSettings):
     )
 
     @property
-    def is_configured(self) -> bool:
-        """Check if Reddit credentials are configured."""
+    def has_credentials(self) -> bool:
+        """Check if Reddit credentials are set (regardless of enabled flag)."""
         return _is_effectively_set(self.client_id) and _is_effectively_set(self.client_secret)
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Reddit is enabled and credentials are configured."""
+        return self.enabled and self.has_credentials
 
 
 class YouTubeSettings(BaseSettings):
@@ -66,6 +75,10 @@ class YouTubeSettings(BaseSettings):
         extra="ignore",
     )
 
+    enabled: bool = Field(
+        default=True,
+        description="Enable YouTube collector",
+    )
     api_key: str = Field(default="", description="YouTube Data API v3 key")
     search_order: str = Field(
         default="relevance",
@@ -93,9 +106,14 @@ class YouTubeSettings(BaseSettings):
         return v
 
     @property
-    def is_configured(self) -> bool:
-        """Check if YouTube API is configured."""
+    def has_credentials(self) -> bool:
+        """Check if YouTube API key is set (regardless of enabled flag)."""
         return _is_effectively_set(self.api_key)
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if YouTube is enabled and API key is configured."""
+        return self.enabled and self.has_credentials
 
 
 class TMDBSettings(BaseSettings):
@@ -132,13 +150,22 @@ class BlueskySettings(BaseSettings):
         extra="ignore",
     )
 
+    enabled: bool = Field(
+        default=True,
+        description="Enable Bluesky collector",
+    )
     identifier: str = Field(default="", description="Bluesky handle (e.g., user.bsky.social)")
     app_password: str = Field(default="", description="Bluesky app password")
 
     @property
-    def is_configured(self) -> bool:
-        """Check if Bluesky API is configured."""
+    def has_credentials(self) -> bool:
+        """Check if Bluesky credentials are set (regardless of enabled flag)."""
         return _is_effectively_set(self.identifier) and _is_effectively_set(self.app_password)
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Bluesky is enabled and credentials are configured."""
+        return self.enabled and self.has_credentials
 
 
 class DatabaseSettings(BaseSettings):
