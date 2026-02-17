@@ -52,3 +52,61 @@ async def cache_set_json(key: str, value: Any, *, ttl_seconds: int) -> None:
     if r is None:
         return
     await r.set(key, json.dumps(value), ex=ttl_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Collector toggles (shared between API and scheduler via Redis)
+# ---------------------------------------------------------------------------
+
+_COLLECTOR_TOGGLE_PREFIX = "sam:collector:"
+_COLLECTOR_TOGGLE_TTL = 86400  # 24h — stale overrides auto-expire
+
+
+async def collector_toggle_set(platform: str, enabled: bool) -> None:
+    """Persist a collector enabled override in Redis."""
+    r = get_redis()
+    if r is None:
+        return
+    key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
+    await r.set(key, json.dumps(enabled), ex=_COLLECTOR_TOGGLE_TTL)
+
+
+async def collector_toggle_get(platform: str) -> bool | None:
+    """Read a collector enabled override from Redis.
+
+    Returns ``None`` if no override exists (caller should fall back to env var).
+    """
+    r = get_redis()
+    if r is None:
+        return None
+    key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
+    val = await r.get(key)
+    if val is None:
+        return None
+    try:
+        return bool(json.loads(val))
+    except Exception:
+        return None
+
+
+def collector_toggle_get_sync(platform: str) -> bool | None:
+    """Synchronous version of :func:`collector_toggle_get` for CLI use.
+
+    Opens a short-lived sync Redis connection, reads the override key,
+    and returns ``True``/``False`` or ``None`` if no override exists.
+    """
+    import redis as sync_redis
+
+    settings = get_settings()
+    if not settings.redis.url:
+        return None
+    try:
+        r = sync_redis.from_url(settings.redis.url, decode_responses=True)  # type: ignore[no-untyped-call]
+        key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
+        val = r.get(key)
+        r.close()
+        if val is None:
+            return None
+        return bool(json.loads(val))
+    except Exception:
+        return None
