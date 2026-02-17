@@ -54,6 +54,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
             patch("sam.scheduler.runner.persist_collection_result"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
             # Configure settings
             settings = MagicMock()
@@ -153,6 +154,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title"),
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
             settings = MagicMock()
             settings.demo_mode = True
@@ -205,6 +207,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
             patch("sam.scheduler.runner.persist_collection_result") as mock_persist,
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
             settings = MagicMock()
             settings.demo_mode = True

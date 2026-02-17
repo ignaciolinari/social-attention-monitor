@@ -57,6 +57,10 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
     assert payload["youtube_configured"] is False
     assert payload["tmdb_configured"] is False
     assert payload["bluesky_configured"] is False
+    # Enabled reflects the toggle state (independent of API keys)
+    assert "reddit_enabled" in payload
+    assert "youtube_enabled" in payload
+    assert "bluesky_enabled" in payload
 
 
 @respx.mock
