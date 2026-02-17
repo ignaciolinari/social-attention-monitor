@@ -99,6 +99,8 @@ async def collect_once(
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
 
+    from sam.cache import collector_toggle_get
+
     if not settings.demo_mode and not settings.tmdb.is_configured:
         raise RuntimeError("TMDB not configured. Set TMDB_API_KEY or TMDB_ACCESS_TOKEN in .env")
 
@@ -133,14 +135,25 @@ async def collect_once(
         logger.info(f"[runner] Trending titles: {len(titles)}")
         stats["titles"] = len(titles)
 
+        # Read runtime toggle states once per cycle (not per title) to
+        # avoid redundant Redis reads — Finding 6.
+        reddit_runtime = await collector_toggle_get("reddit")
+        yt_runtime = await collector_toggle_get("youtube")
+        bsky_runtime = await collector_toggle_get("bluesky")
+
+        reddit_enabled = reddit_runtime if reddit_runtime is not None else settings.reddit.enabled
+        yt_enabled = yt_runtime if yt_runtime is not None else settings.youtube.enabled
+        bsky_enabled = bsky_runtime if bsky_runtime is not None else settings.bluesky.enabled
+
         snapshot_time = _snapshot_hour(datetime.now(UTC))
         for t in titles:
             try:
                 db_title = await upsert_title(session, t)
 
                 # -- Reddit --
-                # Only attempt collection if the platform is actually configured.
-                if reddit.is_configured or settings.demo_mode:
+                # Use has_credentials (not is_configured) so a runtime toggle
+                # can enable collection even when env enabled=false.
+                if (settings.reddit.has_credentials or settings.demo_mode) and reddit_enabled:
                     reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
                     if reddit_result.success and reddit_result.posts:
                         if settings.storage.enable_raw_data_storage:
@@ -171,8 +184,9 @@ async def collect_once(
                         logger.info(f"[runner] {t.title} reddit mentions inserted: {inserted}")
 
                 # -- YouTube --
-                # Only attempt collection if the platform is actually configured.
-                if youtube.is_configured or settings.demo_mode:
+                # Use has_credentials (not is_configured) so a runtime toggle
+                # can enable collection even when env enabled=false.
+                if (settings.youtube.has_credentials or settings.demo_mode) and yt_enabled:
                     # Guard: skip YouTube for this title if we'd exceed the daily budget.
                     estimated_cost = 100 + 1  # search.list (100) + videos.list (1)
                     if not quota.youtube_has_budget(cost=estimated_cost) and not settings.demo_mode:
@@ -224,8 +238,9 @@ async def collect_once(
                         logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
 
                 # -- Bluesky --
-                # Only attempt collection if the platform is actually configured.
-                if bluesky.is_configured or settings.demo_mode:
+                # Use has_credentials (not is_configured) so a runtime toggle
+                # can enable collection even when env enabled=false.
+                if (settings.bluesky.has_credentials or settings.demo_mode) and bsky_enabled:
                     bluesky_result = await bluesky.collect(query=t.title, limit=limit_bluesky)
                     if bluesky_result.success and bluesky_result.posts:
                         if settings.storage.enable_raw_data_storage:

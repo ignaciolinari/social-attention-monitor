@@ -24,6 +24,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Platform brand colours
+COLOR_REDDIT = "#FF4500"  # Reddit orange
+COLOR_YOUTUBE = "#FF0000"  # YouTube red
+COLOR_BLUESKY = "#0085FF"  # Bluesky blue
+
+_PLATFORM_COLORS = {
+    "reddit_mentions": COLOR_REDDIT,
+    "youtube_mentions": COLOR_YOUTUBE,
+    "bluesky_mentions": COLOR_BLUESKY,
+}
+
 
 def _api_base_url() -> str:
     # Allow explicit override
@@ -43,6 +54,30 @@ def _get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]
     url = _api_base_url() + path
     timeout_s = get_settings().dashboard_http_timeout_seconds
     r = httpx.get(url, params=params, timeout=timeout_s)
+    r.raise_for_status()
+    data: Any = r.json()
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object from API")
+    return data
+
+
+def _get_json_nocache(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Like _get_json but never cached (for mutable state like toggles)."""
+    url = _api_base_url() + path
+    timeout_s = get_settings().dashboard_http_timeout_seconds
+    r = httpx.get(url, params=params, timeout=timeout_s)
+    r.raise_for_status()
+    data: Any = r.json()
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object from API")
+    return data
+
+
+def _put_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Send a PUT request to the API."""
+    url = _api_base_url() + path
+    timeout_s = get_settings().dashboard_http_timeout_seconds
+    r = httpx.put(url, params=params, timeout=timeout_s)
     r.raise_for_status()
     data: Any = r.json()
     if not isinstance(data, dict):
@@ -135,12 +170,58 @@ def main() -> None:
         except Exception:
             pass
 
+        # Collector toggles
+        st.divider()
+        st.header("📡 Collectors")
+        try:
+            coll_data = _get_json_nocache("/api/v1/collectors/status")
+            collectors = {c["platform"]: c for c in coll_data.get("collectors", [])}
+
+            # Reddit — always locked off, tooltip on hover
+            reddit_info = collectors.get("reddit", {})
+            st.toggle(
+                ":orange[Reddit]",
+                value=reddit_info.get("enabled", False),
+                disabled=True,
+                key="toggle_reddit",
+                help=reddit_info.get("message", "Reddit requires .env configuration"),
+            )
+
+            # YouTube — toggleable
+            yt_info = collectors.get("youtube", {})
+            yt_current = yt_info.get("enabled", True)
+            yt_new = st.toggle(":red[YouTube]", value=yt_current, key="toggle_youtube")
+            if yt_new != yt_current:
+                _put_json("/api/v1/collectors/youtube/toggle", params={"enabled": yt_new})
+                st.rerun()
+
+            # Bluesky — toggleable
+            bsky_info = collectors.get("bluesky", {})
+            bsky_current = bsky_info.get("enabled", True)
+            bsky_new = st.toggle(":blue[Bluesky]", value=bsky_current, key="toggle_bluesky")
+            if bsky_new != bsky_current:
+                _put_json("/api/v1/collectors/bluesky/toggle", params={"enabled": bsky_new})
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"Could not load collector status: {e}")
+
         st.divider()
         if st.button("Refresh data"):
             _get_json.clear()
 
     # Main content
     hours = _time_range_to_hours(time_range)
+
+    # Determine which collectors are currently active
+    _enabled_platforms: set[str] = {"reddit", "youtube", "bluesky"}  # default: all
+    try:
+        coll_data = _get_json_nocache("/api/v1/collectors/status")
+        _enabled_platforms = {
+            c["platform"] for c in coll_data.get("collectors", []) if c.get("enabled")
+        }
+    except Exception:
+        pass
 
     trending: dict[str, Any] | None = None
     try:
@@ -185,8 +266,19 @@ def main() -> None:
         df = pd.DataFrame(rows).sort_values(
             by="attention_index", ascending=False, na_position="last"
         )
+
+        # Hide mention columns for disabled collectors
+        _drop_cols = ["title_id"]
+        _platform_cols = {
+            "reddit": "reddit_mentions",
+            "youtube": "youtube_mentions",
+            "bluesky": "bluesky_mentions",
+        }
+        for plat, col in _platform_cols.items():
+            if plat not in _enabled_platforms and col in df.columns:
+                _drop_cols.append(col)
         st.dataframe(
-            df.drop(columns=["title_id"]),
+            df.drop(columns=_drop_cols, errors="ignore"),
             width="stretch",
             hide_index=True,
         )
@@ -259,13 +351,34 @@ def main() -> None:
         df = pd.DataFrame(points)
         df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
         df = df.sort_values("snapshot_time")
+
+        # Only show platforms that are enabled
+        _plat_vars = []
+        if "reddit" in _enabled_platforms:
+            _plat_vars.append("reddit_mentions")
+        if "youtube" in _enabled_platforms:
+            _plat_vars.append("youtube_mentions")
+        if "bluesky" in _enabled_platforms:
+            _plat_vars.append("bluesky_mentions")
+
+        if not _plat_vars:
+            st.info("All collectors are currently disabled.")
+            return
+
         long = df.melt(
             id_vars=["snapshot_time"],
-            value_vars=["reddit_mentions", "youtube_mentions", "bluesky_mentions"],
+            value_vars=_plat_vars,
             var_name="platform",
             value_name="mentions",
         )
-        fig = px.area(long, x="snapshot_time", y="mentions", color="platform", groupnorm=None)
+        fig = px.area(
+            long,
+            x="snapshot_time",
+            y="mentions",
+            color="platform",
+            groupnorm=None,
+            color_discrete_map=_PLATFORM_COLORS,
+        )
         st.plotly_chart(fig, width="stretch")
 
     elif page == "💬 Sentiment":
@@ -440,60 +553,64 @@ def main() -> None:
 
             # YouTube section
             st.subheader("YouTube Data API v3")
-
-            budget = yt.get("daily_budget", 10_000)
-            used = yt.get("total_units", 0)
-            remaining = yt.get("budget_remaining", budget)
-            used_pct = yt.get("budget_used_pct", 0.0)
-            total_calls = yt.get("total_calls", 0)
-            quota_date = yt.get("date", "—")
-
-            # Status color
-            if used_pct < 50:
-                status_color = "🟢"
-                status_text = "Healthy"
-            elif used_pct < 80:
-                status_color = "🟡"
-                status_text = "Moderate"
+            if "youtube" not in _enabled_platforms:
+                st.warning("YouTube collector is currently disabled.")
             else:
-                status_color = "🔴"
-                status_text = "Critical"
+                budget = yt.get("daily_budget", 10_000)
+                used = yt.get("total_units", 0)
+                remaining = yt.get("budget_remaining", budget)
+                used_pct = yt.get("budget_used_pct", 0.0)
+                total_calls = yt.get("total_calls", 0)
+                quota_date = yt.get("date", "—")
 
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.metric("Units Used", f"{used:,}")
-            with c2:
-                st.metric("Remaining", f"{remaining:,}")
-            with c3:
-                st.metric("Total Calls", f"{total_calls:,}")
-            with c4:
-                st.metric("Status", f"{status_color} {status_text}")
+                # Status color
+                if used_pct < 50:
+                    status_color = "🟢"
+                    status_text = "Healthy"
+                elif used_pct < 80:
+                    status_color = "🟡"
+                    status_text = "Moderate"
+                else:
+                    status_color = "🔴"
+                    status_text = "Critical"
 
-            # Big progress bar
-            st.markdown(f"**Daily Budget (PT day): {used:,} / {budget:,} units ({used_pct:.1f}%)**")
-            st.progress(min(used_pct / 100, 1.0))
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.metric("Units Used", f"{used:,}")
+                with c2:
+                    st.metric("Remaining", f"{remaining:,}")
+                with c3:
+                    st.metric("Total Calls", f"{total_calls:,}")
+                with c4:
+                    st.metric("Status", f"{status_color} {status_text}")
 
-            # Call breakdown
-            calls_by_endpoint = yt.get("calls_by_endpoint", {})
-            if calls_by_endpoint:
-                st.markdown("**Calls by endpoint:**")
-                for endpoint, count in sorted(calls_by_endpoint.items()):
-                    cost_per_call = 100 if "search" in endpoint else 1
-                    st.caption(
-                        f"  • `{endpoint}`: {count} calls "
-                        f"({count * cost_per_call:,} units @ {cost_per_call} units/call)"
-                    )
+                # Big progress bar
+                st.markdown(
+                    f"**Daily Budget (PT day): {used:,} / {budget:,} units ({used_pct:.1f}%)**"
+                )
+                st.progress(min(used_pct / 100, 1.0))
 
-            # YouTube resets at midnight Pacific Time, not UTC.
-            st.caption(f"Quota date (PT): {quota_date} — {_youtube_quota_reset_text()}")
-            if quota_data.get("last_run_at"):
-                st.caption(f"Last collection run: {quota_data['last_run_at']}")
+                # Call breakdown
+                calls_by_endpoint = yt.get("calls_by_endpoint", {})
+                if calls_by_endpoint:
+                    st.markdown("**Calls by endpoint:**")
+                    for endpoint, count in sorted(calls_by_endpoint.items()):
+                        cost_per_call = 100 if "search" in endpoint else 1
+                        st.caption(
+                            f"  • `{endpoint}`: {count} calls "
+                            f"({count * cost_per_call:,} units @ {cost_per_call} units/call)"
+                        )
 
-            st.divider()
+                # YouTube resets at midnight Pacific Time, not UTC.
+                st.caption(f"Quota date (PT): {quota_date} — {_youtube_quota_reset_text()}")
+                if quota_data.get("last_run_at"):
+                    st.caption(f"Last collection run: {quota_data['last_run_at']}")
 
-            # Cost reference
-            st.subheader("Cost Reference")
-            st.markdown("""
+                st.divider()
+
+                # Cost reference
+                st.subheader("Cost Reference")
+                st.markdown("""
 | Endpoint | Cost | Description |
 |---|---|---|
 | `search.list` | 100 units | Search for videos by query |
@@ -514,11 +631,14 @@ At 5-minute polling, budget allows ~4 full cycles per day.
             )
 
             st.subheader("Bluesky (AT Protocol) API")
-            st.info(
-                "Bluesky doesn't publish a clear daily quota like YouTube. "
-                "Treat it as rate-limited (429/5xx) rather than a fixed per-day budget. "
-                "No daily quota tracking needed — conservative pacing plus retry/backoff on 429 handles it."
-            )
+            if "bluesky" not in _enabled_platforms:
+                st.warning("Bluesky collector is currently disabled.")
+            else:
+                st.info(
+                    "Bluesky doesn't publish a clear daily quota like YouTube. "
+                    "Treat it as rate-limited (429/5xx) rather than a fixed per-day budget. "
+                    "No daily quota tracking needed — conservative pacing plus retry/backoff on 429 handles it."
+                )
 
     # Footer
     st.divider()

@@ -65,14 +65,46 @@ def main() -> None:
 
     # Check API configurations
     print("API Status:")
-    print(f"  Reddit:  {'✅ Configured' if settings.reddit.is_configured else '❌ Not configured'}")
-    print(
-        f"  YouTube: {'✅ Configured' if settings.youtube.is_configured else '❌ Not configured'}"
-    )
+
+    # Check for runtime overrides from the dashboard (shared via Redis).
+    from sam.cache import collector_toggle_get_sync
+
+    def _effective_enabled(platform: str, env_enabled: bool) -> tuple[bool, str]:
+        """Return (effective_enabled, suffix) merging env + Redis override."""
+        override = collector_toggle_get_sync(platform)
+        if override is not None and override != env_enabled:
+            tag = "enabled" if override else "disabled"
+            return override, f"  (runtime override: {tag})"
+        return env_enabled, ""
+
+    reddit_on, reddit_suffix = _effective_enabled("reddit", settings.reddit.enabled)
+    if not reddit_on:
+        reddit_status = "⏸️  Disabled"
+    elif settings.reddit.has_credentials:
+        reddit_status = "✅ Configured"
+    else:
+        reddit_status = "❌ Not configured"
+    print(f"  Reddit:  {reddit_status}{reddit_suffix}")
+
+    yt_on, yt_suffix = _effective_enabled("youtube", settings.youtube.enabled)
+    if not yt_on:
+        youtube_status = "⏸️  Disabled"
+    elif settings.youtube.has_credentials:
+        youtube_status = "✅ Configured"
+    else:
+        youtube_status = "❌ Not configured"
+    print(f"  YouTube: {youtube_status}{yt_suffix}")
+
     print(f"  TMDB:    {'✅ Configured' if settings.tmdb.is_configured else '❌ Not configured'}")
-    print(
-        f"  Bluesky: {'✅ Configured' if settings.bluesky.is_configured else '❌ Not configured'}"
-    )
+
+    bsky_on, bsky_suffix = _effective_enabled("bluesky", settings.bluesky.enabled)
+    if not bsky_on:
+        bluesky_status = "⏸️  Disabled"
+    elif settings.bluesky.has_credentials:
+        bluesky_status = "✅ Configured"
+    else:
+        bluesky_status = "❌ Not configured"
+    print(f"  Bluesky: {bluesky_status}{bsky_suffix}")
     print()
 
     print("Available commands:")

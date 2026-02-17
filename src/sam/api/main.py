@@ -84,6 +84,9 @@ class HealthResponse(BaseModel):
     youtube_configured: bool
     tmdb_configured: bool
     bluesky_configured: bool
+    reddit_enabled: bool = False
+    youtube_enabled: bool = True
+    bluesky_enabled: bool = True
     youtube_reachable: bool | None = None
     tmdb_reachable: bool | None = None
     bluesky_reachable: bool | None = None
@@ -272,6 +275,22 @@ class AlertAckResponse(BaseModel):
 
     acknowledged: bool
     alert_id: str
+
+
+class CollectorPlatformStatus(BaseModel):
+    """Status of a single collector platform."""
+
+    platform: str
+    enabled: bool
+    api_configured: bool
+    toggleable: bool = True
+    message: str | None = None
+
+
+class CollectorStatusResponse(BaseModel):
+    """Status of all collector platforms."""
+
+    collectors: list[CollectorPlatformStatus]
 
 
 # ============================================================================
@@ -645,6 +664,47 @@ _youtube_collector: YouTubeCollector | None = None
 _bluesky_collector: BlueskyCollector | None = None
 _tmdb_collector: TMDBCollector | None = None
 
+# Runtime overrides for collector enabled state.
+# Keys: "reddit", "youtube", "bluesky".  Values override the env-var defaults.
+# In-memory cache is updated on toggle; Redis is used for cross-process sharing.
+_collector_enabled_overrides: dict[str, bool] = {}
+
+_TOGGLEABLE_PLATFORMS = {"youtube", "bluesky"}
+
+
+def _api_keys_configured(platform: str) -> bool:
+    """Check if the API keys for *platform* are set (ignoring the enabled toggle)."""
+    from sam.config import _is_effectively_set
+
+    s = get_settings()
+    if platform == "reddit":
+        return _is_effectively_set(s.reddit.client_id) and _is_effectively_set(
+            s.reddit.client_secret
+        )
+    if platform == "youtube":
+        return _is_effectively_set(s.youtube.api_key)
+    if platform == "bluesky":
+        return _is_effectively_set(s.bluesky.identifier) and _is_effectively_set(
+            s.bluesky.app_password
+        )
+    return False
+
+
+async def is_collector_enabled(platform: str) -> bool:
+    """Check if a collector is enabled (in-memory override > Redis > env default)."""
+    # 1) In-memory override (same process)
+    if platform in _collector_enabled_overrides:
+        return _collector_enabled_overrides[platform]
+    # 2) Redis override (cross-process, from dashboard toggle)
+    from sam.cache import collector_toggle_get
+
+    redis_val = await collector_toggle_get(platform)
+    if redis_val is not None:
+        return redis_val
+    # 3) Env var default
+    s = get_settings()
+    return getattr(getattr(s, platform, None), "enabled", False)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -892,7 +952,7 @@ async def health_check(
         else:
             tmdb_reachable = False
 
-        if settings.youtube.is_configured:
+        if _api_keys_configured("youtube"):
             try:
                 # Use videos.list with a well-known video ID (1 quota unit)
                 # instead of search.list (100 quota units) to avoid burning
@@ -912,7 +972,7 @@ async def health_check(
         else:
             youtube_reachable = False
 
-        if settings.bluesky.is_configured:
+        if _api_keys_configured("bluesky"):
             try:
                 # Unauthenticated public endpoint — no credentials needed.
                 async with httpx.AsyncClient(timeout=timeout) as client:
@@ -931,10 +991,13 @@ async def health_check(
         version=__version__,
         timestamp=datetime.now(UTC).isoformat(),
         demo_mode=settings.demo_mode,
-        reddit_configured=settings.reddit.is_configured,
-        youtube_configured=settings.youtube.is_configured,
+        reddit_configured=_api_keys_configured("reddit"),
+        youtube_configured=_api_keys_configured("youtube"),
         tmdb_configured=settings.tmdb.is_configured,
-        bluesky_configured=settings.bluesky.is_configured,
+        bluesky_configured=_api_keys_configured("bluesky"),
+        reddit_enabled=await is_collector_enabled("reddit"),
+        youtube_enabled=await is_collector_enabled("youtube"),
+        bluesky_enabled=await is_collector_enabled("bluesky"),
         youtube_reachable=youtube_reachable,
         tmdb_reachable=tmdb_reachable,
         bluesky_reachable=bluesky_reachable,
@@ -998,6 +1061,73 @@ async def pipeline_quota() -> PipelineQuotaResponse:
     return PipelineQuotaResponse(
         youtube=ApiQuotaInfo(**quota.to_api_dict()),
         last_run_at=quota.last_run_at,
+    )
+
+
+@app.get("/api/v1/collectors/status", response_model=CollectorStatusResponse)
+async def collectors_status() -> CollectorStatusResponse:
+    """Get enabled/disabled status of all collector platforms."""
+    platforms = []
+    for name in ("reddit", "youtube", "bluesky"):
+        enabled = await is_collector_enabled(name)
+        api_ok = _api_keys_configured(name)
+        toggleable = name in _TOGGLEABLE_PLATFORMS
+        message = None
+        if name == "reddit":
+            message = (
+                "Reddit API access denied. Set REDDIT_ENABLED=true in .env "
+                "with valid API keys to enable."
+            )
+        platforms.append(
+            CollectorPlatformStatus(
+                platform=name,
+                enabled=enabled,
+                api_configured=api_ok,
+                toggleable=toggleable,
+                message=message,
+            )
+        )
+
+    return CollectorStatusResponse(collectors=platforms)
+
+
+@app.put("/api/v1/collectors/{platform}/toggle")
+async def toggle_collector(
+    platform: str,
+    enabled: bool = Query(..., description="Enable or disable the collector"),
+) -> CollectorPlatformStatus:
+    """
+    Toggle a collector on or off at runtime.
+
+    Reddit cannot be toggled from the dashboard — it requires setting
+    REDDIT_ENABLED=true in .env with valid API keys.
+    """
+    if platform not in ("reddit", "youtube", "bluesky"):
+        raise HTTPException(status_code=404, detail=f"Unknown platform: {platform}")
+
+    if platform == "reddit":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Reddit cannot be toggled from the dashboard. "
+                "Set REDDIT_ENABLED=true in .env with valid API keys to enable."
+            ),
+        )
+
+    _collector_enabled_overrides[platform] = enabled
+    # Persist to Redis so the scheduler process sees it too
+    from sam.cache import collector_toggle_set
+
+    await collector_toggle_set(platform, enabled)
+    logger.info(f"[api] Collector '{platform}' toggled to enabled={enabled}")
+
+    api_ok = _api_keys_configured(platform)
+
+    return CollectorPlatformStatus(
+        platform=platform,
+        enabled=enabled,
+        api_configured=api_ok,
+        toggleable=True,
     )
 
 
