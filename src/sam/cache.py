@@ -20,7 +20,7 @@ def get_redis() -> redis.Redis | None:
     if not settings.redis.url:
         return None
     if _redis is None:
-        _redis = redis.from_url(settings.redis.url, decode_responses=True)  # type: ignore[no-untyped-call]
+        _redis = redis.from_url(settings.redis.url, decode_responses=True)
         logger.info("[redis] client initialized")
     return _redis
 
@@ -101,12 +101,12 @@ def collector_toggle_get_sync(platform: str) -> bool | None:
     if not settings.redis.url:
         return None
     try:
-        r = sync_redis.from_url(settings.redis.url, decode_responses=True)  # type: ignore[no-untyped-call]
+        r = sync_redis.from_url(settings.redis.url, decode_responses=True)
         key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
         val = r.get(key)
         r.close()
         if val is None:
             return None
-        return bool(json.loads(val))
+        return bool(json.loads(str(val)))
     except Exception:
         return None

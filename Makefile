@@ -1,5 +1,5 @@
-.PHONY: help install dev test test-integration lint format typecheck run-api run-dashboard run-collector \
-	db-up db-down db-logs db-reset db-migrate db-upgrade db-downgrade db-setup clean demo lock audit
+.PHONY: help install dev ci-deps test test-ci test-integration lint format typecheck run-api run-dashboard run-collector \
+	db-up db-down db-logs db-reset db-migrate db-upgrade db-downgrade db-setup clean demo lock audit ci-check
 
 # Default target
 help:
@@ -7,10 +7,13 @@ help:
 	@echo ""
 	@echo "  install       Install production dependencies"
 	@echo "  dev           Install development dependencies"
+	@echo "  ci-deps       Install pinned CI dependencies"
 	@echo "  test          Run tests with coverage"
+	@echo "  test-ci       Run tests exactly like CI"
 	@echo "  test-integration Run tests with Docker Postgres"
 	@echo "  lint          Run linter (ruff)"
 	@echo "  format        Format code (ruff)"
+	@echo "  ci-check      Run lint, format check, mypy, and tests like CI"
 	@echo "  run-api       Start FastAPI server"
 	@echo "  run-dashboard Start Streamlit dashboard"
 	@echo "  run-collector Start data collector"
@@ -40,11 +43,18 @@ dev:
 	pip install -e ".[dev]"
 	pre-commit install
 
+ci-deps:
+	$(VENV_PY) -m pip install -r requirements-dev.lock
+	$(VENV_PY) -m pip install -e .
+
 # Testing
 VENV_PY := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
 
 test:
 	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
+
+test-ci:
+	$(VENV_PY) -m pytest tests/ -v --cov=src/sam --cov-report=xml --cov-report=term
 
 test-integration:
 	@echo "Starting Postgres for integration tests..."
@@ -72,7 +82,13 @@ format:
 
 # Type checking
 typecheck:
-	mypy src/
+	$(VENV_PY) -m mypy src --ignore-missing-imports
+
+ci-check: ci-deps
+	ruff check src tests
+	ruff format --check src tests
+	$(VENV_PY) -m mypy src --ignore-missing-imports
+	$(MAKE) test-ci
 
 # Running services
 run-api:

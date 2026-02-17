@@ -43,6 +43,7 @@ def client(monkeypatch):
     """Create a test client with mocked dependencies."""
     monkeypatch.setattr(api, "get_session", _fake_get_session)
     monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
 
     with TestClient(api.app) as c:
         yield c

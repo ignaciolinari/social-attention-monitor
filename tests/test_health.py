@@ -17,6 +17,13 @@ class _DummyRedis:
     async def ping(self) -> bool:
         return True
 
+    async def get(self, _key: str) -> None:
+        return None
+
+    async def set(self, _key: str, _value: str, ex: int | None = None) -> None:
+        del ex
+        pass
+
 
 @asynccontextmanager
 async def _fake_get_session():
@@ -44,6 +51,7 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
 
     monkeypatch.setattr(api, "get_session", _fake_get_session)
     monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
 
     with TestClient(api.app) as client:
         response = client.get("/health")
@@ -71,6 +79,7 @@ def test_health_external_checks(monkeypatch) -> None:
     monkeypatch.setenv("BLUESKY_IDENTIFIER", "test.bsky.social")
     monkeypatch.setenv("BLUESKY_APP_PASSWORD", "test-password")
     monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
     monkeypatch.setattr(api, "get_session", _fake_get_session)
     api.settings = api.get_settings()
 
