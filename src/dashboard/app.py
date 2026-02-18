@@ -6,16 +6,23 @@ Streamlit-based dashboard for visualizing social attention data.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from sam.config import get_settings
+
+if TYPE_CHECKING:
+    from sam.processors.sentiment import SentimentAnalyzer, SentimentModel
 
 st.set_page_config(
     page_title="SAM - Social Attention Monitor",
@@ -23,6 +30,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Auto-refresh every 5 minutes so new collector data is picked up promptly.
+# The refresh itself is lightweight (API re-fetch); only the collector is expensive.
+_DASHBOARD_REFRESH_MINUTES = 5
+st_autorefresh(interval=_DASHBOARD_REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
 # Platform brand colours
 COLOR_REDDIT = "#FF4500"  # Reddit orange
@@ -34,6 +46,18 @@ _PLATFORM_COLORS = {
     "youtube_mentions": COLOR_YOUTUBE,
     "bluesky_mentions": COLOR_BLUESKY,
 }
+
+_SENTIMENT_COMPARISON_CACHE_TTL_SECONDS = 10 * 60
+_SENTIMENT_COMPARISON_CACHE_MAX_ENTRIES = 20
+
+
+@dataclass(frozen=True)
+class _TitleOption:
+    id: str
+    name: str
+    media_type: str
+    release_year: str
+    tmdb_id: int | None
 
 
 def _api_base_url() -> str:
@@ -110,6 +134,159 @@ def _youtube_quota_reset_text() -> str:
     return f"Resets in {hours_left}h {mins_left}m (midnight PT)"
 
 
+@st.cache_resource
+def _get_cached_analyzer(model: SentimentModel) -> SentimentAnalyzer:
+    """Cache sentiment analyzer instances across Streamlit reruns."""
+    from sam.processors.sentiment import SentimentAnalyzer
+
+    return SentimentAnalyzer(model=model)
+
+
+def _get_trending_metrics(window_hours: int, limit: int = 20) -> dict[str, Any] | None:
+    """Load trending metrics with user-friendly error handling."""
+    try:
+        return _get_json(
+            "/api/v1/metrics/trending",
+            params={"window_hours": window_hours, "limit": limit},
+        )
+    except Exception as e:
+        st.error(f"Failed to load trending metrics: {e}")
+        return None
+
+
+def _build_title_options(items: list[dict[str, Any]]) -> list[_TitleOption]:
+    """Build stable select options that remain unique across duplicate names."""
+    options: list[_TitleOption] = []
+    for item in items:
+        title = item.get("title")
+        if not isinstance(title, dict):
+            continue
+        title_id_raw = title.get("id")
+        title_name_raw = title.get("title")
+        media_type_raw = title.get("media_type")
+        if not isinstance(title_id_raw, str) or not isinstance(title_name_raw, str):
+            continue
+        release_date_raw = title.get("release_date")
+        release_year = (
+            release_date_raw[:4]
+            if isinstance(release_date_raw, str) and len(release_date_raw) >= 4
+            else "n/a"
+        )
+        tmdb_id_raw = title.get("tmdb_id")
+        tmdb_id = int(tmdb_id_raw) if isinstance(tmdb_id_raw, int) else None
+        options.append(
+            _TitleOption(
+                id=title_id_raw,
+                name=title_name_raw,
+                media_type=str(media_type_raw) if media_type_raw is not None else "unknown",
+                release_year=release_year,
+                tmdb_id=tmdb_id,
+            )
+        )
+    return options
+
+
+def _title_option_label(option: _TitleOption) -> str:
+    tmdb_text = f"TMDB {option.tmdb_id}" if option.tmdb_id is not None else option.id[:8]
+    return f"{option.name} ({option.media_type}, {option.release_year}) · {tmdb_text}"
+
+
+def _sentiment_comparison_cache_key(
+    *,
+    title_id: str,
+    platform: str,
+    translate_enabled: bool,
+    contents: list[str],
+) -> str:
+    digest_source = "\x1f".join(contents)
+    digest = hashlib.sha1(digest_source.encode("utf-8", errors="ignore")).hexdigest()
+    return f"{title_id}|{platform}|translate={translate_enabled}|{digest}"
+
+
+def _prune_sentiment_comparison_cache(
+    cache: dict[str, dict[str, Any]],
+    *,
+    now: float,
+) -> None:
+    """Evict expired entries and enforce LRU size bound."""
+    expired_keys = [
+        key
+        for key, entry in cache.items()
+        if now - float(entry.get("created_at", now)) > _SENTIMENT_COMPARISON_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        cache.pop(key, None)
+
+    if len(cache) <= _SENTIMENT_COMPARISON_CACHE_MAX_ENTRIES:
+        return
+    while len(cache) > _SENTIMENT_COMPARISON_CACHE_MAX_ENTRIES:
+        lru_key = min(cache.items(), key=lambda kv: float(kv[1].get("last_access", now)))[0]
+        cache.pop(lru_key, None)
+
+
+def _build_sentiment_comparison_rows(
+    mentions: list[dict[str, Any]],
+    *,
+    translate_enabled: bool,
+    vader: SentimentAnalyzer,
+    roberta: SentimentAnalyzer,
+) -> tuple[list[dict[str, Any]], int]:
+    analyzable_mentions: list[dict[str, Any]] = []
+    original_texts: list[str] = []
+    for mention in mentions:
+        original = (mention.get("content") or "").strip()
+        if not original:
+            continue
+        analyzable_mentions.append(mention)
+        original_texts.append(original)
+
+    if not analyzable_mentions:
+        return [], 0
+
+    processed_texts = original_texts
+    if translate_enabled:
+        from sam.utils.translation import translate_batch_to_english
+
+        processed_texts, _changed_count, _failed_count = translate_batch_to_english(original_texts)
+
+    vader_results = vader.analyze_batch(processed_texts)
+    roberta_results = roberta.analyze_batch(processed_texts)
+
+    disagreements = 0
+    rows: list[dict[str, Any]] = []
+    for mention, original_text, processed_text, v_res, r_res in zip(
+        analyzable_mentions,
+        original_texts,
+        processed_texts,
+        vader_results,
+        roberta_results,
+        strict=True,
+    ):
+        if (v_res.label == "positive" and r_res.label == "negative") or (
+            v_res.label == "negative" and r_res.label == "positive"
+        ):
+            disagreements += 1
+
+        content_display = processed_text.replace("\n", " ")
+        if processed_text != original_text:
+            content_display = f"🌐 {content_display}"
+
+        rows.append(
+            {
+                "Platform": mention.get("platform"),
+                "Content": content_display,
+                "VADER": f"{v_res.compound:.2f} ({v_res.label})",
+                "RoBERTa": f"{r_res.compound:.2f} ({r_res.label})",
+                "Diff": abs(v_res.compound - r_res.compound),
+                "_original": original_text.replace("\n", " ")
+                if processed_text != original_text
+                else None,
+            }
+        )
+
+    return rows, disagreements
+
+
 def main() -> None:
     """Main dashboard entry point."""
     st.title("📊 Social Attention Monitor")
@@ -125,6 +302,7 @@ def main() -> None:
                 "📈 Time Series",
                 "🔄 Platform Comparison",
                 "💬 Sentiment",
+                "⚖️ Sentiment Comparison",
                 "🚨 Alerts",
                 "📡 API Quota",
             ],
@@ -133,8 +311,8 @@ def main() -> None:
 
         st.divider()
         st.header("⚙️ Settings")
-        time_range = st.selectbox("Time Range", ["Last 24 hours", "Last 7 days", "Last 30 days"])
-        window_hours = st.selectbox("Metrics Window", [1, 24], index=1)
+        time_range = st.selectbox("Time range", ["Last 24 hours", "Last 7 days", "Last 30 days"])
+        window_hours = st.selectbox("Metrics window", [1, 24], index=1)
 
         st.divider()
         st.header("🔌 API")
@@ -173,9 +351,10 @@ def main() -> None:
         # Collector toggles
         st.divider()
         st.header("📡 Collectors")
+        _sidebar_coll_data: dict[str, Any] | None = None
         try:
-            coll_data = _get_json_nocache("/api/v1/collectors/status")
-            collectors = {c["platform"]: c for c in coll_data.get("collectors", [])}
+            _sidebar_coll_data = _get_json_nocache("/api/v1/collectors/status")
+            collectors = {c["platform"]: c for c in _sidebar_coll_data.get("collectors", [])}
 
             # Reddit — always locked off, tooltip on hover
             reddit_info = collectors.get("reddit", {})
@@ -213,27 +392,16 @@ def main() -> None:
     # Main content
     hours = _time_range_to_hours(time_range)
 
-    # Determine which collectors are currently active
+    # Reuse collector status already fetched in the sidebar to avoid a duplicate HTTP call
     _enabled_platforms: set[str] = {"reddit", "youtube", "bluesky"}  # default: all
-    try:
-        coll_data = _get_json_nocache("/api/v1/collectors/status")
+    if _sidebar_coll_data is not None:
         _enabled_platforms = {
-            c["platform"] for c in coll_data.get("collectors", []) if c.get("enabled")
+            c["platform"] for c in _sidebar_coll_data.get("collectors", []) if c.get("enabled")
         }
-    except Exception:
-        pass
-
-    trending: dict[str, Any] | None = None
-    try:
-        trending = _get_json(
-            "/api/v1/metrics/trending",
-            params={"window_hours": window_hours, "limit": 20},
-        )
-    except Exception as e:
-        st.error(f"Failed to load trending metrics: {e}")
 
     if page == "🔥 Trending Now":
         st.header("🔥 Trending Now")
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
         if not trending:
             st.info("No trending data available yet. Run the collector first.")
             return
@@ -286,16 +454,23 @@ def main() -> None:
         st.caption(f"Updated: {trending.get('collected_at')}")
 
     elif page == "📈 Time Series":
-        st.header("📈 Time Series Analysis")
+        st.header("📈 Time series analysis")
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
         if not trending or not trending.get("items"):
             st.info("No titles available yet. Populate the DB first.")
             return
 
-        title_options = [
-            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
-        ]
-        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
-        selected_id = dict(title_options)[selected_label]
+        title_options = _build_title_options(trending.get("items", []))
+        if not title_options:
+            st.info("No title options available yet.")
+            return
+        selected_title = st.selectbox(
+            "Select title",
+            title_options,
+            format_func=_title_option_label,
+            key="timeseries_title",
+        )
+        selected_id = selected_title.id
 
         try:
             ts = _get_json(
@@ -319,21 +494,28 @@ def main() -> None:
         fig1 = px.line(df, x="snapshot_time", y="mention_count", markers=True)
         st.plotly_chart(fig1, width="stretch")
 
-        st.subheader("Attention Index over time")
+        st.subheader("Attention index over time")
         fig2 = px.line(df, x="snapshot_time", y="attention_index", markers=True)
         st.plotly_chart(fig2, width="stretch")
 
     elif page == "🔄 Platform Comparison":
         st.header("🔄 Platform Comparison")
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
         if not trending or not trending.get("items"):
             st.info("No titles available yet. Populate the DB first.")
             return
 
-        title_options = [
-            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
-        ]
-        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
-        selected_id = dict(title_options)[selected_label]
+        title_options = _build_title_options(trending.get("items", []))
+        if not title_options:
+            st.info("No title options available yet.")
+            return
+        selected_title = st.selectbox(
+            "Select title",
+            title_options,
+            format_func=_title_option_label,
+            key="platform_title",
+        )
+        selected_id = selected_title.id
 
         try:
             ts = _get_json(
@@ -382,21 +564,41 @@ def main() -> None:
         st.plotly_chart(fig, width="stretch")
 
     elif page == "💬 Sentiment":
-        st.header("💬 Sentiment Distribution")
+        st.header("💬 Sentiment distribution")
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
         if not trending or not trending.get("items"):
             st.info("No titles available yet. Populate the DB first.")
             return
 
-        title_options = [
-            (it["title"]["title"], it["title"]["id"]) for it in trending.get("items", [])
-        ]
-        selected_label = st.selectbox("Select title", [t[0] for t in title_options])
-        selected_id = dict(title_options)[selected_label]
-
-        ts = _get_json(
-            "/api/v1/metrics/timeseries",
-            params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
+        title_options = _build_title_options(trending.get("items", []))
+        if not title_options:
+            st.info("No title options available yet.")
+            return
+        selected_title = st.selectbox(
+            "Select title",
+            title_options,
+            format_func=_title_option_label,
+            key="sentiment_title",
         )
+        selected_id = selected_title.id
+
+        sentiment_display = st.selectbox(
+            "Sentiment model",
+            ["VADER", "RoBERTa", "Both"],
+            index=2,
+            help="Controls the sentiment model used for charts and metrics on this page.",
+            key="sentiment_display",
+        )
+
+        try:
+            ts = _get_json(
+                "/api/v1/metrics/timeseries",
+                params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
+            )
+        except Exception as e:
+            st.error(f"Failed to load sentiment data: {e}")
+            return
+
         points = ts.get("points", [])
         if not points:
             st.info("No snapshots found for this title.")
@@ -406,24 +608,425 @@ def main() -> None:
         df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
         df = df.sort_values("snapshot_time")
 
+        # Guard against None values in raw_metrics
+        if "raw_metrics" not in df.columns:
+            df["raw_metrics"] = [{} for _ in range(len(df))]
+        df["raw_metrics"] = df["raw_metrics"].apply(lambda x: x if isinstance(x, dict) else {})
+        configured_sentiment_model = get_settings().sentiment_model
+
+        # Resolve RoBERTa values from either:
+        # 1) secondary model aggregates from BOTH mode, or
+        # 2) primary aggregates when the primary model is RoBERTa.
+        resolved_roberta = df.apply(
+            lambda row: (
+                (
+                    ((row["raw_metrics"].get("sentiment_secondary") or {}).get("avg_sentiment")),
+                    ((row["raw_metrics"].get("sentiment_secondary") or {}).get("positive_ratio")),
+                )
+                if isinstance(row["raw_metrics"].get("sentiment_secondary"), dict)
+                else (
+                    (row.get("avg_sentiment"), row.get("positive_ratio"))
+                    if (
+                        row["raw_metrics"].get("sentiment_primary_model") == "roberta"
+                        or (
+                            row["raw_metrics"].get("sentiment_primary_model") is None
+                            and configured_sentiment_model == "roberta"
+                        )
+                    )
+                    else (None, None)
+                )
+            ),
+            axis=1,
+            result_type="expand",
+        )
+        resolved_roberta.columns = ["_roberta_avg", "_roberta_pos"]
+        df["_roberta_avg"] = resolved_roberta["_roberta_avg"]
+        df["_roberta_pos"] = resolved_roberta["_roberta_pos"]
+
+        def _num_or_zero(value: Any) -> float:
+            if value is None:
+                return 0.0
+            try:
+                if pd.isna(value):
+                    return 0.0
+            except Exception:
+                return 0.0
+            return float(value)
+
+        if sentiment_display == "RoBERTa":
+            # Prefer secondary RoBERTa values from BOTH mode, otherwise use primary
+            # values when snapshots were generated with RoBERTa as primary model.
+            df["avg_sentiment"] = df["_roberta_avg"]
+            df["positive_ratio"] = df["_roberta_pos"]
+            if df["avg_sentiment"].isna().all() and df["positive_ratio"].isna().all():
+                st.info("No RoBERTa sentiment data available for this title/time window.")
+                return
+            model_label = "RoBERTa"
+        elif sentiment_display == "VADER":
+            model_label = "VADER"
+        else:
+            model_label = "Both"
+
         c1, c2 = st.columns(2)
         with c1:
-            avg_s = df["avg_sentiment"].iloc[-1]
-            st.metric("Latest avg sentiment", value=f"{(avg_s if avg_s is not None else 0.0):.2f}")
+            if sentiment_display == "Both":
+                # primary (vader)
+                avg_s = df["avg_sentiment"].iloc[-1]
+                st.metric("Latest VADER", value=f"{_num_or_zero(avg_s):.2f}")
+
+                # secondary (roberta)
+                last_raw = df["raw_metrics"].iloc[-1]
+                sec_s = (last_raw.get("sentiment_secondary") or {}).get("avg_sentiment")
+                st.metric("Latest RoBERTa", value=f"{_num_or_zero(sec_s):.2f}")
+            else:
+                avg_s = df["avg_sentiment"].iloc[-1]
+                st.metric(
+                    f"Latest avg sentiment ({model_label})",
+                    value=f"{_num_or_zero(avg_s):.2f}",
+                )
+
         with c2:
-            pr = df["positive_ratio"].iloc[-1]
-            st.metric(
-                "Latest positive ratio", value=f"{(pr if pr is not None else 0.0) * 100:.1f}%"
+            if sentiment_display == "Both":
+                pr = df["positive_ratio"].iloc[-1]
+                st.metric("Latest VADER positive %", value=f"{_num_or_zero(pr) * 100:.1f}%")
+
+                last_raw = df["raw_metrics"].iloc[-1]
+                sec_pr = (last_raw.get("sentiment_secondary") or {}).get("positive_ratio")
+                st.metric(
+                    "Latest RoBERTa positive %",
+                    value=f"{_num_or_zero(sec_pr) * 100:.1f}%",
+                )
+            else:
+                pr = df["positive_ratio"].iloc[-1]
+                st.metric(
+                    f"Latest positive ratio ({model_label})",
+                    value=f"{_num_or_zero(pr) * 100:.1f}%",
+                )
+
+        if sentiment_display == "Both":
+            # Prepare data for multi-line plot
+            df["roberta_avg"] = df["raw_metrics"].apply(
+                lambda x: (x.get("sentiment_secondary") or {}).get("avg_sentiment")
+            )
+            df["roberta_pos"] = df["raw_metrics"].apply(
+                lambda x: (x.get("sentiment_secondary") or {}).get("positive_ratio")
             )
 
-        fig1 = px.line(df, x="snapshot_time", y="avg_sentiment", markers=True)
-        st.plotly_chart(fig1, width="stretch")
+            long_avg = df.melt(
+                id_vars=["snapshot_time"],
+                value_vars=["avg_sentiment", "roberta_avg"],
+                var_name="Model",
+                value_name="Score",
+            )
+            long_avg["Model"] = long_avg["Model"].map(
+                {"avg_sentiment": "VADER", "roberta_avg": "RoBERTa"}
+            )
 
-        fig2 = px.line(df, x="snapshot_time", y="positive_ratio", markers=True)
-        st.plotly_chart(fig2, width="stretch")
+            fig1 = px.line(
+                long_avg,
+                x="snapshot_time",
+                y="Score",
+                color="Model",
+                markers=True,
+                title="Average Sentiment Comparison",
+            )
+            st.plotly_chart(fig1, width="stretch")
+
+            long_pos = df.melt(
+                id_vars=["snapshot_time"],
+                value_vars=["positive_ratio", "roberta_pos"],
+                var_name="Model",
+                value_name="Ratio",
+            )
+            long_pos["Model"] = long_pos["Model"].map(
+                {"positive_ratio": "VADER", "roberta_pos": "RoBERTa"}
+            )
+
+            fig2 = px.line(
+                long_pos,
+                x="snapshot_time",
+                y="Ratio",
+                color="Model",
+                markers=True,
+                title="Positive Ratio Comparison",
+            )
+            st.plotly_chart(fig2, width="stretch")
+
+        else:
+            fig1 = px.line(
+                df,
+                x="snapshot_time",
+                y="avg_sentiment",
+                markers=True,
+                title=f"Average Sentiment ({model_label})",
+            )
+            st.plotly_chart(fig1, width="stretch")
+
+            fig2 = px.line(
+                df,
+                x="snapshot_time",
+                y="positive_ratio",
+                markers=True,
+                title=f"Positive Ratio ({model_label})",
+            )
+            st.plotly_chart(fig2, width="stretch")
+
+    elif page == "⚖️ Sentiment Comparison":
+        st.header("⚖️ Sentiment Comparison (VADER vs RoBERTa)")
+        st.markdown(
+            "Compare the baseline VADER model against the Transformer-based RoBERTa model "
+            "on real social media mentions."
+        )
+
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
+        if not trending or not trending.get("items"):
+            st.info("No titles available yet. Populate the DB first.")
+            return
+
+        title_options = _build_title_options(trending.get("items", []))
+        if not title_options:
+            st.info("No title options available yet.")
+            return
+        selected_title = st.selectbox(
+            "Select title",
+            title_options,
+            format_func=_title_option_label,
+            key="comparison_title",
+        )
+
+        if not _enabled_platforms:
+            st.warning(
+                "All collectors are disabled. Please enable at least one collector platform."
+            )
+            return
+
+        platform_options = ["All"] + sorted(_enabled_platforms)
+        _default_plat = platform_options.index("bluesky") if "bluesky" in platform_options else 0
+        platform = st.selectbox("Select platform", platform_options, index=_default_plat)
+
+        limit = st.slider("Mentions to compare", min_value=5, max_value=50, value=10)
+
+        translate_enabled = st.checkbox(
+            "Translate non-English mentions",
+            value=False,
+            help=(
+                "Translate mentions to English before sentiment analysis. "
+                "Does not change collector/pipeline translation settings."
+            ),
+            key="translate_enabled",
+        )
+        comparison_cache = st.session_state.setdefault("sentiment_comparison_cache", {})
+        cache_stats = st.session_state.setdefault(
+            "sentiment_comparison_cache_stats",
+            {"hits": 0, "misses": 0, "last_run_source": "—"},
+        )
+        st.caption(
+            "Cache policy: "
+            f"{_SENTIMENT_COMPARISON_CACHE_MAX_ENTRIES} entries max, "
+            f"{_SENTIMENT_COMPARISON_CACHE_TTL_SECONDS // 60} minute TTL (LRU eviction)."
+        )
+
+        cache_controls_col1, cache_controls_col2 = st.columns([3, 2])
+        with cache_controls_col1:
+            run_clicked = st.button("Run comparison", key="run_sentiment_comparison")
+        with cache_controls_col2:
+            reset_clicked = st.button("Reset cache", key="reset_comparison_cache")
+
+        if reset_clicked:
+            comparison_cache.clear()
+            cache_stats["hits"] = 0
+            cache_stats["misses"] = 0
+            cache_stats["last_run_source"] = "—"
+            st.session_state.pop("sentiment_comparison_last_result", None)
+            st.rerun()
+
+        if run_clicked:
+            now = time.monotonic()
+            _prune_sentiment_comparison_cache(comparison_cache, now=now)
+
+            fetch_platforms = sorted(_enabled_platforms) if platform == "All" else [platform]
+            with st.spinner(f"Fetching {limit} mentions from {platform}..."):
+                try:
+                    mentions: list[dict[str, Any]] = []
+                    per_platform_limit = (
+                        limit if platform != "All" else max(limit // len(fetch_platforms), 5)
+                    )
+                    for plat in fetch_platforms:
+                        resp = _get_json_nocache(
+                            f"/api/v1/mentions/{plat}",
+                            params={
+                                "title": selected_title.name,
+                                "title_id": selected_title.id,
+                                "limit": per_platform_limit,
+                            },
+                        )
+                        mentions.extend(resp.get("mentions", []))
+                except Exception as e:
+                    st.error(f"Failed to fetch mentions: {e}")
+                    return
+
+            if not mentions:
+                st.warning("No mentions found for this title/platform.")
+                return
+
+            from sam.processors.sentiment import SentimentModel
+
+            content_fingerprint = [
+                (m.get("content") or "").strip()
+                for m in mentions
+                if (m.get("content") or "").strip()
+            ]
+            if not content_fingerprint:
+                st.info("No analyzable mention text found for this selection.")
+                return
+
+            cache_key = _sentiment_comparison_cache_key(
+                title_id=selected_title.id,
+                platform=platform,
+                translate_enabled=translate_enabled,
+                contents=content_fingerprint,
+            )
+            cached_result = comparison_cache.get(cache_key)
+            cache_hint = "fresh"
+
+            if cached_result is not None:
+                entry_created = float(cached_result.get("created_at", now))
+                if now - entry_created <= _SENTIMENT_COMPARISON_CACHE_TTL_SECONDS:
+                    data = cached_result.get("rows", [])
+                    disagreements = int(cached_result.get("disagreements", 0))
+                    cached_result["last_access"] = now
+                    cache_hint = "cache"
+                else:
+                    comparison_cache.pop(cache_key, None)
+                    cached_result = None
+
+            if cached_result is not None and cache_hint == "cache":
+                cache_stats["hits"] = int(cache_stats.get("hits", 0)) + 1
+                cache_stats["last_run_source"] = "cache"
+                st.caption("Using cached comparison results for this mention set.")
+            else:
+                cache_stats["misses"] = int(cache_stats.get("misses", 0)) + 1
+                cache_stats["last_run_source"] = "fresh"
+                progress = st.progress(0)
+                progress.progress(0.2)
+                vader = _get_cached_analyzer(SentimentModel.VADER)
+
+                progress.progress(0.45)
+                with st.spinner("Initializing RoBERTa model (first time may take a moment)..."):
+                    try:
+                        roberta = _get_cached_analyzer(SentimentModel.ROBERTA)
+                    except Exception as e:
+                        progress.empty()
+                        st.error(f"Failed to initialize RoBERTa model: {e}")
+                        return
+
+                progress.progress(0.7)
+                with st.spinner("Running batched sentiment analysis..."):
+                    data, disagreements = _build_sentiment_comparison_rows(
+                        mentions,
+                        translate_enabled=translate_enabled,
+                        vader=vader,
+                        roberta=roberta,
+                    )
+                progress.progress(1.0)
+                progress.empty()
+
+                comparison_cache[cache_key] = {
+                    "rows": data,
+                    "disagreements": disagreements,
+                    "created_at": now,
+                    "last_access": now,
+                }
+                _prune_sentiment_comparison_cache(comparison_cache, now=now)
+
+            st.session_state["sentiment_comparison_last_result"] = {
+                "rows": data,
+                "disagreements": disagreements,
+                "cache_source": cache_hint,
+                "title_id": selected_title.id,
+                "platform": platform,
+                "translate_enabled": translate_enabled,
+                "limit": limit,
+            }
+
+        total_cache_uses = int(cache_stats.get("hits", 0)) + int(cache_stats.get("misses", 0))
+        hit_rate = (
+            (int(cache_stats.get("hits", 0)) / total_cache_uses) * 100
+            if total_cache_uses > 0
+            else 0.0
+        )
+        ccache1, ccache2, ccache3, ccache4 = st.columns(4)
+        with ccache1:
+            st.metric("Cache hits", int(cache_stats.get("hits", 0)))
+        with ccache2:
+            st.metric("Cache misses", int(cache_stats.get("misses", 0)))
+        with ccache3:
+            st.metric("Hit rate", f"{hit_rate:.1f}%")
+        with ccache4:
+            raw_last_run = str(cache_stats.get("last_run_source", "—"))
+            last_run_label = {"cache": "Cached", "fresh": "Fresh"}.get(raw_last_run, raw_last_run)
+            st.metric("Last run source", last_run_label)
+
+        last_result = st.session_state.get("sentiment_comparison_last_result")
+        if (
+            last_result
+            and str(last_result.get("title_id")) == selected_title.id
+            and str(last_result.get("platform")) == platform
+            and bool(last_result.get("translate_enabled")) == translate_enabled
+            and int(last_result.get("limit", 0)) == limit
+        ):
+            rows = last_result.get("rows", [])
+            disagreements = int(last_result.get("disagreements", 0))
+            source = str(last_result.get("cache_source", "fresh"))
+            if source == "cache":
+                st.caption("Last displayed comparison was loaded from cache.")
+
+            st.subheader(f"Analysis: VADER vs RoBERTa ({len(rows)} mentions)")
+            analyzed_count = len(rows)
+            if analyzed_count > 0:
+                st.metric(
+                    "Major Disagreements",
+                    f"{disagreements}",
+                    delta=f"{disagreements / analyzed_count * 100:.1f}%",
+                )
+            else:
+                st.info("No analyzable mention text found for this selection.")
+                return
+
+            df_mentions = pd.DataFrame(rows)
+            # Keep _original data for the expander but hide it from the table
+            display_cols = [c for c in df_mentions.columns if not c.startswith("_")]
+            st.dataframe(
+                df_mentions[display_cols].style.background_gradient(subset=["Diff"], cmap="Reds"),
+                use_container_width=True,
+                column_config={
+                    "Content": st.column_config.TextColumn(
+                        "Content",
+                        width="large",
+                        help="Analyzed text. 🌐 = translated from original language.",
+                    ),
+                },
+            )
+
+            # Translation details
+            translated_rows = [(i, r) for i, r in enumerate(rows) if r.get("_original") is not None]
+            if translated_rows:
+                st.caption("🌐 = content was translated to English before analysis.")
+                with st.expander(
+                    f"View original text for {len(translated_rows)} translated mentions"
+                ):
+                    for idx, (row_num, r) in enumerate(translated_rows):
+                        st.markdown(
+                            f"**Row {row_num}.** **Translated:** {r['Content'].lstrip('🌐 ')}\n\n"
+                            f"&nbsp;&nbsp;&nbsp;&nbsp;**Original:** {r['_original']}"
+                        )
+                        if idx < len(translated_rows) - 1:
+                            st.divider()
+        else:
+            st.info("Run comparison to analyze mentions for the current selection.")
 
     elif page == "🚨 Alerts":
-        st.header("🚨 Alerts & Anomalies")
+        st.header("🚨 Alerts and anomalies")
         st.markdown("*Real-time anomaly detection for tracked titles*")
 
         # Alert summary cards
@@ -435,7 +1038,7 @@ def main() -> None:
 
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                st.metric("Total Alerts", total)
+                st.metric("Total alerts", total)
             with c2:
                 st.metric("🔴 Critical", counts.get("critical", 0))
             with c3:
@@ -452,7 +1055,7 @@ def main() -> None:
         st.divider()
 
         # Recent alerts list
-        st.subheader("Recent Alerts")
+        st.subheader("Recent alerts")
 
         severity_filter = st.selectbox("Filter by severity", ["All", "critical", "warning", "info"])
 
@@ -495,7 +1098,7 @@ def main() -> None:
         st.divider()
 
         # Pipeline health
-        st.subheader("🔧 Pipeline Health")
+        st.subheader("🔧 Pipeline health")
         try:
             pipeline = _get_json("/api/v1/pipeline/health")
 
@@ -535,11 +1138,39 @@ def main() -> None:
                     )
                     st.caption(f"  • {run.get('job_name')}: {status_icon} {run.get('status')}")
 
+            sentiment_stats = pipeline.get("sentiment_stats") or {}
+            if sentiment_stats:
+                st.markdown("**Sentiment Processing:**")
+                c4, c5, c6, c7, c8 = st.columns(5)
+                with c4:
+                    st.metric(
+                        "Translated (attempted)",
+                        int(sentiment_stats.get("translate_attempted", 0)),
+                    )
+                with c5:
+                    st.metric(
+                        "Translated (changed)", int(sentiment_stats.get("translate_count", 0))
+                    )
+                with c6:
+                    st.metric(
+                        "Skipped (English)",
+                        int(sentiment_stats.get("translate_skipped_english", 0)),
+                    )
+                with c7:
+                    st.metric(
+                        "Translation Failures", int(sentiment_stats.get("translate_failures", 0))
+                    )
+                with c8:
+                    st.metric(
+                        "Sentiment Time",
+                        f"{float(sentiment_stats.get('sentiment_ms_total', 0.0)):.0f} ms",
+                    )
+
         except Exception as e:
             st.error(f"Failed to load pipeline health: {e}")
 
     elif page == "📡 API Quota":
-        st.header("📡 API Quota Usage")
+        st.header("📡 API quota usage")
         st.markdown("*Track API usage to stay within daily limits*")
 
         try:
@@ -576,11 +1207,11 @@ def main() -> None:
 
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    st.metric("Units Used", f"{used:,}")
+                    st.metric("Units used", f"{used:,}")
                 with c2:
                     st.metric("Remaining", f"{remaining:,}")
                 with c3:
-                    st.metric("Total Calls", f"{total_calls:,}")
+                    st.metric("Total calls", f"{total_calls:,}")
                 with c4:
                     st.metric("Status", f"{status_color} {status_text}")
 
@@ -609,7 +1240,7 @@ def main() -> None:
                 st.divider()
 
                 # Cost reference
-                st.subheader("Cost Reference")
+                st.subheader("Cost reference")
                 st.markdown("""
 | Endpoint | Cost | Description |
 |---|---|---|

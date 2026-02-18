@@ -48,6 +48,16 @@ def main() -> None:
         default=1,
         help="Snapshot bucket size (default: 1 hour)",
     )
+
+    subparsers.add_parser(
+        "benchmark-sentiment",
+        help="Run sentiment analysis performance benchmark (VADER vs RoBERTa)",
+    )
+    subparsers.add_parser(
+        "compare-sentiment",
+        help="Compare sentiment analysis results on recent DB mentions",
+    )
+
     args = parser.parse_args()
 
     print(f"""
@@ -128,6 +138,10 @@ def main() -> None:
                 bucket_hours=args.bucket_hours,
             )
         )
+    elif args.command == "benchmark-sentiment":
+        benchmark_sentiment()
+    elif args.command == "compare-sentiment":
+        asyncio.run(compare_sentiment())
 
 
 async def demo() -> None:
@@ -251,6 +265,126 @@ async def recompute_metrics(
                     snapshot_time = snapshot_time + timedelta(hours=bucket_hours)
 
     print(f"✅ Done. Processed {titles_total} titles.")
+
+
+def benchmark_sentiment() -> None:
+    """Run sentiment analysis benchmark."""
+    import time
+
+    from loguru import logger
+
+    from sam.processors.sentiment import SentimentAnalyzer, SentimentModel
+
+    print("\n🚀 Starting Sentiment Analysis Benchmark...\n")
+
+    # Initialize VADER
+    start = time.time()
+    vader = SentimentAnalyzer(model=SentimentModel.VADER)
+    vader_init_time = time.time() - start
+    print(f"VADER Init Time:   {vader_init_time:.4f}s")
+
+    # Initialize RoBERTa
+    try:
+        start = time.time()
+        roberta = SentimentAnalyzer(model=SentimentModel.ROBERTA)
+        roberta_init_time = time.time() - start
+        print(f"RoBERTa Init Time: {roberta_init_time:.4f}s")
+    except Exception as e:
+        logger.error(f"Failed to initialize RoBERTa: {e}")
+        return
+
+    # Test Data
+    texts = [
+        "This movie is absolutely fantastic! I loved every moment of it.",
+        "The plot was boring and the acting was terrible.",
+        "It was okay, not great but not bad either.",
+        "I'm not sure how I feel about this.",
+        "Best experience of my life!",
+        "Worst mistake ever.",
+        "The cinematography was good but the story fell flat.",
+        "Highly recommended for everyone.",
+        "Do not watch this, complete waste of time.",
+        "An average film with some good moments.",
+    ] * 10  # 100 texts
+
+    print(f"\nBenchmarking on {len(texts)} texts...")
+
+    # Benchmark VADER
+    start = time.time()
+    vader.analyze_batch(texts)
+    vader_time = time.time() - start
+    print(f"VADER Total Time:  {vader_time:.4f}s")
+    print(f"VADER Avg/Text:    {vader_time / len(texts):.6f}s")
+
+    # Benchmark RoBERTa
+    start = time.time()
+    roberta.analyze_batch(texts)
+    roberta_time = time.time() - start
+    print(f"RoBERTa Total Time: {roberta_time:.4f}s")
+    print(f"RoBERTa Avg/Text:   {roberta_time / len(texts):.6f}s")
+
+    # Comparison
+    if vader_time > 0:
+        ratio = roberta_time / vader_time
+        print(f"\nℹ️  RoBERTa is {ratio:.1f}x slower than VADER")
+
+
+async def compare_sentiment() -> None:
+    """Compare VADER vs RoBERTa on recent DB mentions."""
+    from loguru import logger
+    from sqlalchemy import desc, select
+
+    from sam.processors.sentiment import SentimentAnalyzer, SentimentModel
+    from sam.storage.database import get_session
+    from sam.storage.models import Mention
+
+    print("\n🔍 Comparing Sentiment Models on Real Data...\n")
+
+    # Initialize both analyzers
+    vader = SentimentAnalyzer(model=SentimentModel.VADER)
+    try:
+        roberta = SentimentAnalyzer(model=SentimentModel.ROBERTA)
+    except Exception as e:
+        logger.error(f"Failed to initialize RoBERTa: {e}")
+        return
+
+    async with get_session() as session:
+        # Fetch recent mentions with content
+        stmt = (
+            select(Mention)
+            .where(Mention.content.is_not(None))
+            .order_by(desc(Mention.created_at))
+            .limit(20)
+        )
+        result = await session.execute(stmt)
+        mentions = result.scalars().all()
+
+        if not mentions:
+            print("⚠️  No mentions found in database.")
+            return
+
+        print(f"{'TEXT (TRUNCATED)':<50} | {'VADER':<12} | {'ROBERTA':<12}")
+        print("-" * 82)
+
+        for mention in mentions:
+            text = mention.content
+            if text is None:
+                continue
+
+            # Clean/truncate text for display
+            display_text = (text[:47] + "...") if len(text) > 47 else text
+            display_text = display_text.replace("\n", " ")
+
+            # Analyze
+            v_res = vader.analyze(text)
+            r_res = roberta.analyze(text)
+
+            # Format Output
+            v_out = f"{v_res.label[:3].upper()} ({v_res.compound:.2f})"
+            r_out = f"{r_res.label[:3].upper()} ({r_res.compound:.2f})"
+
+            print(f"{display_text:<50} | {v_out:<12} | {r_out:<12}")
+    print()
 
 
 if __name__ == "__main__":

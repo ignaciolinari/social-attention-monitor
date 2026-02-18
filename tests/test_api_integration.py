@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import sam.api.main as api
+from sam.processors.sentiment import SentimentBatchTranslationStats, SentimentResult
 
 
 class _DummySession:
@@ -286,6 +287,67 @@ class TestMetricsEndpoints:
         assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> None:
+    post = MagicMock()
+    post.platform = "reddit"
+    post.source_id = "abc123"
+    post.content = "Great movie"
+    post.author = "user"
+    post.url = "https://example.com"
+    post.created_at = datetime.now(UTC)
+    post.metrics = {}
+
+    collector = AsyncMock()
+    collector.collect.return_value = MagicMock(
+        success=True,
+        posts=[post],
+        collected_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(api, "_reddit_collector", collector)
+
+    roberta_result = SentimentResult(
+        compound=0.7,
+        positive=0.8,
+        negative=0.1,
+        neutral=0.1,
+        label="positive",
+        model="roberta",
+        raw_scores={},
+    )
+    both_result = SentimentResult(
+        compound=0.4,
+        positive=0.6,
+        negative=0.2,
+        neutral=0.2,
+        label="positive",
+        model="both",
+        raw_scores={},
+        extra={"roberta": roberta_result},
+    )
+
+    def _fake_batch_with_translation(_texts, *, translate, log_context="api"):
+        _ = (translate, log_context)
+        return [both_result], SentimentBatchTranslationStats()
+
+    monkeypatch.setattr(
+        api, "analyze_sentiment_batch_with_translation", _fake_batch_with_translation
+    )
+
+    mentions, sentiment_by_source_id, _posts, _collected_at = await api._collect_mentions_live(
+        platform="reddit",
+        title="Dune",
+        limit=1,
+    )
+
+    payload = sentiment_by_source_id["abc123"]
+    assert payload["model"] == "both"
+    assert "extra" in payload
+    assert payload["extra"]["roberta"]["compound"] == 0.7
+    assert mentions[0].sentiment is not None
+    assert "extra" in mentions[0].sentiment
+
+
 class TestSentimentEndpoint:
     """Tests for sentiment analysis endpoint."""
 
@@ -300,6 +362,40 @@ class TestSentimentEndpoint:
         assert "sentiment" in data
         assert "compound" in data["sentiment"]
         assert "label" in data["sentiment"]
+
+    def test_analyze_sentiment_includes_extra_payload(self, client, monkeypatch) -> None:
+        """Sentiment endpoint should include secondary model data when present."""
+        roberta = SentimentResult(
+            compound=0.8,
+            positive=0.9,
+            negative=0.05,
+            neutral=0.05,
+            label="positive",
+            model="roberta",
+            raw_scores={},
+        )
+        both = SentimentResult(
+            compound=0.3,
+            positive=0.6,
+            negative=0.3,
+            neutral=0.1,
+            label="positive",
+            model="both",
+            raw_scores={},
+            extra={"roberta": roberta},
+        )
+        monkeypatch.setattr(api, "analyze_sentiment", lambda _text: both)
+
+        response = client.get(
+            "/api/v1/sentiment/analyze",
+            params={"text": "This movie is amazing!"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "both"
+        assert "extra" in data["sentiment"]
+        assert data["sentiment"]["extra"]["roberta"]["model"] == "roberta"
 
     def test_analyze_sentiment_requires_text(self, client) -> None:
         """Sentiment analysis should require text parameter."""

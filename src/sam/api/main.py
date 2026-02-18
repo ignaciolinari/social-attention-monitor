@@ -47,7 +47,11 @@ from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
-from sam.processors.sentiment import analyze_sentiment, analyze_sentiment_batch
+from sam.processors.sentiment import (
+    SentimentResult,
+    analyze_sentiment,
+    analyze_sentiment_batch_with_translation,
+)
 from sam.quota import aggregate_youtube_quota_from_db
 from sam.storage.database import get_session
 from sam.storage.models import Title as TitleModel
@@ -58,6 +62,7 @@ from sam.storage.repository import (
     get_mentions_for_title,
     get_metrics_timeseries,
     get_pipeline_health_stats,
+    get_title_by_id,
     get_title_by_name,
     get_trending_by_attention_index,
     insert_mentions,
@@ -102,6 +107,17 @@ class PipelineRunInfo(BaseModel):
     started_at: str | None
     finished_at: str | None
     error: str | None
+    stats: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineSentimentStats(BaseModel):
+    """Sentiment/translation observability stats from latest collector run."""
+
+    translate_attempted: int = 0
+    translate_count: int = 0
+    translate_failures: int = 0
+    translate_skipped_english: int = 0
+    sentiment_ms_total: float = 0.0
 
 
 class ApiQuotaInfo(BaseModel):
@@ -133,6 +149,7 @@ class PipelineHealthResponse(BaseModel):
     newest_mention_age_seconds: dict[str, float | None]
     newest_mention_at: dict[str, str | None]
     latest_pipeline_runs: list[PipelineRunInfo]
+    sentiment_stats: PipelineSentimentStats | None = None
     api_quota: dict[str, ApiQuotaInfo] = Field(default_factory=dict)
 
 
@@ -217,6 +234,7 @@ class MetricsSnapshotResponse(BaseModel):
 
     attention_index: float | None
     hype_acceleration: float | None
+    raw_metrics: dict[str, Any] | None = None
 
 
 class TrendingMetricsItem(BaseModel):
@@ -481,12 +499,17 @@ def _title_from_row(row: Any) -> DbTitleResponse:
 async def _get_mentions_from_db(
     *,
     title: str,
+    title_id: UUID | None,
     platform: str,
     limit: int,
     offset: int,
 ) -> DbMentionsResult | None:
     async with get_session() as session:
-        title_row = await get_title_by_name(session, title)
+        title_row = (
+            await get_title_by_id(session, title_id)
+            if title_id is not None
+            else await get_title_by_name(session, title)
+        )
         if not title_row:
             return None
 
@@ -536,6 +559,7 @@ async def _persist_mentions(
     platform: str,
     posts: list[Any],
     sentiment_by_source_id: dict[str, dict[str, Any]],
+    collected_at: datetime | None = None,
 ) -> None:
     async with get_session() as session:
         await insert_mentions(
@@ -544,7 +568,28 @@ async def _persist_mentions(
             platform=platform,
             posts=posts,
             sentiment_by_source_id=sentiment_by_source_id,
+            collected_at=collected_at,
         )
+
+
+def _sentiment_payload(sr: SentimentResult) -> dict[str, Any]:
+    return sr.to_dict()
+
+
+def _translate_before_sentiment_enabled() -> bool:
+    """Read runtime setting for translate-before-sentiment behavior."""
+    setting_value = getattr(get_settings(), "translate_before_sentiment", False)
+    return setting_value if isinstance(setting_value, bool) else False
+
+
+def _analyze_texts_for_sentiment(texts: list[str], *, translate: bool) -> list[SentimentResult]:
+    """Analyze sentiments, optionally translating texts to English first."""
+    sentiments, _stats = analyze_sentiment_batch_with_translation(
+        texts,
+        translate=translate,
+        log_context="api",
+    )
+    return sentiments
 
 
 async def _collect_mentions_live(
@@ -572,18 +617,17 @@ async def _collect_mentions_live(
 
     # Use batch sentiment to avoid N sequential VADER calls.
     # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
+    translate_before_sentiment = _translate_before_sentiment_enabled()
     sentiment_results = await asyncio.to_thread(
-        analyze_sentiment_batch,
+        _analyze_texts_for_sentiment,
         [post.content for post in result.posts],
+        translate=translate_before_sentiment,
     )
 
     mentions: list[MentionResponse] = []
     sentiment_by_source_id: dict[str, dict[str, Any]] = {}
     for post, sentiment_result in zip(result.posts, sentiment_results, strict=True):
-        sentiment_payload = {
-            "compound": sentiment_result.compound,
-            "label": sentiment_result.label,
-        }
+        sentiment_payload = _sentiment_payload(sentiment_result)
         sentiment_by_source_id[post.source_id] = sentiment_payload
 
         mentions.append(
@@ -633,26 +677,22 @@ async def _refresh_mentions_background(
         # Use batch sentiment (consistent with the foreground path and the
         # pipeline runner) and persist all sentiment fields.
         # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
+        translate_before_sentiment = _translate_before_sentiment_enabled()
         sentiment_results = await asyncio.to_thread(
-            analyze_sentiment_batch,
+            _analyze_texts_for_sentiment,
             [post.content for post in result.posts],
+            translate=translate_before_sentiment,
         )
         sentiment_by_source_id: dict[str, dict[str, Any]] = {}
         for post, sr in zip(result.posts, sentiment_results, strict=True):
-            sentiment_by_source_id[post.source_id] = {
-                "compound": sr.compound,
-                "positive": sr.positive,
-                "negative": sr.negative,
-                "neutral": sr.neutral,
-                "label": sr.label,
-                "model": sr.model,
-            }
+            sentiment_by_source_id[post.source_id] = _sentiment_payload(sr)
 
         await _persist_mentions(
             title_id=title_id,
             platform=platform,
             posts=result.posts,
             sentiment_by_source_id=sentiment_by_source_id,
+            collected_at=result.collected_at,
         )
     except Exception as exc:
         logger.exception(f"[api] {platform} background refresh failed: {exc}")
@@ -1030,6 +1070,22 @@ async def pipeline_health() -> PipelineHealthResponse:
         quota = await aggregate_youtube_quota_from_db(session)
         api_quota["youtube"] = ApiQuotaInfo(**quota.to_api_dict())
 
+    sentiment_stats: PipelineSentimentStats | None = None
+    for run in stats["latest_pipeline_runs"]:
+        if run.get("job_name") != "collector-cycle":
+            continue
+        run_stats = run.get("stats")
+        if not isinstance(run_stats, dict):
+            continue
+        sentiment_stats = PipelineSentimentStats(
+            translate_attempted=int(run_stats.get("translate_attempted", 0) or 0),
+            translate_count=int(run_stats.get("translate_count", 0) or 0),
+            translate_failures=int(run_stats.get("translate_failures", 0) or 0),
+            translate_skipped_english=int(run_stats.get("translate_skipped_english", 0) or 0),
+            sentiment_ms_total=float(run_stats.get("sentiment_ms_total", 0.0) or 0.0),
+        )
+        break
+
     payload = PipelineHealthResponse(
         timestamp=stats["timestamp"],
         active_titles=stats["active_titles"],
@@ -1038,6 +1094,7 @@ async def pipeline_health() -> PipelineHealthResponse:
         newest_mention_age_seconds=stats["newest_mention_age_seconds"],
         newest_mention_at=stats["newest_mention_at"],
         latest_pipeline_runs=[PipelineRunInfo(**run) for run in stats["latest_pipeline_runs"]],
+        sentiment_stats=sentiment_stats,
         api_quota=api_quota,
     )
     await cache_set_json(
@@ -1213,12 +1270,17 @@ async def search_titles(
 async def get_reddit_mentions(
     background_tasks: BackgroundTasks,
     title: str = Query(..., description="Title to search for"),
+    title_id: UUID | None = Query(None, description="Exact title UUID (preferred when available)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> MentionsResponse:
     """Get Reddit mentions for a title."""
     db_result = await _get_mentions_from_db(
-        title=title, platform="reddit", limit=limit, offset=offset
+        title=title,
+        title_id=title_id,
+        platform="reddit",
+        limit=limit,
+        offset=offset,
     )
     if db_result is not None:
         if db_result.total_count > 0 or offset > 0:
@@ -1264,6 +1326,7 @@ async def get_reddit_mentions(
             platform="reddit",
             posts=posts,
             sentiment_by_source_id=sentiment_by_source_id,
+            collected_at=collected_at,
         )
 
     return MentionsResponse(
@@ -1279,12 +1342,17 @@ async def get_reddit_mentions(
 async def get_youtube_mentions(
     background_tasks: BackgroundTasks,
     title: str = Query(..., description="Title to search for"),
+    title_id: UUID | None = Query(None, description="Exact title UUID (preferred when available)"),
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
 ) -> MentionsResponse:
     """Get YouTube videos for a title."""
     db_result = await _get_mentions_from_db(
-        title=title, platform="youtube", limit=limit, offset=offset
+        title=title,
+        title_id=title_id,
+        platform="youtube",
+        limit=limit,
+        offset=offset,
     )
     if db_result is not None:
         if db_result.total_count > 0 or offset > 0:
@@ -1330,6 +1398,7 @@ async def get_youtube_mentions(
             platform="youtube",
             posts=posts,
             sentiment_by_source_id=sentiment_by_source_id,
+            collected_at=collected_at,
         )
 
     return MentionsResponse(
@@ -1345,12 +1414,17 @@ async def get_youtube_mentions(
 async def get_bluesky_mentions(
     background_tasks: BackgroundTasks,
     title: str = Query(..., description="Title to search for"),
+    title_id: UUID | None = Query(None, description="Exact title UUID (preferred when available)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> MentionsResponse:
     """Get Bluesky posts for a title."""
     db_result = await _get_mentions_from_db(
-        title=title, platform="bluesky", limit=limit, offset=offset
+        title=title,
+        title_id=title_id,
+        platform="bluesky",
+        limit=limit,
+        offset=offset,
     )
     if db_result is not None:
         if db_result.total_count > 0 or offset > 0:
@@ -1396,6 +1470,7 @@ async def get_bluesky_mentions(
             platform="bluesky",
             posts=posts,
             sentiment_by_source_id=sentiment_by_source_id,
+            collected_at=collected_at,
         )
 
     return MentionsResponse(
@@ -1413,15 +1488,10 @@ async def analyze_text_sentiment(
 ) -> dict[str, Any]:
     """Analyze sentiment of arbitrary text."""
     result = analyze_sentiment(text)
+    sentiment_payload = _sentiment_payload(result)
     return {
         "text": text[:100] + "..." if len(text) > 100 else text,
-        "sentiment": {
-            "compound": result.compound,
-            "positive": result.positive,
-            "negative": result.negative,
-            "neutral": result.neutral,
-            "label": result.label,
-        },
+        "sentiment": sentiment_payload,
         "model": result.model,
     }
 
@@ -1511,6 +1581,7 @@ async def metrics_trending(
                     negative_ratio=getattr(m, "negative_ratio", None),
                     attention_index=m.attention_index,
                     hype_acceleration=m.hype_acceleration,
+                    raw_metrics=getattr(m, "raw_metrics", None),
                 ),
             )
             for t, m in rows
@@ -1580,6 +1651,7 @@ async def metrics_timeseries(
                 negative_ratio=getattr(p, "negative_ratio", None),
                 attention_index=p.attention_index,
                 hype_acceleration=p.hype_acceleration,
+                raw_metrics=getattr(p, "raw_metrics", None),
             )
             for p in points
         ],

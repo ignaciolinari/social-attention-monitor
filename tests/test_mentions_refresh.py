@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
+import pytest
+from fastapi import BackgroundTasks
 
 import sam.api.main as api
 
@@ -22,11 +23,17 @@ def _fake_mention(platform: str = "reddit") -> api.MentionResponse:
     )
 
 
-def test_mentions_refreshes_when_stale(monkeypatch) -> None:
-    called: list[dict[str, object]] = []
-
-    async def fake_get_mentions_from_db(*, title: str, platform: str, limit: int, offset: int):
-        _ = (title, platform, limit, offset)
+@pytest.mark.asyncio
+async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
+    async def fake_get_mentions_from_db(
+        *,
+        title: str,
+        title_id,
+        platform: str,
+        limit: int,
+        offset: int,
+    ):
+        _ = (title, title_id, platform, limit, offset)
         return api.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
@@ -35,27 +42,31 @@ def test_mentions_refreshes_when_stale(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=90),
         )
 
-    async def fake_refresh_mentions_background(**kwargs):
-        called.append(kwargs)
-
     monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
-    monkeypatch.setattr(api, "_refresh_mentions_background", fake_refresh_mentions_background)
+    background_tasks = BackgroundTasks()
 
-    with TestClient(api.app) as client:
-        response = client.get(
-            "/api/v1/mentions/reddit",
-            params={"title": "Dune", "limit": 5, "offset": 0},
-        )
+    response = await api.get_reddit_mentions(
+        background_tasks=background_tasks,
+        title="Dune",
+        limit=5,
+        offset=0,
+    )
 
-    assert response.status_code == 200
-    assert called
+    assert response.platform == "reddit"
+    assert len(background_tasks.tasks) == 1
 
 
-def test_mentions_skip_refresh_when_fresh(monkeypatch) -> None:
-    called: list[dict[str, object]] = []
-
-    async def fake_get_mentions_from_db(*, title: str, platform: str, limit: int, offset: int):
-        _ = (title, platform, limit, offset)
+@pytest.mark.asyncio
+async def test_mentions_skip_refresh_when_fresh(monkeypatch) -> None:
+    async def fake_get_mentions_from_db(
+        *,
+        title: str,
+        title_id,
+        platform: str,
+        limit: int,
+        offset: int,
+    ):
+        _ = (title, title_id, platform, limit, offset)
         return api.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
@@ -64,27 +75,31 @@ def test_mentions_skip_refresh_when_fresh(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=1),
         )
 
-    async def fake_refresh_mentions_background(**kwargs):
-        called.append(kwargs)
-
     monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
-    monkeypatch.setattr(api, "_refresh_mentions_background", fake_refresh_mentions_background)
+    background_tasks = BackgroundTasks()
 
-    with TestClient(api.app) as client:
-        response = client.get(
-            "/api/v1/mentions/reddit",
-            params={"title": "Dune", "limit": 5, "offset": 0},
-        )
+    response = await api.get_reddit_mentions(
+        background_tasks=background_tasks,
+        title="Dune",
+        limit=5,
+        offset=0,
+    )
 
-    assert response.status_code == 200
-    assert not called
+    assert response.platform == "reddit"
+    assert len(background_tasks.tasks) == 0
 
 
-def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
-    called: list[dict[str, object]] = []
-
-    async def fake_get_mentions_from_db(*, title: str, platform: str, limit: int, offset: int):
-        _ = (title, platform, limit, offset)
+@pytest.mark.asyncio
+async def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
+    async def fake_get_mentions_from_db(
+        *,
+        title: str,
+        title_id,
+        platform: str,
+        limit: int,
+        offset: int,
+    ):
+        _ = (title, title_id, platform, limit, offset)
         return api.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
@@ -93,17 +108,15 @@ def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=90),
         )
 
-    async def fake_refresh_mentions_background(**kwargs):
-        called.append(kwargs)
-
     monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
-    monkeypatch.setattr(api, "_refresh_mentions_background", fake_refresh_mentions_background)
+    background_tasks = BackgroundTasks()
 
-    with TestClient(api.app) as client:
-        response = client.get(
-            "/api/v1/mentions/bluesky",
-            params={"title": "Dune", "limit": 5, "offset": 0},
-        )
+    response = await api.get_bluesky_mentions(
+        background_tasks=background_tasks,
+        title="Dune",
+        limit=5,
+        offset=0,
+    )
 
-    assert response.status_code == 200
-    assert called
+    assert response.platform == "bluesky"
+    assert len(background_tasks.tasks) == 1
