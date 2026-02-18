@@ -321,6 +321,26 @@ class Settings(BaseSettings):
         default=30,
         description="Minutes after which mentions data is considered stale",
     )
+    sentiment_model: Literal["vader", "roberta", "both"] = Field(
+        default="vader",
+        validation_alias=AliasChoices("SENTIMENT_MODEL", "SAM_SENTIMENT_MODEL"),
+        description="Sentiment analysis model to use (vader, roberta, or both)",
+    )
+    translate_before_sentiment: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SAM_TRANSLATE_BEFORE_SENTIMENT"),
+        description="Translate non-English content to English before running sentiment analysis",
+    )
+    sentiment_fallback_to_vader_on_error: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "SAM_SENTIMENT_FALLBACK_TO_VADER", "SENTIMENT_FALLBACK_TO_VADER"
+        ),
+        description=(
+            "Fallback to VADER if the configured sentiment model fails to initialize "
+            "(for example, missing transformers dependencies)"
+        ),
+    )
 
     # Cache TTLs (seconds)
     cache_ttl_trending: int = Field(
