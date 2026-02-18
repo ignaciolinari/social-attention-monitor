@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from asyncpg.exceptions import InvalidCatalogNameError
@@ -337,13 +338,14 @@ async def test_snapshot_window_captures_recent_mentions() -> None:
 
         # Simulate collecting at 14:37
         now = datetime(2026, 3, 15, 14, 37, 0, tzinfo=UTC)
+        source_id = f"window_test_{uuid4().hex}"
         post = CollectedPost(
             platform="youtube",
-            source_id="window_test_1",
+            source_id=source_id,
             source_type="video",
             content="Interesting movie review",
             author="reviewer",
-            url="https://youtube.com/watch?v=window_test_1",
+            url=f"https://youtube.com/watch?v={source_id}",
             created_at=now - timedelta(hours=2),  # published earlier
             metrics={"view_count": 1000, "like_count": 100, "comment_count": 10},
         )
@@ -354,8 +356,9 @@ async def test_snapshot_window_captures_recent_mentions() -> None:
             platform="youtube",
             posts=[post],
             sentiment_by_source_id={
-                "window_test_1": {"compound": 0.3, "label": "positive"},
+                source_id: {"compound": 0.3, "label": "positive"},
             },
+            collected_at=now,
         )
         await session.commit()
 

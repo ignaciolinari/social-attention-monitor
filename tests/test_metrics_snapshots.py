@@ -122,6 +122,62 @@ class TestComputeAndUpsertMetricsSnapshot:
             assert call_kwargs["metrics"]["bluesky_mentions"] == 0
 
     @pytest.mark.asyncio
+    async def test_includes_sentiment_model_metadata(self) -> None:
+        with (
+            patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
+            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
+            patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
+        ):
+            mock_calc = MagicMock()
+            mock_result = EngagementMetrics(
+                mention_count=1,
+                unique_authors=1,
+                total_engagement=10,
+                mention_velocity=1.0,
+                velocity_change=0.0,
+                avg_sentiment=0.25,
+                sentiment_volatility=0.0,
+                positive_ratio=1.0,
+                negative_ratio=0.0,
+                attention_index=50.0,
+                hype_acceleration=0.0,
+                window_start=datetime(2026, 1, 30, 0, 0, 0, tzinfo=UTC),
+                window_end=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                platform_breakdown={"reddit": 1},
+            )
+            mock_calc.calculate.return_value = mock_result
+            mock_get_calc.return_value = mock_calc
+
+            mock_mention = MagicMock()
+            mock_mention.collected_at = datetime(2026, 1, 30, 0, 30, 0, tzinfo=UTC)
+            mock_mention.platform = "reddit"
+            mock_mention.author = "user1"
+            mock_mention.metrics = {"score": 10}
+            mock_mention.sentiment = {
+                "compound": 0.25,
+                "model": "both",
+                "extra": {"roberta": {"compound": 0.5}},
+            }
+            mock_get_mentions.return_value = [mock_mention]
+            mock_get_latest.return_value = None
+
+            await compute_and_upsert_metrics_snapshot(
+                AsyncMock(),
+                title_id=uuid.uuid4(),
+                snapshot_time=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                window_hours=1,
+            )
+
+            raw_metrics = mock_upsert.call_args.kwargs["metrics"]["raw_metrics"]
+            assert raw_metrics["sentiment_primary_model"] == "vader"
+            assert raw_metrics["sentiment_primary_model_counts"]["vader"] == 1
+            secondary = raw_metrics["sentiment_secondary"]
+            assert secondary is not None
+            assert secondary["model"] == "roberta"
+            assert secondary["count"] == 1
+
+    @pytest.mark.asyncio
     async def test_uses_previous_metrics_for_velocity(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,

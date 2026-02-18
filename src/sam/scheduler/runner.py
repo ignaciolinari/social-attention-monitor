@@ -19,6 +19,8 @@ import contextlib
 import signal
 import uuid
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
+from typing import Any, cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -35,7 +37,10 @@ from sam.config import get_settings
 from sam.logging import setup_logging
 from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
 from sam.pipeline.raw_storage import persist_collection_result
-from sam.processors.sentiment import SentimentResult, analyze_sentiment_batch
+from sam.processors.sentiment import (
+    SentimentResult,
+    analyze_sentiment_batch_with_translation,
+)
 from sam.quota import get_quota_tracker, seed_quota_from_db
 from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
 from sam.storage.repository import (
@@ -48,38 +53,62 @@ from sam.storage.repository import (
 )
 
 LEASE_NAME = "sam:collector-cycle"
+
+
+def _analyze_texts_for_sentiment_with_stats(
+    texts: list[str], *, translate: bool
+) -> tuple[list[SentimentResult], dict[str, int | float]]:
+    """Translate (optionally) + analyze sentiment and return observability stats."""
+    stage_start = perf_counter()
+    sentiments, translation_stats = analyze_sentiment_batch_with_translation(
+        texts,
+        translate=translate,
+        log_context="runner",
+    )
+    stage_ms_total = round((perf_counter() - stage_start) * 1000, 2)
+    result_stats = cast(dict[str, int | float], translation_stats.to_dict())
+    result_stats["sentiment_ms_total"] = stage_ms_total
+
+    return sentiments, result_stats
+
+
+def _merge_numeric_stats(target: dict[str, int | float], update: dict[str, int | float]) -> None:
+    """Add numeric values from update into target by key."""
+    for key, value in update.items():
+        current = target.get(key, 0)
+        if isinstance(current, int) and isinstance(value, int):
+            target[key] = current + value
+        else:
+            target[key] = float(current) + float(value)
+
+
 JOB_NAME = "collector-cycle"
 
 
 def _snapshot_hour(dt: datetime) -> datetime:
-    """Round *up* to the next hour boundary so that mentions collected during
-    the current hour always fall inside the (snapshot_time - window, snapshot_time] range.
+    """Round *up* to the next 30-minute boundary so that each collection cycle
+    gets its own snapshot bucket.
 
-    E.g. if now is 14:37, snapshot_time becomes 15:00.  The 1-hour window then
-    covers 14:00-15:00, which includes the mentions we just ingested at ~14:37.
-    If the current time is already exactly on the hour, keep it as-is.
+    E.g. if now is 14:12, snapshot_time becomes 14:30.
+    If now is 14:37, snapshot_time becomes 15:00.
+    If the current time is already on a 30-minute boundary, keep it as-is.
     """
-    if dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+    if dt.second == 0 and dt.microsecond == 0 and dt.minute % 30 == 0:
         return dt
+    if dt.minute < 30:
+        return dt.replace(minute=30, second=0, microsecond=0)
     return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
 def _build_sentiment_map(
     posts: list[CollectedPost],
     sentiments: list[SentimentResult],
-) -> dict[str, dict[str, object]]:
+) -> dict[str, dict[str, Any]]:
     """Build a source_id -> sentiment dict from parallel lists."""
-    return {
-        post.source_id: {
-            "compound": s.compound,
-            "positive": s.positive,
-            "negative": s.negative,
-            "neutral": s.neutral,
-            "label": s.label,
-            "model": s.model,
-        }
-        for post, s in zip(posts, sentiments, strict=True)
-    }
+    result: dict[str, dict[str, Any]] = {}
+    for post, s in zip(posts, sentiments, strict=True):
+        result[post.source_id] = s.to_dict()
+    return result
 
 
 async def collect_once(
@@ -95,9 +124,13 @@ async def collect_once(
     reddit: RedditCollector | None = None,
     youtube: YouTubeCollector | None = None,
     bluesky: BlueskyCollector | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | float]:
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
+    _translate_setting = getattr(settings, "translate_before_sentiment", False)
+    translate_before_sentiment = (
+        _translate_setting if isinstance(_translate_setting, bool) else False
+    )
 
     from sam.cache import collector_toggle_get
 
@@ -117,13 +150,18 @@ async def collect_once(
 
     quota = get_quota_tracker()
 
-    stats: dict[str, int] = {
+    stats: dict[str, int | float] = {
         "titles": 0,
         "reddit_mentions_inserted": 0,
         "youtube_mentions_inserted": 0,
         "bluesky_mentions_inserted": 0,
         "youtube_skipped_quota": 0,
         "metrics_snapshots_upserted": 0,
+        "translate_attempted": 0,
+        "translate_count": 0,
+        "translate_failures": 0,
+        "translate_skipped_english": 0,
+        "sentiment_ms_total": 0.0,
     }
 
     # Track YouTube video IDs already seen during *this* cycle to avoid
@@ -167,10 +205,12 @@ async def collect_once(
                             )
                         # Run CPU-bound VADER sentiment in a thread to avoid
                         # blocking the async event loop.
-                        sentiments = await asyncio.to_thread(
-                            analyze_sentiment_batch,
+                        sentiments, analysis_stats = await asyncio.to_thread(
+                            _analyze_texts_for_sentiment_with_stats,
                             [p.content for p in reddit_result.posts],
+                            translate=translate_before_sentiment,
                         )
+                        _merge_numeric_stats(stats, analysis_stats)
                         inserted = await insert_mentions(
                             session,
                             title_id=db_title.id,
@@ -179,6 +219,7 @@ async def collect_once(
                             sentiment_by_source_id=_build_sentiment_map(
                                 reddit_result.posts, sentiments
                             ),
+                            collected_at=reddit_result.collected_at,
                         )
                         stats["reddit_mentions_inserted"] += inserted
                         logger.info(f"[runner] {t.title} reddit mentions inserted: {inserted}")
@@ -221,10 +262,12 @@ async def collect_once(
                                 query=yt_query,
                                 run_id=run_id,
                             )
-                        sentiments = await asyncio.to_thread(
-                            analyze_sentiment_batch,
+                        sentiments, analysis_stats = await asyncio.to_thread(
+                            _analyze_texts_for_sentiment_with_stats,
                             [p.content for p in yt_result.posts],
+                            translate=translate_before_sentiment,
                         )
+                        _merge_numeric_stats(stats, analysis_stats)
                         inserted = await insert_mentions(
                             session,
                             title_id=db_title.id,
@@ -233,6 +276,7 @@ async def collect_once(
                             sentiment_by_source_id=_build_sentiment_map(
                                 yt_result.posts, sentiments
                             ),
+                            collected_at=yt_result.collected_at,
                         )
                         stats["youtube_mentions_inserted"] += inserted
                         logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
@@ -253,10 +297,12 @@ async def collect_once(
                                 run_id=run_id,
                             )
                         # Run sentiment analysis
-                        sentiments = await asyncio.to_thread(
-                            analyze_sentiment_batch,
+                        sentiments, analysis_stats = await asyncio.to_thread(
+                            _analyze_texts_for_sentiment_with_stats,
                             [p.content for p in bluesky_result.posts],
+                            translate=translate_before_sentiment,
                         )
+                        _merge_numeric_stats(stats, analysis_stats)
                         inserted = await insert_mentions(
                             session,
                             title_id=db_title.id,
@@ -265,6 +311,7 @@ async def collect_once(
                             sentiment_by_source_id=_build_sentiment_map(
                                 bluesky_result.posts, sentiments
                             ),
+                            collected_at=bluesky_result.collected_at,
                         )
                         stats["bluesky_mentions_inserted"] += inserted
                         logger.info(f"[runner] {t.title} bluesky mentions inserted: {inserted}")
@@ -474,7 +521,7 @@ async def run_forever(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=60,
+        misfire_grace_time=interval_minutes * 60,
     )
     scheduler.start()
 

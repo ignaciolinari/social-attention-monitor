@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sam.processors.sentiment import SentimentBatchTranslationStats
 from sam.scheduler import runner
 
 
@@ -51,7 +52,9 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
+            patch(
+                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
+            ) as mock_sentiment,
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -113,8 +116,8 @@ class TestCollectOnce:
             mock_upsert.return_value = mock_db_title
 
             # Mock sentiment -- return one result per post.
-            # analyze_sentiment_batch is called separately for reddit (1 post)
-            # and youtube (1 post), each returning a single-element list.
+            # analyze_sentiment_batch_with_translation is called separately for
+            # each platform batch.
             mock_sentiment_result = MagicMock()
             mock_sentiment_result.compound = 0.5
             mock_sentiment_result.positive = 0.7
@@ -122,8 +125,13 @@ class TestCollectOnce:
             mock_sentiment_result.neutral = 0.2
             mock_sentiment_result.label = "positive"
             mock_sentiment_result.model = "vader"
-            # Side effect: each call returns one result per input text
-            mock_sentiment.side_effect = lambda texts: [mock_sentiment_result] * len(texts)
+
+            # Side effect: each call returns one result per input text + stats.
+            def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
+                _ = (translate, log_context)
+                return [mock_sentiment_result] * len(texts), SentimentBatchTranslationStats()
+
+            mock_sentiment.side_effect = _fake_batch_sentiment
 
             # Mock insert returns count
             mock_insert.return_value = 1
@@ -204,7 +212,9 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch("sam.scheduler.runner.analyze_sentiment_batch") as mock_sentiment,
+            patch(
+                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
+            ) as mock_sentiment,
             patch("sam.scheduler.runner.compute_and_upsert_metrics_snapshot"),
             patch("sam.scheduler.runner.persist_collection_result") as mock_persist,
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -261,7 +271,12 @@ class TestCollectOnce:
             mock_sentiment_result.neutral = 0.4
             mock_sentiment_result.label = "neutral"
             mock_sentiment_result.model = "vader"
-            mock_sentiment.side_effect = lambda texts: [mock_sentiment_result] * len(texts)
+
+            def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
+                _ = (translate, log_context)
+                return [mock_sentiment_result] * len(texts), SentimentBatchTranslationStats()
+
+            mock_sentiment.side_effect = _fake_batch_sentiment
 
             mock_insert.return_value = 1
 

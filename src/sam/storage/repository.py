@@ -60,11 +60,13 @@ async def insert_mentions(
     platform: str,
     posts: list[CollectedPost],
     sentiment_by_source_id: dict[str, dict[str, Any]] | None = None,
+    collected_at: datetime | None = None,
 ) -> int:
     """Insert Mention rows (ignore duplicates). Returns inserted row count (best-effort)."""
     sentiment_by_source_id = sentiment_by_source_id or {}
 
     rows: list[dict[str, Any]] = []
+    collected_at_value = collected_at or datetime.now(UTC)
     for post in posts:
         sentiment = sentiment_by_source_id.get(post.source_id)
         rows.append(
@@ -77,7 +79,7 @@ async def insert_mentions(
                 "author": post.author,
                 "url": post.url,
                 "created_at": post.created_at,
-                "collected_at": datetime.now(UTC),
+                "collected_at": collected_at_value,
                 "metrics": post.metrics or None,
                 "sentiment": sentiment,
             }
@@ -113,6 +115,11 @@ async def get_title_by_name(session: AsyncSession, title: str) -> Title | None:
     )
     result = await session.execute(stmt)
     return result.scalars().first()
+
+
+async def get_title_by_id(session: AsyncSession, title_id: uuid.UUID) -> Title | None:
+    """Find a title by exact UUID."""
+    return await session.get(Title, title_id)
 
 
 async def list_active_titles(
@@ -512,6 +519,7 @@ async def get_pipeline_health_stats(
             PipelineRun.started_at,
             PipelineRun.finished_at,
             PipelineRun.error,
+            PipelineRun.stats,
         )
         .distinct(PipelineRun.job_name)
         .order_by(PipelineRun.job_name, PipelineRun.started_at.desc())
@@ -524,6 +532,7 @@ async def get_pipeline_health_stats(
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "finished_at": row.finished_at.isoformat() if row.finished_at else None,
             "error": row.error,
+            "stats": row.stats or {},
         }
         for row in result.all()
     ]
