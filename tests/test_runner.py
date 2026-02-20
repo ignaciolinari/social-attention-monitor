@@ -320,6 +320,116 @@ class TestCollectionJob:
             # collect_once should NOT have been called when lease was not acquired
             mock_collect.assert_not_called()
 
+
+class TestEnrichmentHelpers:
+    """Tests for enrichment helper wiring."""
+
+    @pytest.mark.asyncio
+    async def test_build_enriched_sentiment_map_calls_enrichment_when_enabled(self) -> None:
+        settings = MagicMock()
+        settings.enable_emotion_detection = True
+        settings.enable_sarcasm_detection = False
+
+        post = MagicMock()
+        post.source_id = "sid1"
+        post.content = "Great movie"
+
+        sentiment = MagicMock()
+        sentiment.to_dict.return_value = {
+            "compound": 0.5,
+            "label": "positive",
+            "model": "vader",
+        }
+
+        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
+            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+
+        assert "sid1" in result
+        mock_enrich.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_build_enriched_sentiment_map_calls_enrichment_when_sarcasm_enabled(self) -> None:
+        settings = MagicMock()
+        settings.enable_emotion_detection = False
+        settings.enable_sarcasm_detection = True
+
+        post = MagicMock()
+        post.source_id = "sid1"
+        post.content = "Great movie"
+
+        sentiment = MagicMock()
+        sentiment.to_dict.return_value = {
+            "compound": 0.5,
+            "label": "positive",
+            "model": "vader",
+        }
+
+        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
+            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+
+        assert "sid1" in result
+        mock_enrich.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_build_enriched_sentiment_map_skips_enrichment_when_disabled(self) -> None:
+        settings = MagicMock()
+        settings.enable_emotion_detection = False
+        settings.enable_sarcasm_detection = False
+
+        post = MagicMock()
+        post.source_id = "sid1"
+        post.content = "Great movie"
+
+        sentiment = MagicMock()
+        sentiment.to_dict.return_value = {
+            "compound": 0.5,
+            "label": "positive",
+            "model": "vader",
+        }
+
+        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
+            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+
+        assert "sid1" in result
+        mock_enrich.assert_not_called()
+
+    def test_enrich_sentiments_applies_sarcasm_flag(self) -> None:
+        settings = MagicMock()
+        settings.enable_emotion_detection = False
+        settings.enable_sarcasm_detection = True
+
+        sentiment_map: dict[str, dict[str, object]] = {"sid1": {"compound": 0.2}}
+        texts = ["Totally not bad at all 🙃"]
+        source_ids = ["sid1"]
+
+        detector = MagicMock()
+        detector.detect_batch.return_value = [(True, 0.9132)]
+
+        with patch("sam.processors.sarcasm.get_sarcasm_detector", return_value=detector):
+            runner._enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
+
+        assert sentiment_map["sid1"]["is_sarcastic"] is True
+        assert sentiment_map["sid1"]["sarcasm_confidence"] == 0.9132
+        assert "emotions" not in sentiment_map["sid1"]
+
+    def test_enrich_sentiments_applies_emotions(self) -> None:
+        settings = MagicMock()
+        settings.enable_emotion_detection = True
+        settings.enable_sarcasm_detection = False
+
+        sentiment_map: dict[str, dict[str, object]] = {"sid1": {"compound": 0.8}}
+        texts = ["This is amazing"]
+        source_ids = ["sid1"]
+
+        detector = MagicMock()
+        detector.detect_batch.return_value = [{"joy": 0.98123, "neutral": 0.01877}]
+
+        with patch("sam.processors.emotions.get_emotion_detector", return_value=detector):
+            runner._enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
+
+        assert sentiment_map["sid1"]["emotions"] == {"joy": 0.9812, "neutral": 0.0188}
+        assert "is_sarcastic" not in sentiment_map["sid1"]
+
     @pytest.mark.asyncio
     async def test_runs_collection_when_lease_acquired(self) -> None:
         with (

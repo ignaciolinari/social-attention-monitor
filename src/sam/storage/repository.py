@@ -169,7 +169,7 @@ async def get_mentions_for_title(
     stmt = (
         select(Mention)
         .where(Mention.title_id == title_id, Mention.platform == platform)
-        .order_by(Mention.collected_at.desc())
+        .order_by(Mention.collected_at.desc(), Mention.created_at.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -379,6 +379,13 @@ async def acquire_lease(
     db_now = func.now()
     db_expires = func.now() + timedelta(seconds=ttl_seconds)
 
+    # Avoid waiting indefinitely on locks or slow queries.
+    try:
+        await session.execute(text("SET LOCAL lock_timeout = '3s'"))
+        await session.execute(text("SET LOCAL statement_timeout = '15s'"))
+    except Exception as exc:  # pragma: no cover - defensive; won't fail the lease
+        logger.debug(f"[repository] Unable to set lease timeouts: {exc}")
+
     # Only steal the lease if it's expired, otherwise keep current owner.
     stmt = (
         insert(Lease)
@@ -401,7 +408,12 @@ async def acquire_lease(
         )
     )
 
-    result = await session.execute(stmt)
+    try:
+        result = await session.execute(stmt.execution_options(timeout=20))
+    except Exception as exc:
+        logger.warning(f"[repository] acquire_lease timed out/failed: {exc}")
+        return False
+
     # For PostgreSQL, rowcount should be 1 if inserted/updated, 0 otherwise.
     rowcount = getattr(result, "rowcount", 0) or 0
     return int(rowcount) > 0

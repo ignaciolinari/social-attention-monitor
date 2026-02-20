@@ -39,7 +39,12 @@ class SentimentResult:
     label: str  # positive, negative, neutral
     model: str  # Model used for analysis
     raw_scores: dict[str, Any]
+    confidence: float = 0.0  # 0 to 1, prediction confidence
     extra: dict[str, SentimentResult] | None = None  # Results from other models if running both
+    aspects: dict[str, Any] | None = None  # Aspect-based sentiment results
+    is_sarcastic: bool | None = None  # Sarcasm detection flag
+    sarcasm_confidence: float | None = None
+    emotions: dict[str, float] | None = None  # Emotion classification scores
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize result for API/storage payloads."""
@@ -50,9 +55,17 @@ class SentimentResult:
             "neutral": self.neutral,
             "label": self.label,
             "model": self.model,
+            "confidence": self.confidence,
         }
         if self.extra:
             payload["extra"] = {name: result.to_dict() for name, result in self.extra.items()}
+        if self.aspects:
+            payload["aspects"] = self.aspects
+        if self.is_sarcastic is not None:
+            payload["is_sarcastic"] = self.is_sarcastic
+            payload["sarcasm_confidence"] = self.sarcasm_confidence
+        if self.emotions:
+            payload["emotions"] = self.emotions
         return payload
 
 
@@ -265,6 +278,7 @@ class SentimentAnalyzer:
             label=label,
             model=self.model.value,
             raw_scores=scores,
+            confidence=round(abs(compound), 4),
         )
 
     def _analyze_roberta(self, text: str) -> SentimentResult:
@@ -311,6 +325,7 @@ class SentimentAnalyzer:
             label=label,
             model=SentimentModel.ROBERTA.value,
             raw_scores={"roberta_neg": negative, "roberta_neu": neutral, "roberta_pos": positive},
+            confidence=round(max(negative, neutral, positive), 4),
         )
 
     def _analyze_roberta_batch(self, texts: list[str]) -> list[SentimentResult]:
@@ -365,6 +380,7 @@ class SentimentAnalyzer:
                             "roberta_neu": neutral,
                             "roberta_pos": positive,
                         },
+                        confidence=round(max(negative, neutral, positive), 4),
                     )
                 )
         return results

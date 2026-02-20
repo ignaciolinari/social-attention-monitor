@@ -41,7 +41,7 @@ from sam.processors.sentiment import (
     SentimentResult,
     analyze_sentiment_batch_with_translation,
 )
-from sam.quota import get_quota_tracker, seed_quota_from_db
+from sam.quota import YOUTUBE_COMMENT_THREADS_COST, get_quota_tracker, seed_quota_from_db
 from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
 from sam.storage.repository import (
     acquire_lease,
@@ -53,6 +53,11 @@ from sam.storage.repository import (
 )
 
 LEASE_NAME = "sam:collector-cycle"
+
+
+def _bool_flag(value: Any, *, default: bool = False) -> bool:
+    """Return a strict bool from settings-like values."""
+    return value if isinstance(value, bool) else default
 
 
 def _analyze_texts_for_sentiment_with_stats(
@@ -111,6 +116,70 @@ def _build_sentiment_map(
     return result
 
 
+def _enrich_sentiments_with_nlp(
+    texts: list[str],
+    sentiment_map: dict[str, dict[str, Any]],
+    source_ids: list[str],
+    settings: Any,
+) -> None:
+    """Enrich sentiment dicts in-place with emotion/sarcasm when enabled.
+
+    Runs in-thread (already off-loop when called via asyncio.to_thread wrapper).
+    """
+    if _bool_flag(getattr(settings, "enable_sarcasm_detection", False)):
+        try:
+            from sam.processors.sarcasm import get_sarcasm_detector
+
+            sarcasm_detector = get_sarcasm_detector()
+            results = sarcasm_detector.detect_batch(texts)
+            for sid, (is_sarc, conf) in zip(source_ids, results, strict=True):
+                if sid in sentiment_map:
+                    sentiment_map[sid]["is_sarcastic"] = is_sarc
+                    sentiment_map[sid]["sarcasm_confidence"] = round(float(conf), 4)
+        except Exception as exc:
+            logger.debug(f"[runner] Sarcasm enrichment skipped: {exc}")
+
+    if _bool_flag(getattr(settings, "enable_emotion_detection", False)):
+        try:
+            from sam.processors.emotions import get_emotion_detector
+
+            emotion_detector = get_emotion_detector()
+            emotion_results = emotion_detector.detect_batch(texts)
+            for sid, emotions in zip(source_ids, emotion_results, strict=True):
+                if sid not in sentiment_map or not isinstance(emotions, dict) or not emotions:
+                    continue
+                sentiment_map[sid]["emotions"] = {
+                    label: round(float(score), 4) for label, score in emotions.items()
+                }
+        except Exception as exc:
+            logger.debug(f"[runner] Emotion enrichment skipped: {exc}")
+
+
+async def _build_enriched_sentiment_map(
+    posts: list[CollectedPost],
+    sentiments: list[SentimentResult],
+    settings: Any,
+) -> dict[str, dict[str, Any]]:
+    """Build sentiment map and apply optional NLP enrichments."""
+    sentiment_map = _build_sentiment_map(posts, sentiments)
+    if not posts:
+        return sentiment_map
+
+    should_enrich = _bool_flag(getattr(settings, "enable_emotion_detection", False)) or _bool_flag(
+        getattr(settings, "enable_sarcasm_detection", False)
+    )
+    if should_enrich:
+        await asyncio.to_thread(
+            _enrich_sentiments_with_nlp,
+            [p.content for p in posts],
+            sentiment_map,
+            [p.source_id for p in posts],
+            settings,
+        )
+
+    return sentiment_map
+
+
 async def collect_once(
     session: AsyncSession,
     *,
@@ -131,6 +200,10 @@ async def collect_once(
     translate_before_sentiment = (
         _translate_setting if isinstance(_translate_setting, bool) else False
     )
+    enable_youtube_comments = _bool_flag(getattr(settings, "enable_youtube_comments", False))
+    enable_spam_filter = _bool_flag(getattr(settings, "enable_spam_filter", False))
+    comments_per_video_raw = getattr(settings, "youtube_comments_per_video", 30)
+    comments_per_video = comments_per_video_raw if isinstance(comments_per_video_raw, int) else 30
 
     from sam.cache import collector_toggle_get
 
@@ -154,6 +227,7 @@ async def collect_once(
         "titles": 0,
         "reddit_mentions_inserted": 0,
         "youtube_mentions_inserted": 0,
+        "youtube_comments_inserted": 0,
         "bluesky_mentions_inserted": 0,
         "youtube_skipped_quota": 0,
         "metrics_snapshots_upserted": 0,
@@ -162,6 +236,7 @@ async def collect_once(
         "translate_failures": 0,
         "translate_skipped_english": 0,
         "sentiment_ms_total": 0.0,
+        "spam_filtered": 0,
     }
 
     # Track YouTube video IDs already seen during *this* cycle to avoid
@@ -216,8 +291,10 @@ async def collect_once(
                             title_id=db_title.id,
                             platform="reddit",
                             posts=reddit_result.posts,
-                            sentiment_by_source_id=_build_sentiment_map(
-                                reddit_result.posts, sentiments
+                            sentiment_by_source_id=await _build_enriched_sentiment_map(
+                                reddit_result.posts,
+                                sentiments,
+                                settings,
                             ),
                             collected_at=reddit_result.collected_at,
                         )
@@ -273,13 +350,65 @@ async def collect_once(
                             title_id=db_title.id,
                             platform="youtube",
                             posts=yt_result.posts,
-                            sentiment_by_source_id=_build_sentiment_map(
-                                yt_result.posts, sentiments
+                            sentiment_by_source_id=await _build_enriched_sentiment_map(
+                                yt_result.posts,
+                                sentiments,
+                                settings,
                             ),
                             collected_at=yt_result.collected_at,
                         )
                         stats["youtube_mentions_inserted"] += inserted
                         logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
+
+                        # Collect YouTube comments for each video
+                        if enable_youtube_comments:
+                            for yt_post in yt_result.posts:
+                                comment_budget = YOUTUBE_COMMENT_THREADS_COST
+                                if (
+                                    not quota.youtube_has_budget(cost=comment_budget)
+                                    and not settings.demo_mode
+                                ):
+                                    logger.debug(
+                                        f"[runner] Skipping comments for {yt_post.source_id} — quota"
+                                    )
+                                    break
+                                comments = await youtube.collect_comments(
+                                    yt_post.source_id,
+                                    limit=comments_per_video,
+                                )
+                                if comments:
+                                    # Run spam filter on comments
+                                    if enable_spam_filter:
+                                        from sam.processors.spam_detector import filter_spam
+
+                                        comments, spam_count = filter_spam(comments)
+                                        stats["spam_filtered"] += spam_count
+
+                                    if comments:
+                                        comment_sentiments, comment_stats = await asyncio.to_thread(
+                                            _analyze_texts_for_sentiment_with_stats,
+                                            [c.content for c in comments],
+                                            translate=translate_before_sentiment,
+                                        )
+                                        _merge_numeric_stats(stats, comment_stats)
+                                        comment_inserted = await insert_mentions(
+                                            session,
+                                            title_id=db_title.id,
+                                            platform="youtube",
+                                            posts=comments,
+                                            sentiment_by_source_id=await _build_enriched_sentiment_map(
+                                                comments,
+                                                comment_sentiments,
+                                                settings,
+                                            ),
+                                            collected_at=yt_result.collected_at,
+                                        )
+                                        stats["youtube_comments_inserted"] += comment_inserted
+                                        if comment_inserted:
+                                            logger.info(
+                                                f"[runner] {t.title} youtube comments inserted: "
+                                                f"{comment_inserted} (video {yt_post.source_id})"
+                                            )
 
                 # -- Bluesky --
                 # Use has_credentials (not is_configured) so a runtime toggle
@@ -308,8 +437,10 @@ async def collect_once(
                             title_id=db_title.id,
                             platform="bluesky",
                             posts=bluesky_result.posts,
-                            sentiment_by_source_id=_build_sentiment_map(
-                                bluesky_result.posts, sentiments
+                            sentiment_by_source_id=await _build_enriched_sentiment_map(
+                                bluesky_result.posts,
+                                sentiments,
+                                settings,
                             ),
                             collected_at=bluesky_result.collected_at,
                         )
