@@ -9,9 +9,10 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import pandas as pd
@@ -195,12 +196,18 @@ def _sentiment_comparison_cache_key(
     *,
     title_id: str,
     platform: str,
+    source_filter: str,
     translate_enabled: bool,
+    sarcasm_enabled: bool,
+    emotion_enabled: bool,
     contents: list[str],
 ) -> str:
     digest_source = "\x1f".join(contents)
     digest = hashlib.sha1(digest_source.encode("utf-8", errors="ignore")).hexdigest()
-    return f"{title_id}|{platform}|translate={translate_enabled}|{digest}"
+    return (
+        f"{title_id}|{platform}|source={source_filter}|translate={translate_enabled}"
+        f"|sarcasm={sarcasm_enabled}|emotion={emotion_enabled}|{digest}"
+    )
 
 
 def _prune_sentiment_comparison_cache(
@@ -231,6 +238,32 @@ def _build_sentiment_comparison_rows(
     vader: SentimentAnalyzer,
     roberta: SentimentAnalyzer,
 ) -> tuple[list[dict[str, Any]], int]:
+    def _parse_sarcasm(sentiment_payload: Any) -> tuple[bool | None, str]:
+        if not isinstance(sentiment_payload, dict):
+            return None, "—"
+        raw_flag = sentiment_payload.get("is_sarcastic")
+        if not isinstance(raw_flag, bool):
+            return None, "—"
+        raw_conf = sentiment_payload.get("sarcasm_confidence")
+        if isinstance(raw_conf, (int, float)):
+            return raw_flag, f"{'Yes' if raw_flag else 'No'} ({float(raw_conf):.2f})"
+        return raw_flag, "Yes" if raw_flag else "No"
+
+    def _parse_dominant_emotion(sentiment_payload: Any) -> tuple[str | None, str]:
+        if not isinstance(sentiment_payload, dict):
+            return None, "—"
+        raw_emotions = sentiment_payload.get("emotions")
+        if not isinstance(raw_emotions, dict) or not raw_emotions:
+            return None, "—"
+        valid_scores: list[tuple[str, float]] = []
+        for label, value in raw_emotions.items():
+            if isinstance(label, str) and isinstance(value, (int, float)):
+                valid_scores.append((label, float(value)))
+        if not valid_scores:
+            return None, "—"
+        top_label, top_score = max(valid_scores, key=lambda item: item[1])
+        return top_label, f"{top_label} ({top_score:.2f})"
+
     analyzable_mentions: list[dict[str, Any]] = []
     original_texts: list[str] = []
     for mention in mentions:
@@ -252,16 +285,76 @@ def _build_sentiment_comparison_rows(
     vader_results = vader.analyze_batch(processed_texts)
     roberta_results = roberta.analyze_batch(processed_texts)
 
+    mention_sentiments: list[dict[str, Any]] = []
+    for mention in analyzable_mentions:
+        raw_sentiment = mention.get("sentiment")
+        mention_sentiments.append(dict(raw_sentiment) if isinstance(raw_sentiment, dict) else {})
+
+    settings = get_settings()
+    sarcasm_enabled = bool(getattr(settings, "enable_sarcasm_detection", False))
+    emotion_enabled = bool(getattr(settings, "enable_emotion_detection", False))
+
+    # Backfill missing NLP fields at comparison time so older DB mentions
+    # (ingested before these flags were enabled) still render useful signals.
+    if sarcasm_enabled:
+        missing_sarcasm_idxs = [
+            idx
+            for idx, payload in enumerate(mention_sentiments)
+            if not isinstance(payload.get("is_sarcastic"), bool)
+        ]
+        if missing_sarcasm_idxs:
+            try:
+                from sam.processors.sarcasm import get_sarcasm_detector
+
+                sarcasm_detector = get_sarcasm_detector()
+                sarcasm_results = sarcasm_detector.detect_batch(
+                    [processed_texts[idx] for idx in missing_sarcasm_idxs]
+                )
+                for idx, (is_sarc, conf) in zip(missing_sarcasm_idxs, sarcasm_results, strict=True):
+                    mention_sentiments[idx]["is_sarcastic"] = bool(is_sarc)
+                    mention_sentiments[idx]["sarcasm_confidence"] = round(float(conf), 4)
+            except Exception:
+                pass
+
+    if emotion_enabled:
+        missing_emotion_idxs = [
+            idx
+            for idx, payload in enumerate(mention_sentiments)
+            if not isinstance(payload.get("emotions"), dict) or not payload.get("emotions")
+        ]
+        if missing_emotion_idxs:
+            try:
+                from sam.processors.emotions import get_emotion_detector
+
+                emotion_detector = get_emotion_detector()
+                emotion_results = emotion_detector.detect_batch(
+                    [processed_texts[idx] for idx in missing_emotion_idxs]
+                )
+                for idx, emotions in zip(missing_emotion_idxs, emotion_results, strict=True):
+                    if not isinstance(emotions, dict) or not emotions:
+                        continue
+                    mention_sentiments[idx]["emotions"] = {
+                        label: round(float(score), 4) for label, score in emotions.items()
+                    }
+            except Exception:
+                pass
+
     disagreements = 0
     rows: list[dict[str, Any]] = []
-    for mention, original_text, processed_text, v_res, r_res in zip(
+    for mention, original_text, processed_text, mention_sentiment, v_res, r_res in zip(
         analyzable_mentions,
         original_texts,
         processed_texts,
+        mention_sentiments,
         vader_results,
         roberta_results,
         strict=True,
     ):
+        sarcasm_flag, sarcasm_display = _parse_sarcasm(mention_sentiment)
+        top_emotion_label, top_emotion_display = _parse_dominant_emotion(mention_sentiment)
+        source_type_raw = mention.get("source_type")
+        source_type = source_type_raw if isinstance(source_type_raw, str) else "—"
+
         if (v_res.label == "positive" and r_res.label == "negative") or (
             v_res.label == "negative" and r_res.label == "positive"
         ):
@@ -274,10 +367,15 @@ def _build_sentiment_comparison_rows(
         rows.append(
             {
                 "Platform": mention.get("platform"),
+                "Source": source_type,
                 "Content": content_display,
                 "VADER": f"{v_res.compound:.2f} ({v_res.label})",
                 "RoBERTa": f"{r_res.compound:.2f} ({r_res.label})",
+                "Sarcasm": sarcasm_display,
+                "Top Emotion": top_emotion_display,
                 "Diff": abs(v_res.compound - r_res.compound),
+                "_sarcastic": sarcasm_flag,
+                "_top_emotion": top_emotion_label,
                 "_original": original_text.replace("\n", " ")
                 if processed_text != original_text
                 else None,
@@ -303,6 +401,7 @@ def main() -> None:
                 "🔄 Platform Comparison",
                 "💬 Sentiment",
                 "⚖️ Sentiment Comparison",
+                "📊 Alpha Metrics",
                 "🚨 Alerts",
                 "📡 API Quota",
             ],
@@ -801,10 +900,28 @@ def main() -> None:
             return
 
         platform_options = ["All"] + sorted(_enabled_platforms)
-        _default_plat = platform_options.index("bluesky") if "bluesky" in platform_options else 0
-        platform = st.selectbox("Select platform", platform_options, index=_default_plat)
+        platform = st.selectbox("Select platform", platform_options, index=0)
 
-        limit = st.slider("Mentions to compare", min_value=5, max_value=50, value=10)
+        source_filter = "all"
+        source_filter_label = "All mentions"
+        if platform in {"youtube", "All"}:
+            source_filter_options = {
+                "All mentions": "all",
+                "Video titles only": "video",
+                "Comments only": "comment",
+            }
+            source_filter_label = st.selectbox(
+                "Source type",
+                list(source_filter_options.keys()),
+                index=0,
+                help=(
+                    "Filter by mention source type. "
+                    "Useful for YouTube when comparing video titles vs comments."
+                ),
+            )
+            source_filter = source_filter_options[source_filter_label]
+
+        limit = st.slider("Mentions to compare", min_value=5, max_value=100, value=10)
 
         translate_enabled = st.checkbox(
             "Translate non-English mentions",
@@ -865,11 +982,27 @@ def main() -> None:
                     st.error(f"Failed to fetch mentions: {e}")
                     return
 
+            if source_filter != "all":
+                mentions = [
+                    mention
+                    for mention in mentions
+                    if str(mention.get("source_type", "")).lower() == source_filter
+                ]
+
             if not mentions:
-                st.warning("No mentions found for this title/platform.")
+                if source_filter == "video":
+                    st.warning("No video-title mentions found for this title/platform.")
+                elif source_filter == "comment":
+                    st.warning("No comment mentions found for this title/platform.")
+                else:
+                    st.warning("No mentions found for this title/platform.")
                 return
 
             from sam.processors.sentiment import SentimentModel
+
+            runtime_settings = get_settings()
+            sarcasm_enabled = bool(getattr(runtime_settings, "enable_sarcasm_detection", False))
+            emotion_enabled = bool(getattr(runtime_settings, "enable_emotion_detection", False))
 
             content_fingerprint = [
                 (m.get("content") or "").strip()
@@ -883,7 +1016,10 @@ def main() -> None:
             cache_key = _sentiment_comparison_cache_key(
                 title_id=selected_title.id,
                 platform=platform,
+                source_filter=source_filter,
                 translate_enabled=translate_enabled,
+                sarcasm_enabled=sarcasm_enabled,
+                emotion_enabled=emotion_enabled,
                 contents=content_fingerprint,
             )
             cached_result = comparison_cache.get(cache_key)
@@ -945,7 +1081,11 @@ def main() -> None:
                 "cache_source": cache_hint,
                 "title_id": selected_title.id,
                 "platform": platform,
+                "source_filter": source_filter,
+                "source_filter_label": source_filter_label,
                 "translate_enabled": translate_enabled,
+                "sarcasm_enabled": sarcasm_enabled,
+                "emotion_enabled": emotion_enabled,
                 "limit": limit,
             }
 
@@ -972,16 +1112,24 @@ def main() -> None:
             last_result
             and str(last_result.get("title_id")) == selected_title.id
             and str(last_result.get("platform")) == platform
+            and str(last_result.get("source_filter", "all")) == source_filter
             and bool(last_result.get("translate_enabled")) == translate_enabled
+            and bool(last_result.get("sarcasm_enabled", False))
+            == bool(getattr(get_settings(), "enable_sarcasm_detection", False))
+            and bool(last_result.get("emotion_enabled", False))
+            == bool(getattr(get_settings(), "enable_emotion_detection", False))
             and int(last_result.get("limit", 0)) == limit
         ):
             rows = last_result.get("rows", [])
             disagreements = int(last_result.get("disagreements", 0))
             source = str(last_result.get("cache_source", "fresh"))
+            selected_source_label = str(last_result.get("source_filter_label", source_filter_label))
             if source == "cache":
                 st.caption("Last displayed comparison was loaded from cache.")
 
-            st.subheader(f"Analysis: VADER vs RoBERTa ({len(rows)} mentions)")
+            st.subheader(
+                f"Analysis: VADER vs RoBERTa ({len(rows)} mentions · {selected_source_label})"
+            )
             analyzed_count = len(rows)
             if analyzed_count > 0:
                 st.metric(
@@ -989,6 +1137,26 @@ def main() -> None:
                     f"{disagreements}",
                     delta=f"{disagreements / analyzed_count * 100:.1f}%",
                 )
+
+                sarcastic_mentions = sum(1 for row in rows if row.get("_sarcastic") is True)
+                emotion_labels = [
+                    str(label)
+                    for label in (row.get("_top_emotion") for row in rows)
+                    if isinstance(label, str)
+                ]
+                summary_col_1, summary_col_2 = st.columns(2)
+                with summary_col_1:
+                    st.metric(
+                        "Sarcastic Mentions",
+                        f"{sarcastic_mentions}",
+                        delta=f"{(sarcastic_mentions / analyzed_count) * 100:.1f}%",
+                    )
+                with summary_col_2:
+                    if emotion_labels:
+                        top_emotion, top_count = Counter(emotion_labels).most_common(1)[0]
+                        st.metric("Top Emotion", f"{top_emotion} ({top_count})")
+                    else:
+                        st.metric("Top Emotion", "—")
             else:
                 st.info("No analyzable mention text found for this selection.")
                 return
@@ -1024,6 +1192,449 @@ def main() -> None:
                             st.divider()
         else:
             st.info("Run comparison to analyze mentions for the current selection.")
+
+    elif page == "📊 Alpha Metrics":
+        st.header("📊 Alpha Metrics")
+        st.markdown("*Advanced signals for alpha extraction from social attention data*")
+
+        trending = _get_trending_metrics(window_hours=window_hours, limit=20)
+        if not trending or not trending.get("items"):
+            st.info("No titles available yet. Populate the DB first.")
+            return
+
+        title_options = _build_title_options(trending.get("items", []))
+        if not title_options:
+            st.info("No title options available yet.")
+            return
+        selected_title = st.selectbox(
+            "Select title",
+            title_options,
+            format_func=_title_option_label,
+            key="alpha_title",
+        )
+        selected_id = selected_title.id
+
+        try:
+            ts = _get_json(
+                "/api/v1/metrics/timeseries",
+                params={"title_id": selected_id, "window_hours": window_hours, "hours": hours},
+            )
+        except Exception as e:
+            st.error(f"Failed to load metrics: {e}")
+            return
+
+        points = ts.get("points", [])
+        if not points:
+            st.info("No snapshots found for this title.")
+            return
+
+        df = pd.DataFrame(points)
+        df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+        df = df.sort_values("snapshot_time")
+
+        # Safely extract raw_metrics fields
+        if "raw_metrics" not in df.columns:
+            df["raw_metrics"] = [{} for _ in range(len(df))]
+        df["raw_metrics"] = df["raw_metrics"].apply(lambda x: x if isinstance(x, dict) else {})
+
+        latest_raw = df["raw_metrics"].iloc[-1] if len(df) > 0 else {}
+
+        # ── Metric cards ──────────────────────────────────────
+        st.subheader("📈 Latest Snapshot")
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        ews = latest_raw.get("engagement_weighted_sentiment")
+        momentum = latest_raw.get("sentiment_momentum")
+        fatigue = latest_raw.get("audience_fatigue_index")
+        viral = latest_raw.get("viral_coefficient")
+        hhi = latest_raw.get("author_diversity_score")
+
+        with c1:
+            st.metric(
+                "Eng-Weighted Sentiment",
+                f"{float(ews):.3f}" if isinstance(ews, (int, float)) else "—",
+                help="Sentiment weighted by engagement. High-engagement"
+                " opinions carry more weight.",
+            )
+        with c2:
+            delta_color: Literal["normal", "inverse"] = (
+                "normal" if not isinstance(momentum, (int, float)) or momentum >= 0 else "inverse"
+            )
+            st.metric(
+                "Sentiment Momentum",
+                f"{float(momentum):+.3f}" if isinstance(momentum, (int, float)) else "—",
+                delta=(
+                    "→"
+                    if isinstance(momentum, (int, float)) and momentum == 0
+                    else ("↑" if isinstance(momentum, (int, float)) and momentum > 0 else "↓")
+                    if isinstance(momentum, (int, float))
+                    else None
+                ),
+                delta_color=delta_color,
+                help="Rate of change of average sentiment between snapshots.",
+            )
+        with c3:
+            fatigue_color = (
+                "🟢"
+                if isinstance(fatigue, (int, float)) and fatigue < 0.3
+                else ("🟡" if isinstance(fatigue, (int, float)) and fatigue < 0.6 else "🔴")
+            )
+            st.metric(
+                "Audience Fatigue",
+                (
+                    f"{fatigue_color} {float(fatigue):.2f}"
+                    if isinstance(fatigue, (int, float))
+                    else "—"
+                ),
+                help="0 = fresh engagement, 1 = severe fatigue."
+                " Composite of declining engagement-per-mention + sentiment.",
+            )
+        with c4:
+            st.metric(
+                "Viral Coefficient",
+                f"{float(viral):.2f}" if isinstance(viral, (int, float)) else "—",
+                help="Repost/share ratio. Higher = more organic amplification.",
+            )
+        with c5:
+            div_label = (
+                "Diverse"
+                if isinstance(hhi, (int, float)) and hhi < 0.1
+                else (
+                    "Moderate" if isinstance(hhi, (int, float)) and hhi < 0.25 else "Concentrated"
+                )
+            )
+            st.metric(
+                "Author Diversity",
+                f"{div_label} ({float(hhi):.3f})" if isinstance(hhi, (int, float)) else "—",
+                help="HHI index. Lower = more diverse author base."
+                " High concentration may indicate echo chambers.",
+            )
+
+        # ── Creator vs Audience ──────────────────────────────
+        creator_s = latest_raw.get("creator_sentiment")
+        audience_s = latest_raw.get("audience_sentiment")
+        if creator_s is not None or audience_s is not None:
+            st.divider()
+            st.subheader("🎬 Creator vs Audience Sentiment")
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                st.metric("Creator Sentiment", f"{creator_s:.3f}" if creator_s is not None else "—")
+            with cc2:
+                st.metric(
+                    "Audience Sentiment", f"{audience_s:.3f}" if audience_s is not None else "—"
+                )
+            with cc3:
+                if creator_s is not None and audience_s is not None:
+                    gap = creator_s - audience_s
+                    st.metric("Gap (Creator − Audience)", f"{gap:+.3f}")
+                else:
+                    st.metric("Gap", "—")
+
+        # ── Cross-platform divergence ────────────────────────
+        divergence = latest_raw.get("sentiment_divergence", {})
+        if divergence:
+            st.divider()
+            st.subheader("🔀 Cross-Platform Sentiment Divergence")
+
+            # Split into averages and pairwise
+            avgs = {k: v for k, v in divergence.items() if "_avg" in k}
+            pairs = {k: v for k, v in divergence.items() if "_vs_" in k}
+
+            if avgs:
+                avg_df = pd.DataFrame(
+                    [
+                        {"Platform": k.replace("_avg", "").title(), "Avg Sentiment": v}
+                        for k, v in avgs.items()
+                    ]
+                )
+                fig_bar = px.bar(
+                    avg_df,
+                    x="Platform",
+                    y="Avg Sentiment",
+                    color="Platform",
+                    color_discrete_map={
+                        "Reddit": COLOR_REDDIT,
+                        "Youtube": COLOR_YOUTUBE,
+                        "Bluesky": COLOR_BLUESKY,
+                    },
+                    title="Per-Platform Average Sentiment",
+                )
+                fig_bar.update_layout(showlegend=False)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+            if pairs:
+                pair_text = " · ".join(
+                    f"{k.replace('_vs_', ' vs ').title()}: Δ={v:.3f}" for k, v in pairs.items()
+                )
+                st.caption(f"Pairwise divergences: {pair_text}")
+
+        # ── Sentiment momentum timeline ──────────────────────
+        df["_momentum"] = df["raw_metrics"].apply(lambda x: x.get("sentiment_momentum", 0.0))
+        df["_fatigue"] = df["raw_metrics"].apply(lambda x: x.get("audience_fatigue_index", 0.0))
+
+        if df["_momentum"].abs().sum() > 0:
+            st.divider()
+            st.subheader("📉 Sentiment Momentum Over Time")
+            fig_mom = px.bar(
+                df,
+                x="snapshot_time",
+                y="_momentum",
+                color="_momentum",
+                color_continuous_scale=["#ef4444", "#fbbf24", "#22c55e"],
+                labels={"_momentum": "Momentum", "snapshot_time": "Time"},
+            )
+            fig_mom.update_layout(coloraxis_showscale=False)
+            st.plotly_chart(fig_mom, use_container_width=True)
+
+        # ── Snapshot keywords / hashtags ─────────────────────
+        keyword_signals = latest_raw.get("keyword_signals")
+        if isinstance(keyword_signals, dict):
+            keywords_raw = keyword_signals.get("keywords")
+            hashtags_raw = keyword_signals.get("hashtags")
+
+            keyword_items = [
+                item
+                for item in (keywords_raw if isinstance(keywords_raw, list) else [])
+                if isinstance(item, dict)
+                and isinstance(item.get("term"), str)
+                and isinstance(item.get("score"), (float, int))
+            ]
+            hashtag_items = [
+                item
+                for item in (hashtags_raw if isinstance(hashtags_raw, list) else [])
+                if isinstance(item, dict)
+                and isinstance(item.get("tag"), str)
+                and isinstance(item.get("count"), (float, int))
+            ]
+
+            if keyword_items or hashtag_items:
+                st.divider()
+                st.subheader("🏷️ Top Terms")
+                k1, k2 = st.columns(2)
+
+                with k1:
+                    st.caption("Keywords")
+                    if keyword_items:
+                        keyword_df = pd.DataFrame(
+                            [
+                                {
+                                    "Keyword": item["term"],
+                                    "Relevance": float(item["score"]),
+                                }
+                                for item in keyword_items[:15]
+                            ]
+                        )
+                        st.dataframe(keyword_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No keyword signals for this snapshot.")
+
+                with k2:
+                    st.caption("Hashtags")
+                    if hashtag_items:
+                        hashtag_df = pd.DataFrame(
+                            [
+                                {
+                                    "Hashtag": f"#{str(item['tag']).lstrip('#')}",
+                                    "Count": int(item["count"]),
+                                }
+                                for item in hashtag_items[:20]
+                            ]
+                        )
+                        st.dataframe(hashtag_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No hashtag signals for this snapshot.")
+
+                # Trend charts for top keywords/hashtags from latest snapshot
+                fig_keywords: Any | None = None
+                latest_top_terms = [
+                    str(item["term"])
+                    for item in keyword_items[:5]
+                    if str(item.get("term", "")).strip()
+                ]
+                if latest_top_terms:
+                    trend_rows: list[dict[str, Any]] = []
+                    for _, row in df.iterrows():
+                        raw = row.get("raw_metrics", {})
+                        if not isinstance(raw, dict):
+                            continue
+                        signals = raw.get("keyword_signals")
+                        if not isinstance(signals, dict):
+                            continue
+                        snap_keywords = signals.get("keywords")
+                        if not isinstance(snap_keywords, list):
+                            continue
+
+                        score_by_term: dict[str, float] = {}
+                        for keyword in snap_keywords:
+                            if not isinstance(keyword, dict):
+                                continue
+                            term = keyword.get("term")
+                            score = keyword.get("score")
+                            if isinstance(term, str) and isinstance(score, (int, float)):
+                                score_by_term[term] = float(score)
+
+                        for term in latest_top_terms:
+                            trend_rows.append(
+                                {
+                                    "snapshot_time": row["snapshot_time"],
+                                    "keyword": term,
+                                    "score": score_by_term.get(term, 0.0),
+                                }
+                            )
+
+                    if trend_rows:
+                        trend_df = pd.DataFrame(trend_rows)
+                        if trend_df["score"].sum() > 0:
+                            fig_keywords = px.line(
+                                trend_df,
+                                x="snapshot_time",
+                                y="score",
+                                color="keyword",
+                                markers=True,
+                                labels={
+                                    "snapshot_time": "Time",
+                                    "score": "Relevance",
+                                    "keyword": "Keyword",
+                                },
+                                title="Top keyword relevance across snapshots",
+                            )
+
+                fig_hashtags: Any | None = None
+                latest_top_tags = [
+                    str(item["tag"]).lstrip("#")
+                    for item in hashtag_items[:5]
+                    if str(item.get("tag", "")).strip()
+                ]
+                if latest_top_tags:
+                    hashtag_rows: list[dict[str, Any]] = []
+                    for _, row in df.iterrows():
+                        raw = row.get("raw_metrics", {})
+                        if not isinstance(raw, dict):
+                            continue
+                        signals = raw.get("keyword_signals")
+                        if not isinstance(signals, dict):
+                            continue
+                        snap_hashtags = signals.get("hashtags")
+                        if not isinstance(snap_hashtags, list):
+                            continue
+
+                        count_by_tag: dict[str, int] = {}
+                        for hashtag in snap_hashtags:
+                            if not isinstance(hashtag, dict):
+                                continue
+                            tag = hashtag.get("tag")
+                            count = hashtag.get("count")
+                            if isinstance(tag, str) and isinstance(count, (int, float)):
+                                count_by_tag[tag.lstrip("#")] = int(count)
+
+                        for tag in latest_top_tags:
+                            hashtag_rows.append(
+                                {
+                                    "snapshot_time": row["snapshot_time"],
+                                    "hashtag": f"#{tag}",
+                                    "count": count_by_tag.get(tag, 0),
+                                }
+                            )
+
+                    if hashtag_rows:
+                        hashtag_df = pd.DataFrame(hashtag_rows)
+                        if hashtag_df["count"].sum() > 0:
+                            fig_hashtags = px.line(
+                                hashtag_df,
+                                x="snapshot_time",
+                                y="count",
+                                color="hashtag",
+                                markers=True,
+                                labels={
+                                    "snapshot_time": "Time",
+                                    "count": "Count",
+                                    "hashtag": "Hashtag",
+                                },
+                                title="Top hashtag counts across snapshots",
+                            )
+
+                if fig_keywords is not None or fig_hashtags is not None:
+                    st.subheader("📈 Term Trends")
+                    t1, t2 = st.columns(2)
+                    with t1:
+                        if fig_keywords is not None:
+                            st.plotly_chart(fig_keywords, use_container_width=True)
+                        else:
+                            st.info("No keyword trend data available.")
+                    with t2:
+                        if fig_hashtags is not None:
+                            st.plotly_chart(fig_hashtags, use_container_width=True)
+                        else:
+                            st.info("No hashtag trend data available.")
+
+        # ── Word cloud from mentions ─────────────────────────
+        st.divider()
+        st.subheader("☁️ Word Cloud")
+
+        try:
+            mention_texts: list[str] = []
+            for platform in ("reddit", "youtube", "bluesky"):
+                try:
+                    mentions_resp = _get_json(
+                        f"/api/v1/mentions/{platform}",
+                        params={
+                            "title": selected_title.name,
+                            "title_id": selected_id,
+                            "limit": 80,
+                        },
+                    )
+                except Exception:
+                    continue
+
+                mention_texts.extend(
+                    [
+                        m.get("content", "")
+                        for m in mentions_resp.get("mentions", [])
+                        if m.get("content")
+                    ]
+                )
+        except Exception:
+            mention_texts = []
+
+        if mention_texts:
+            try:
+                from io import BytesIO
+
+                from wordcloud import WordCloud
+
+                combined_text = " ".join(mention_texts)
+                wc = WordCloud(
+                    width=800,
+                    height=400,
+                    background_color="#0e1117",
+                    colormap="cool",
+                    max_words=80,
+                    collocations=False,
+                    stopwords=set(WordCloud().stopwords)
+                    | {
+                        "https",
+                        "http",
+                        "com",
+                        "www",
+                        "youtube",
+                        "watch",
+                        "reddit",
+                        "bluesky",
+                        "bsky",
+                        "amp",
+                        selected_title.name.lower(),
+                    },
+                ).generate(combined_text)
+
+                buf = BytesIO()
+                wc.to_image().save(buf, format="PNG")
+                st.image(buf.getvalue(), use_container_width=True)
+            except ImportError:
+                st.info("Install `wordcloud` package for word cloud visualizations.")
+            except Exception as e:
+                st.warning(f"Could not generate word cloud: {e}")
+        else:
+            st.info("No mention text available for word cloud generation.")
 
     elif page == "🚨 Alerts":
         st.header("🚨 Alerts and anomalies")
@@ -1073,10 +1684,21 @@ def main() -> None:
                 for alert in alerts:
                     severity = alert.get("severity", "info")
                     icon = {"critical": "🔴", "warning": "🟡", "info": "🟢"}.get(severity, "⚪")
+                    alert_type = alert.get("alert_type", "")
+                    type_icon = {
+                        "mention_spike": "🔥",
+                        "sentiment_shift": "📉",
+                        "velocity_surge": "⚡",
+                        "viral_breakout": "🚀",
+                        "attention_spike": "🎯",
+                        "sentiment_divergence": "🔀",
+                        "diversity_drop": "🔄",
+                    }.get(alert_type, "")
                     ack_status = "✅" if alert.get("acknowledged_at") else "⏳"
 
                     with st.expander(
-                        f"{icon} {ack_status} {alert.get('message', 'Unknown alert')[:80]}",
+                        f"{icon} {type_icon} {ack_status} "
+                        f"{alert.get('message', 'Unknown alert')[:80]}",
                         expanded=severity == "critical" and not alert.get("acknowledged_at"),
                     ):
                         col1, col2 = st.columns([3, 1])
@@ -1246,6 +1868,7 @@ def main() -> None:
 |---|---|---|
 | `search.list` | 100 units | Search for videos by query |
 | `videos.list` | 1 unit | Get video statistics/details |
+| `commentThreads.list` | 1 unit | Fetch video comments |
 
 **Daily budget:** 10,000 units (default YouTube project quota)
 

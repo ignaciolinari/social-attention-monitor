@@ -92,13 +92,13 @@ ci-check: ci-deps
 
 # Running services
 run-api:
-	uvicorn sam.api.main:app --reload --host 0.0.0.0 --port 8000
+	$(VENV_PY) -m uvicorn sam.api.main:app --reload --host 0.0.0.0 --port 8000
 
 run-dashboard:
-	streamlit run src/dashboard/app.py --server.port 8501
+	$(VENV_PY) -m streamlit run src/dashboard/app.py --server.port 8501
 
 run-collector:
-	python -m sam.scheduler.runner
+	$(VENV_PY) -m sam.scheduler.runner
 
 # Database
 db-up:
@@ -145,6 +145,7 @@ demo:
 # Dependency management
 lock:
 	uv pip compile pyproject.toml -o requirements.lock
+	uv pip compile pyproject.toml --all-extras -o requirements-dev.lock
 
 audit:
 	pip-audit
