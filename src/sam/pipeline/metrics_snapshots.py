@@ -8,6 +8,8 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sam.config import get_settings
+from sam.processors.keywords import extract_hashtags, extract_keywords
 from sam.processors.metrics import EngagementMetrics, MentionData, get_calculator
 from sam.storage.models import Mention
 from sam.storage.repository import (
@@ -68,6 +70,30 @@ async def compute_and_upsert_metrics_snapshot(
             negative_ratio=prev_negative,
             attention_index=float(previous.attention_index or 0.0),
             hype_acceleration=float(previous.hype_acceleration or 0.0),
+            # New alpha fields: restore from raw_metrics if available
+            engagement_weighted_sentiment=float(
+                (previous.raw_metrics or {}).get("engagement_weighted_sentiment", 0.0)
+            ),
+            sentiment_divergence=(previous.raw_metrics or {}).get("sentiment_divergence", {}),
+            sentiment_momentum=float((previous.raw_metrics or {}).get("sentiment_momentum", 0.0)),
+            audience_fatigue_index=float(
+                (previous.raw_metrics or {}).get("audience_fatigue_index", 0.0)
+            ),
+            viral_coefficient=float((previous.raw_metrics or {}).get("viral_coefficient", 0.0)),
+            author_diversity_score=float(
+                (previous.raw_metrics or {}).get("author_diversity_score", 0.0)
+            ),
+            repeat_author_ratio=float((previous.raw_metrics or {}).get("repeat_author_ratio", 0.0)),
+            creator_sentiment=(
+                float(v)
+                if (v := (previous.raw_metrics or {}).get("creator_sentiment")) is not None
+                else None
+            ),
+            audience_sentiment=(
+                float(v)
+                if (v := (previous.raw_metrics or {}).get("audience_sentiment")) is not None
+                else None
+            ),
             window_start=window_start,
             window_end=snapshot_time,
             platform_breakdown=prev_breakdown,
@@ -82,6 +108,7 @@ async def compute_and_upsert_metrics_snapshot(
                 "created_at": m.collected_at,
                 "platform": m.platform,
                 "author": m.author,
+                "source_type": m.source_type or "post",
                 "metrics": m.metrics or {},
                 "sentiment": m.sentiment or {},
             }
@@ -97,6 +124,33 @@ async def compute_and_upsert_metrics_snapshot(
     )
     primary_model_counts = _aggregate_primary_sentiment_models(mentions)
     secondary_sentiment = _aggregate_secondary_sentiment(mentions)
+    settings = get_settings()
+    keyword_signals = (
+        _extract_keyword_signals(mentions)
+        if getattr(settings, "enable_keyword_extraction", True)
+        else None
+    )
+
+    raw_metrics: dict[str, Any] = {
+        "window_start": computed.window_start.isoformat(),
+        "window_end": computed.window_end.isoformat(),
+        "platform_breakdown": computed.platform_breakdown,
+        "sentiment_primary_model": _dominant_model(primary_model_counts),
+        "sentiment_primary_model_counts": primary_model_counts,
+        "sentiment_secondary": secondary_sentiment,
+        # New alpha metrics
+        "engagement_weighted_sentiment": computed.engagement_weighted_sentiment,
+        "sentiment_divergence": computed.sentiment_divergence,
+        "sentiment_momentum": computed.sentiment_momentum,
+        "audience_fatigue_index": computed.audience_fatigue_index,
+        "viral_coefficient": computed.viral_coefficient,
+        "author_diversity_score": computed.author_diversity_score,
+        "repeat_author_ratio": computed.repeat_author_ratio,
+        "creator_sentiment": computed.creator_sentiment,
+        "audience_sentiment": computed.audience_sentiment,
+    }
+    if keyword_signals is not None:
+        raw_metrics["keyword_signals"] = keyword_signals
 
     await upsert_metrics_snapshot(
         session,
@@ -118,16 +172,26 @@ async def compute_and_upsert_metrics_snapshot(
             "negative_ratio": computed.negative_ratio,
             "attention_index": computed.attention_index,
             "hype_acceleration": computed.hype_acceleration,
-            "raw_metrics": {
-                "window_start": computed.window_start.isoformat(),
-                "window_end": computed.window_end.isoformat(),
-                "platform_breakdown": computed.platform_breakdown,
-                "sentiment_primary_model": _dominant_model(primary_model_counts),
-                "sentiment_primary_model_counts": primary_model_counts,
-                "sentiment_secondary": secondary_sentiment,
-            },
+            "raw_metrics": raw_metrics,
         },
     )
+
+
+def _extract_keyword_signals(mentions: list[Mention]) -> dict[str, Any] | None:
+    """Extract keyword/hashtag signals from mention content for snapshot payloads."""
+    texts = [m.content for m in mentions if isinstance(m.content, str) and m.content.strip()]
+    if not texts:
+        return None
+
+    keywords = extract_keywords(texts, top_n=15)
+    hashtags = extract_hashtags(texts, top_n=20)
+    if not keywords and not hashtags:
+        return None
+
+    return {
+        "keywords": [{"term": term, "score": score} for term, score in keywords],
+        "hashtags": [{"tag": tag, "count": count} for tag, count in hashtags],
+    }
 
 
 def _aggregate_primary_sentiment_models(mentions: list[Mention]) -> dict[str, int]:

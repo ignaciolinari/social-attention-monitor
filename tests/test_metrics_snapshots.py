@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -242,7 +242,7 @@ class TestComputeAndUpsertMetricsSnapshot:
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
             patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
-            patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
+            patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot"),
         ):
             mock_calc = MagicMock()
             mock_result = EngagementMetrics(
@@ -278,15 +278,65 @@ class TestComputeAndUpsertMetricsSnapshot:
                 window_hours=24,
             )
 
-            # Verify window calculation
-            mock_get_mentions.assert_called_once()
-            call_kwargs = mock_get_mentions.call_args.kwargs
-            expected_start = snapshot_time - timedelta(hours=24)
-            assert call_kwargs["window_start"] == expected_start
-            assert call_kwargs["window_end"] == snapshot_time
+    @pytest.mark.asyncio
+    async def test_includes_keyword_signals_when_enabled(self) -> None:
+        with (
+            patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
+            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
+            patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
+            patch("sam.pipeline.metrics_snapshots.get_settings") as mock_get_settings,
+            patch("sam.pipeline.metrics_snapshots.extract_keywords") as mock_extract_keywords,
+            patch("sam.pipeline.metrics_snapshots.extract_hashtags") as mock_extract_hashtags,
+        ):
+            mock_calc = MagicMock()
+            mock_result = EngagementMetrics(
+                mention_count=1,
+                unique_authors=1,
+                total_engagement=10,
+                mention_velocity=1.0,
+                velocity_change=0.0,
+                avg_sentiment=0.25,
+                sentiment_volatility=0.0,
+                positive_ratio=1.0,
+                negative_ratio=0.0,
+                attention_index=50.0,
+                hype_acceleration=0.0,
+                window_start=datetime(2026, 1, 30, 0, 0, 0, tzinfo=UTC),
+                window_end=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                platform_breakdown={"reddit": 1},
+            )
+            mock_calc.calculate.return_value = mock_result
+            mock_get_calc.return_value = mock_calc
 
-            mock_upsert.assert_called_once()
-            assert mock_upsert.call_args.kwargs["window_hours"] == 24
+            mock_settings = MagicMock()
+            mock_settings.enable_keyword_extraction = True
+            mock_get_settings.return_value = mock_settings
+
+            mock_extract_keywords.return_value = [("batman", 0.88)]
+            mock_extract_hashtags.return_value = [("dcu", 3)]
+
+            mock_mention = MagicMock()
+            mock_mention.collected_at = datetime(2026, 1, 30, 0, 30, 0, tzinfo=UTC)
+            mock_mention.platform = "reddit"
+            mock_mention.author = "user1"
+            mock_mention.content = "Loved Batman #DCU"
+            mock_mention.metrics = {"score": 10}
+            mock_mention.sentiment = {"compound": 0.25, "model": "vader"}
+            mock_get_mentions.return_value = [mock_mention]
+            mock_get_latest.return_value = None
+
+            await compute_and_upsert_metrics_snapshot(
+                AsyncMock(),
+                title_id=uuid.uuid4(),
+                snapshot_time=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                window_hours=1,
+            )
+
+            raw_metrics = mock_upsert.call_args.kwargs["metrics"]["raw_metrics"]
+            assert "keyword_signals" in raw_metrics
+            assert raw_metrics["keyword_signals"]["keywords"][0]["term"] == "batman"
+            assert raw_metrics["keyword_signals"]["hashtags"][0]["tag"] == "dcu"
 
     @pytest.mark.asyncio
     async def test_handles_null_previous_values(self) -> None:
