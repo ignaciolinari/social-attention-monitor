@@ -27,9 +27,9 @@ _MULTISPACE_RE = re.compile(r"\s+")
 _ENGLISH_CONFIDENCE_THRESHOLD = 0.80
 _MIN_DETECTION_CHARS = 20
 
-# Cache translator instance
-_translator: GoogleTranslator | None = None
-_translator_lock = Lock()
+# Cache translator instances per source language
+_translators: dict[str, GoogleTranslator] = {}
+_translators_lock = Lock()
 _translate_call_lock = Lock()
 
 
@@ -41,16 +41,21 @@ class TranslationBatchStats:
     skipped_english_count: int = 0
 
 
-def get_translator() -> GoogleTranslator:
-    """Get or create GoogleTranslator instance."""
-    global _translator
-    if _translator is not None:
-        return _translator
-    with _translator_lock:
-        if _translator is None:
-            # Use Google Translate (auto-detect source -> English)
-            _translator = GoogleTranslator(source="auto", target="en")
-    return _translator
+def get_translator(source: str = "auto") -> GoogleTranslator:
+    """Get or create GoogleTranslator instance for a specific source language."""
+    global _translators
+    if source in _translators:
+        return _translators[source]
+    with _translators_lock:
+        if source not in _translators:
+            try:
+                _translators[source] = GoogleTranslator(source=source, target="en")
+            except Exception:
+                # Fallback to auto if the language is unsupported by deep-translator
+                if "auto" not in _translators:
+                    _translators["auto"] = GoogleTranslator(source="auto", target="en")
+                return _translators["auto"]
+    return _translators[source]
 
 
 def _normalize_for_detection(text: str) -> str:
@@ -67,6 +72,54 @@ def _ascii_ratio(text: str) -> float:
     return ascii_count / len(text)
 
 
+def detect_text_language(text: str) -> str:
+    """
+    Detect the likely language of the text.
+    Returns ISO language code (e.g. 'en', 'ar') or 'unknown'.
+    """
+    if not text or not text.strip():
+        return "unknown"
+
+    normalized = _normalize_for_detection(text)
+    if not normalized:
+        return "unknown"
+
+    # Very short texts are hard for statistical language detectors.
+    if (
+        len(normalized) < _MIN_DETECTION_CHARS
+        and not _NON_LATIN_SCRIPT_RE.search(normalized)
+        and _ascii_ratio(normalized) >= 0.98
+    ):
+        return "en"
+
+    if detect_langs is None:
+        return "en" if _ascii_ratio(normalized) >= 0.98 else "unknown"
+
+    try:
+        predictions = detect_langs(normalized)
+    except Exception:
+        return "en" if _ascii_ratio(normalized) >= 0.98 else "unknown"
+
+    if not predictions:
+        return "en" if _ascii_ratio(normalized) >= 0.98 else "unknown"
+
+    top = predictions[0]
+    top_lang = str(getattr(top, "lang", "unknown"))
+    top_prob = float(getattr(top, "prob", 0.0))
+
+    # If English is detected with high confidence
+    if top_lang == "en" and top_prob >= _ENGLISH_CONFIDENCE_THRESHOLD:
+        return "en"
+
+    # For non-Latin scripts, we ignore the confidence threshold, because we know it's not English
+    # and deep-translator usually handles it well.
+    if _NON_LATIN_SCRIPT_RE.search(normalized):
+        return top_lang
+
+    # Otherwise return the detected top language, but if it's very low confidence just say unknown
+    return top_lang if top_prob > 0.5 else "unknown"
+
+
 def is_english_text(text: str) -> bool:
     """
     Best-effort language gate for translation.
@@ -74,36 +127,7 @@ def is_english_text(text: str) -> bool:
     Returns True when text appears to be English (or language cannot be
     confidently inferred), so translation can be skipped.
     """
-    if not text or not text.strip():
-        return True
-
-    normalized = _normalize_for_detection(text)
-    if not normalized:
-        return True
-
-    # Fast path for obviously non-Latin scripts.
-    if _NON_LATIN_SCRIPT_RE.search(normalized):
-        return False
-
-    # Very short texts are hard for statistical language detectors.
-    if len(normalized) < _MIN_DETECTION_CHARS:
-        return _ascii_ratio(normalized) >= 0.98
-
-    if detect_langs is None:
-        return _ascii_ratio(normalized) >= 0.98
-
-    try:
-        predictions = detect_langs(normalized)
-    except Exception:
-        return _ascii_ratio(normalized) >= 0.98
-
-    if not predictions:
-        return _ascii_ratio(normalized) >= 0.98
-
-    top = predictions[0]
-    top_lang = getattr(top, "lang", "")
-    top_prob = float(getattr(top, "prob", 0.0))
-    return bool(top_lang == "en" and top_prob >= _ENGLISH_CONFIDENCE_THRESHOLD)
+    return detect_text_language(text) in ("en", "unknown")
 
 
 def translate_text(text: str) -> str:
@@ -114,20 +138,22 @@ def translate_text(text: str) -> str:
     """
     if not text or not text.strip():
         return text
-    if is_english_text(text):
+
+    detected_lang = detect_text_language(text)
+    if detected_lang in ("en", "unknown"):
         return text
 
-    translated, _, _ = _translate_text_with_status(text)
+    translated, _, _ = _translate_text_with_status(text, source_lang=detected_lang)
     return translated
 
 
-def _translate_text_with_status(text: str) -> tuple[str, bool, bool]:
+def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[str, bool, bool]:
     """Translate text and return (text, changed, failed)."""
     if not text or not text.strip():
         return text, False, False
 
     try:
-        translator = get_translator()
+        translator = get_translator(source=source_lang)
         # deep-translator handles chunks automatically in recent versions,
         # but basic constraints apply (5000 chars).
         # For social media, texts are usually short enough.
@@ -170,13 +196,16 @@ def translate_batch_to_english_with_stats(
             translated_texts.append(text)
             continue
 
-        if is_english_text(text):
+        detected_lang = detect_text_language(text)
+        if detected_lang in ("en", "unknown"):
             translated_texts.append(text)
             skipped_english += 1
             continue
 
         attempted += 1
-        translated, was_changed, was_failed = _translate_text_with_status(text)
+        translated, was_changed, was_failed = _translate_text_with_status(
+            text, source_lang=detected_lang
+        )
         translated_texts.append(translated)
         if was_changed:
             changed += 1

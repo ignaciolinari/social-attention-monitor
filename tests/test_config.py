@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 from sam.config import Settings
 
 
@@ -53,3 +55,42 @@ def test_dashboard_http_timeout_alias() -> None:
             os.environ.pop("SAM_DASHBOARD_HTTP_TIMEOUT", None)
         else:
             os.environ["SAM_DASHBOARD_HTTP_TIMEOUT"] = old
+
+
+def test_youtube_comments_per_video_valid() -> None:
+    old = os.environ.get("SAM_YOUTUBE_COMMENTS_PER_VIDEO")
+    try:
+        os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = "50"
+        s = Settings()
+        assert s.youtube_comments_per_video == 50
+    finally:
+        if old is None:
+            os.environ.pop("SAM_YOUTUBE_COMMENTS_PER_VIDEO", None)
+        else:
+            os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = old
+
+
+def test_youtube_comments_per_video_invalid_low() -> None:
+    old = os.environ.get("SAM_YOUTUBE_COMMENTS_PER_VIDEO")
+    try:
+        os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = "0"
+        with pytest.raises(ValueError):
+            Settings()
+    finally:
+        if old is None:
+            os.environ.pop("SAM_YOUTUBE_COMMENTS_PER_VIDEO", None)
+        else:
+            os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = old
+
+
+def test_youtube_comments_per_video_invalid_high() -> None:
+    old = os.environ.get("SAM_YOUTUBE_COMMENTS_PER_VIDEO")
+    try:
+        os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = "101"
+        with pytest.raises(ValueError):
+            Settings()
+    finally:
+        if old is None:
+            os.environ.pop("SAM_YOUTUBE_COMMENTS_PER_VIDEO", None)
+        else:
+            os.environ["SAM_YOUTUBE_COMMENTS_PER_VIDEO"] = old

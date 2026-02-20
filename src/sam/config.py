@@ -342,6 +342,53 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Pipeline feature flags
+    enable_youtube_comments: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SAM_ENABLE_YOUTUBE_COMMENTS"),
+        description="Collect YouTube video comments for richer sentiment data",
+    )
+    youtube_comments_per_video: int = Field(
+        default=30,
+        validation_alias=AliasChoices("SAM_YOUTUBE_COMMENTS_PER_VIDEO"),
+        description="Number of comments to collect per YouTube video",
+    )
+    enable_emotion_detection: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SAM_ENABLE_EMOTION_DETECTION"),
+        description="Run emotion classification (requires transformers extra)",
+    )
+    enable_sarcasm_detection: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SAM_ENABLE_SARCASM_DETECTION"),
+        description="Run sarcasm detection (requires transformers extra)",
+    )
+    enable_spam_filter: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SAM_ENABLE_SPAM_FILTER"),
+        description="Filter likely spam/bot content before sentiment analysis",
+    )
+    enable_keyword_extraction: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SAM_ENABLE_KEYWORD_EXTRACTION"),
+        description="Extract trending keywords from mention content",
+    )
+    enable_aspect_sentiment: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SAM_ENABLE_ASPECT_SENTIMENT"),
+        description="Run aspect-based sentiment on long-form content",
+    )
+
+    @field_validator("youtube_comments_per_video")
+    @classmethod
+    def validate_youtube_comments_per_video(cls, v: int) -> int:
+        """Keep comment collection within API-supported and safe bounds."""
+        if v < 1:
+            raise ValueError("youtube_comments_per_video must be >= 1")
+        if v > 100:
+            raise ValueError("youtube_comments_per_video must be <= 100")
+        return v
+
     # Cache TTLs (seconds)
     cache_ttl_trending: int = Field(
         default=300,

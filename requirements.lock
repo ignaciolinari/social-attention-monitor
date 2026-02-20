@@ -21,10 +21,14 @@ arrow==1.4.0
     # via social-attention-monitor (pyproject.toml)
 asyncpg==0.31.0
     # via social-attention-monitor (pyproject.toml)
+atproto==0.0.65
+    # via social-attention-monitor (pyproject.toml)
 attrs==25.4.0
     # via
     #   jsonschema
     #   referencing
+beautifulsoup4==4.14.3
+    # via deep-translator
 blinker==1.9.0
     # via streamlit
 cachetools==6.2.6
@@ -40,13 +44,27 @@ charset-normalizer==3.4.4
     # via requests
 click==8.3.1
     # via
+    #   atproto
     #   nltk
     #   streamlit
     #   uvicorn
+    #   yake
+contourpy==1.3.3
+    # via matplotlib
 cryptography==46.0.4
-    # via google-auth
+    # via
+    #   atproto
+    #   google-auth
+cycler==0.12.1
+    # via matplotlib
+deep-translator==1.11.4
+    # via social-attention-monitor (pyproject.toml)
+dnspython==2.8.0
+    # via atproto
 fastapi==0.128.0
     # via social-attention-monitor (pyproject.toml)
+fonttools==4.61.1
+    # via matplotlib
 gitdb==4.0.12
     # via gitpython
 gitpython==3.1.46
@@ -79,12 +97,16 @@ httplib2==0.31.2
 httptools==0.7.1
     # via uvicorn
 httpx==0.28.1
-    # via social-attention-monitor (pyproject.toml)
+    # via
+    #   social-attention-monitor (pyproject.toml)
+    #   atproto
 idna==3.11
     # via
     #   anyio
     #   httpx
     #   requests
+jellyfish==1.2.1
+    # via yake
 jinja2==3.1.6
     # via
     #   altair
@@ -95,6 +117,12 @@ jsonschema==4.26.0
     # via altair
 jsonschema-specifications==2025.9.1
     # via jsonschema
+kiwisolver==1.4.9
+    # via matplotlib
+langdetect==1.0.9
+    # via social-attention-monitor (pyproject.toml)
+libipld==3.3.2
+    # via atproto
 loguru==0.7.3
     # via social-attention-monitor (pyproject.toml)
 mako==1.3.10
@@ -103,21 +131,30 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   mako
+matplotlib==3.10.8
+    # via wordcloud
 narwhals==2.15.0
     # via
     #   altair
     #   plotly
+networkx==3.6.1
+    # via yake
 nltk==3.9.2
     # via social-attention-monitor (pyproject.toml)
 numpy==2.4.1
     # via
     #   social-attention-monitor (pyproject.toml)
+    #   contourpy
+    #   matplotlib
     #   pandas
     #   pydeck
     #   streamlit
+    #   wordcloud
+    #   yake
 packaging==26.0
     # via
     #   altair
+    #   matplotlib
     #   plotly
     #   streamlit
 pandas==2.3.3
@@ -125,7 +162,10 @@ pandas==2.3.3
     #   social-attention-monitor (pyproject.toml)
     #   streamlit
 pillow==12.1.0
-    # via streamlit
+    # via
+    #   matplotlib
+    #   streamlit
+    #   wordcloud
 plotly==6.5.2
     # via social-attention-monitor (pyproject.toml)
 praw==7.8.1
@@ -155,6 +195,7 @@ pycparser==3.0
 pydantic==2.12.5
     # via
     #   social-attention-monitor (pyproject.toml)
+    #   atproto
     #   fastapi
     #   pydantic-settings
 pydantic-core==2.41.5
@@ -164,10 +205,13 @@ pydantic-settings==2.12.0
 pydeck==0.9.1
     # via streamlit
 pyparsing==3.3.2
-    # via httplib2
+    # via
+    #   httplib2
+    #   matplotlib
 python-dateutil==2.9.0.post0
     # via
     #   arrow
+    #   matplotlib
     #   pandas
 python-dotenv==1.2.1
     # via
@@ -178,6 +222,8 @@ pytz==2025.2
     # via pandas
 pyyaml==6.0.3
     # via uvicorn
+rapidfuzz==3.14.3
+    # via social-attention-monitor (pyproject.toml)
 redis==7.1.0
     # via social-attention-monitor (pyproject.toml)
 referencing==0.37.0
@@ -185,9 +231,12 @@ referencing==0.37.0
     #   jsonschema
     #   jsonschema-specifications
 regex==2026.1.15
-    # via nltk
+    # via
+    #   nltk
+    #   segtok
 requests==2.32.5
     # via
+    #   deep-translator
     #   google-api-core
     #   prawcore
     #   streamlit
@@ -199,10 +248,16 @@ rpds-py==0.30.0
     #   referencing
 rsa==4.9.1
     # via google-auth
+segtok==1.5.11
+    # via yake
 six==1.17.0
-    # via python-dateutil
+    # via
+    #   langdetect
+    #   python-dateutil
 smmap==5.0.2
     # via gitdb
+soupsieve==2.8.3
+    # via beautifulsoup4
 sqlalchemy==2.0.46
     # via
     #   social-attention-monitor (pyproject.toml)
@@ -210,7 +265,13 @@ sqlalchemy==2.0.46
 starlette==0.50.0
     # via fastapi
 streamlit==1.53.1
+    # via
+    #   social-attention-monitor (pyproject.toml)
+    #   streamlit-autorefresh
+streamlit-autorefresh==1.0.1
     # via social-attention-monitor (pyproject.toml)
+tabulate==0.9.0
+    # via yake
 tenacity==9.1.2
     # via
     #   social-attention-monitor (pyproject.toml)
@@ -226,6 +287,8 @@ typing-extensions==4.15.0
     #   alembic
     #   altair
     #   anyio
+    #   atproto
+    #   beautifulsoup4
     #   fastapi
     #   pydantic
     #   pydantic-core
@@ -260,5 +323,11 @@ watchfiles==1.1.1
     # via uvicorn
 websocket-client==1.9.0
     # via praw
-websockets==16.0
-    # via uvicorn
+websockets==15.0.1
+    # via
+    #   atproto
+    #   uvicorn
+wordcloud==1.9.6
+    # via social-attention-monitor (pyproject.toml)
+yake==0.7.3
+    # via social-attention-monitor (pyproject.toml)

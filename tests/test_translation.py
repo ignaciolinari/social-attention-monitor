@@ -4,7 +4,7 @@ import sam.utils.translation as translation
 
 
 def test_translate_text_skips_english_without_calling_translator(monkeypatch) -> None:
-    monkeypatch.setattr(translation, "is_english_text", lambda _text: True)
+    monkeypatch.setattr(translation, "detect_text_language", lambda _text: "en")
 
     def _fail_get_translator():
         raise AssertionError("translator should not be initialized for English text")
@@ -18,11 +18,11 @@ def test_translate_text_skips_english_without_calling_translator(monkeypatch) ->
 def test_translate_batch_only_attempts_non_english(monkeypatch) -> None:
     monkeypatch.setattr(
         translation,
-        "is_english_text",
-        lambda text: text == "Hello world",
+        "detect_text_language",
+        lambda text: "en" if text == "Hello world" else "fr",
     )
 
-    def _fake_translate(text: str) -> tuple[str, bool, bool]:
+    def _fake_translate(text: str, source_lang: str = "auto") -> tuple[str, bool, bool]:  # noqa: ARG001
         if text == "Hola mundo":
             return "Hello world", True, False
         if text == "Bonjour monde":
@@ -43,7 +43,7 @@ def test_translate_batch_only_attempts_non_english(monkeypatch) -> None:
 
 
 def test_translate_text_warns_and_truncates_long_input(monkeypatch) -> None:
-    monkeypatch.setattr(translation, "is_english_text", lambda _text: False)
+    monkeypatch.setattr(translation, "detect_text_language", lambda _text: "es")
 
     class _FakeTranslator:
         def __init__(self) -> None:
@@ -60,7 +60,7 @@ def test_translate_text_warns_and_truncates_long_input(monkeypatch) -> None:
             warnings.append((message, kwargs))
 
     fake_translator = _FakeTranslator()
-    monkeypatch.setattr(translation, "get_translator", lambda: fake_translator)
+    monkeypatch.setattr(translation, "get_translator", lambda source="auto": fake_translator)  # noqa: ARG005
     monkeypatch.setattr(translation, "logger", _FakeLogger())
 
     source_text = "x" * 5001
