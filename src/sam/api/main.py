@@ -40,7 +40,7 @@ from sam.alerts import (
     get_unacknowledged_count,
 )
 from sam.cache import cache_get_json, cache_set_json, close_redis, get_redis
-from sam.collectors.base import BaseCollector
+from sam.collectors.base import BaseCollector, CollectedPost
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
@@ -170,6 +170,7 @@ class MentionResponse(BaseModel):
 
     platform: str
     source_id: str
+    source_type: str
     content: str
     author: str | None
     url: str | None
@@ -538,6 +539,7 @@ async def _get_mentions_from_db(
                 MentionResponse(
                     platform=m.platform,
                     source_id=m.source_id,
+                    source_type=m.source_type,
                     content=(m.content[:500] + "...")
                     if m.content and len(m.content) > 500
                     else (m.content or ""),
@@ -582,6 +584,95 @@ def _translate_before_sentiment_enabled() -> bool:
     return setting_value if isinstance(setting_value, bool) else False
 
 
+def _bool_flag(value: Any, *, default: bool = False) -> bool:
+    """Return a strict bool from settings-like values."""
+    return value if isinstance(value, bool) else default
+
+
+def _enrich_sentiments_with_nlp(
+    posts: list[CollectedPost],
+    sentiment_by_source_id: dict[str, dict[str, Any]],
+    settings: Any,
+) -> None:
+    """Enrich sentiment payloads in-place when optional NLP flags are enabled."""
+    if not posts:
+        return
+
+    texts = [p.content for p in posts]
+    source_ids = [p.source_id for p in posts]
+
+    if _bool_flag(getattr(settings, "enable_sarcasm_detection", False)):
+        try:
+            from sam.processors.sarcasm import get_sarcasm_detector
+
+            sarcasm_detector = get_sarcasm_detector()
+            results = sarcasm_detector.detect_batch(texts)
+            for source_id, (is_sarcastic, confidence) in zip(source_ids, results, strict=True):
+                payload = sentiment_by_source_id.get(source_id)
+                if payload is None:
+                    continue
+                payload["is_sarcastic"] = bool(is_sarcastic)
+                payload["sarcasm_confidence"] = round(float(confidence), 4)
+        except Exception as exc:
+            logger.debug(f"[api] Sarcasm enrichment skipped: {exc}")
+
+    if _bool_flag(getattr(settings, "enable_emotion_detection", False)):
+        try:
+            from sam.processors.emotions import get_emotion_detector
+
+            emotion_detector = get_emotion_detector()
+            emotion_results = emotion_detector.detect_batch(texts)
+            for source_id, emotions in zip(source_ids, emotion_results, strict=True):
+                payload = sentiment_by_source_id.get(source_id)
+                if payload is None or not isinstance(emotions, dict) or not emotions:
+                    continue
+                payload["emotions"] = {
+                    label: round(float(score), 4) for label, score in emotions.items()
+                }
+        except Exception as exc:
+            logger.debug(f"[api] Emotion enrichment skipped: {exc}")
+
+
+async def _collect_youtube_comment_posts(
+    youtube_collector: YouTubeCollector,
+    video_posts: list[CollectedPost],
+    *,
+    limit: int,
+    settings: Any,
+) -> list[CollectedPost]:
+    """Collect bounded YouTube comments for a set of fetched video posts."""
+    if not _bool_flag(getattr(settings, "enable_youtube_comments", False)):
+        return []
+    if not video_posts:
+        return []
+
+    comments_per_video_raw = getattr(settings, "youtube_comments_per_video", 30)
+    comments_per_video = comments_per_video_raw if isinstance(comments_per_video_raw, int) else 30
+    if comments_per_video < 1:
+        return []
+
+    max_comment_candidates = max(limit * 2, 1)
+    comment_posts: list[CollectedPost] = []
+    for video_post in video_posts:
+        remaining_budget = max_comment_candidates - len(comment_posts)
+        if remaining_budget <= 0:
+            break
+
+        per_video_limit = min(comments_per_video, remaining_budget)
+        try:
+            comments = await youtube_collector.collect_comments(
+                video_post.source_id,
+                limit=per_video_limit,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[api] YouTube comment collection skipped ({video_post.source_id}): {exc}"
+            )
+            continue
+        comment_posts.extend(comments)
+    return comment_posts
+
+
 def _analyze_texts_for_sentiment(texts: list[str], *, translate: bool) -> list[SentimentResult]:
     """Analyze sentiments, optionally translating texts to English first."""
     sentiments, _stats = analyze_sentiment_batch_with_translation(
@@ -615,35 +706,64 @@ async def _collect_mentions_live(
     if not result.success:
         raise HTTPException(status_code=500, detail=result.error)
 
+    settings = get_settings()
+    posts: list[CollectedPost] = result.posts or []
+    if platform == "youtube":
+        youtube_collector = cast(YouTubeCollector, collector)
+        comment_posts = await _collect_youtube_comment_posts(
+            youtube_collector,
+            posts,
+            limit=limit,
+            settings=settings,
+        )
+        posts.extend(comment_posts)
+
+    # Keep response/persist set bounded by requested limit and favor fresh content.
+    posts = sorted(posts, key=lambda p: p.created_at, reverse=True)[:limit]
+
+    if not posts:
+        return [], {}, [], result.collected_at
+
     # Use batch sentiment to avoid N sequential VADER calls.
     # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
     translate_before_sentiment = _translate_before_sentiment_enabled()
     sentiment_results = await asyncio.to_thread(
         _analyze_texts_for_sentiment,
-        [post.content for post in result.posts],
+        [post.content for post in posts],
         translate=translate_before_sentiment,
     )
 
-    mentions: list[MentionResponse] = []
     sentiment_by_source_id: dict[str, dict[str, Any]] = {}
-    for post, sentiment_result in zip(result.posts, sentiment_results, strict=True):
+    for post, sentiment_result in zip(posts, sentiment_results, strict=True):
         sentiment_payload = _sentiment_payload(sentiment_result)
         sentiment_by_source_id[post.source_id] = sentiment_payload
 
+    should_enrich = _bool_flag(getattr(settings, "enable_emotion_detection", False)) or _bool_flag(
+        getattr(settings, "enable_sarcasm_detection", False)
+    )
+    if should_enrich:
+        await asyncio.to_thread(
+            _enrich_sentiments_with_nlp, posts, sentiment_by_source_id, settings
+        )
+
+    mentions: list[MentionResponse] = []
+    for post in posts:
+        sentiment_for_mention = sentiment_by_source_id.get(post.source_id)
         mentions.append(
             MentionResponse(
                 platform=post.platform,
                 source_id=post.source_id,
+                source_type=getattr(post, "source_type", "post") or "post",
                 content=post.content[:500] + "..." if len(post.content) > 500 else post.content,
                 author=post.author,
                 url=post.url,
                 created_at=post.created_at.isoformat(),
                 metrics=post.metrics,
-                sentiment=sentiment_payload,
+                sentiment=sentiment_for_mention,
             )
         )
 
-    return mentions, sentiment_by_source_id, result.posts, result.collected_at
+    return mentions, sentiment_by_source_id, posts, result.collected_at
 
 
 async def _refresh_mentions_background(
@@ -654,46 +774,23 @@ async def _refresh_mentions_background(
     limit: int,
 ) -> None:
     try:
-        collector: BaseCollector | None = None
-        if platform == "reddit":
-            collector = _reddit_collector
-        elif platform == "youtube":
-            collector = _youtube_collector
-        elif platform == "bluesky":
-            collector = _bluesky_collector
-        else:
-            logger.warning(f"[api] Unsupported platform for refresh: {platform}")
-            return
-
-        if not collector:
-            logger.warning(f"[api] {platform} collector not initialized for refresh")
-            return
-
-        result = await collector.collect(query=title, limit=limit)
-        if not result.success:
-            logger.warning(f"[api] {platform} refresh failed: {result.error}")
-            return
-
-        # Use batch sentiment (consistent with the foreground path and the
-        # pipeline runner) and persist all sentiment fields.
-        # Offload CPU-bound VADER work to a thread to keep the event loop responsive.
-        translate_before_sentiment = _translate_before_sentiment_enabled()
-        sentiment_results = await asyncio.to_thread(
-            _analyze_texts_for_sentiment,
-            [post.content for post in result.posts],
-            translate=translate_before_sentiment,
+        _mentions, sentiment_by_source_id, posts, collected_at = await _collect_mentions_live(
+            platform=platform,
+            title=title,
+            limit=limit,
         )
-        sentiment_by_source_id: dict[str, dict[str, Any]] = {}
-        for post, sr in zip(result.posts, sentiment_results, strict=True):
-            sentiment_by_source_id[post.source_id] = _sentiment_payload(sr)
+        if not posts:
+            return
 
         await _persist_mentions(
             title_id=title_id,
             platform=platform,
-            posts=result.posts,
+            posts=posts,
             sentiment_by_source_id=sentiment_by_source_id,
-            collected_at=result.collected_at,
+            collected_at=collected_at,
         )
+    except HTTPException as exc:
+        logger.warning(f"[api] {platform} background refresh skipped: {exc.detail}")
     except Exception as exc:
         logger.exception(f"[api] {platform} background refresh failed: {exc}")
 
@@ -1343,10 +1440,10 @@ async def get_youtube_mentions(
     background_tasks: BackgroundTasks,
     title: str = Query(..., description="Title to search for"),
     title_id: UUID | None = Query(None, description="Exact title UUID (preferred when available)"),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> MentionsResponse:
-    """Get YouTube videos for a title."""
+    """Get YouTube mentions for a title (videos and comments)."""
     db_result = await _get_mentions_from_db(
         title=title,
         title_id=title_id,

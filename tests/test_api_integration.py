@@ -297,6 +297,7 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
     post.url = "https://example.com"
     post.created_at = datetime.now(UTC)
     post.metrics = {}
+    post.source_type = "post"
 
     collector = AsyncMock()
     collector.collect.return_value = MagicMock(
@@ -344,6 +345,7 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
     assert payload["model"] == "both"
     assert "extra" in payload
     assert payload["extra"]["roberta"]["compound"] == 0.7
+    assert mentions[0].source_type == "post"
     assert mentions[0].sentiment is not None
     assert "extra" in mentions[0].sentiment
 

@@ -14,6 +14,7 @@ def _fake_mention(platform: str = "reddit") -> api.MentionResponse:
     return api.MentionResponse(
         platform=platform,
         source_id="abc123",
+        source_type="post",
         content="sample",
         author="user",
         url="https://example.com",

@@ -197,6 +197,7 @@ class AlertManager:
 
     def _snapshot_to_window(self, snapshot: MetricsSnapshot) -> MetricsWindow:
         """Convert a MetricsSnapshot to a MetricsWindow."""
+        raw = snapshot.raw_metrics or {}
         return MetricsWindow(
             mention_count=snapshot.mention_count if snapshot.mention_count is not None else 0,
             mention_velocity=snapshot.mention_velocity,
@@ -207,6 +208,8 @@ class AlertManager:
             hype_acceleration=snapshot.hype_acceleration,
             unique_authors=snapshot.unique_authors if snapshot.unique_authors is not None else 0,
             snapshot_time=snapshot.snapshot_time,
+            sentiment_divergence=raw.get("sentiment_divergence"),
+            author_diversity_score=raw.get("author_diversity_score"),
         )
 
 

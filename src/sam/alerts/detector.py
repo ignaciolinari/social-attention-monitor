@@ -25,6 +25,8 @@ class AlertType(StrEnum):
     VELOCITY_SURGE = "velocity_surge"
     VIRAL_BREAKOUT = "viral_breakout"
     ATTENTION_SPIKE = "attention_spike"
+    SENTIMENT_DIVERGENCE = "sentiment_divergence"
+    DIVERSITY_DROP = "diversity_drop"
 
 
 class Severity(StrEnum):
@@ -61,6 +63,9 @@ class MetricsWindow:
     hype_acceleration: float | None
     unique_authors: int
     snapshot_time: datetime
+    # New alpha fields
+    sentiment_divergence: dict[str, float] | None = None
+    author_diversity_score: float | None = None
 
 
 class AnomalyDetector:
@@ -140,6 +145,16 @@ class AnomalyDetector:
         attention = self._detect_attention_spike(current, history, title_id, title_name, now)
         if attention:
             anomalies.append(attention)
+
+        # Check for sentiment divergence across platforms
+        divergence = self._detect_sentiment_divergence(current, title_id, title_name, now)
+        if divergence:
+            anomalies.append(divergence)
+
+        # Check for author diversity drop (echo-chamber)
+        diversity = self._detect_diversity_drop(current, history, title_id, title_name, now)
+        if diversity:
+            anomalies.append(diversity)
 
         # Check for viral breakout (compound anomaly)
         if len(anomalies) >= 2:
@@ -385,6 +400,86 @@ class AnomalyDetector:
                     "attention_index": round(current.attention_index, 2)
                     if current.attention_index is not None
                     else None,
+                },
+                detected_at=now,
+                title_id=title_id,
+                title_name=title_name,
+            )
+        return None
+
+    def _detect_sentiment_divergence(
+        self,
+        current: MetricsWindow,
+        title_id: str,
+        title_name: str,
+        now: datetime,
+    ) -> DetectedAnomaly | None:
+        """Detect when platforms strongly disagree on sentiment."""
+        if not current.sentiment_divergence:
+            return None
+
+        # Find max pairwise divergence (keys like "reddit_vs_youtube")
+        max_div = 0.0
+        max_pair = ""
+        for key, value in current.sentiment_divergence.items():
+            if "_vs_" in key and value > max_div:
+                max_div = value
+                max_pair = key
+
+        if max_div >= 0.4:  # Significant divergence
+            platforms = max_pair.replace("_vs_", " vs ").title()
+            severity = Severity.WARNING if max_div >= 0.6 else Severity.INFO
+            return DetectedAnomaly(
+                alert_type=AlertType.SENTIMENT_DIVERGENCE,
+                severity=severity,
+                message=f"🔀 {title_name}: {platforms} sentiment divergence (Δ={max_div:.2f})",
+                details={
+                    "max_divergence": round(max_div, 3),
+                    "pair": max_pair,
+                    "all_divergences": {
+                        k: round(v, 3) for k, v in current.sentiment_divergence.items()
+                    },
+                },
+                detected_at=now,
+                title_id=title_id,
+                title_name=title_name,
+            )
+        return None
+
+    def _detect_diversity_drop(
+        self,
+        current: MetricsWindow,
+        history: list[MetricsWindow],
+        title_id: str,
+        title_name: str,
+        now: datetime,
+    ) -> DetectedAnomaly | None:
+        """Detect author diversity dropping (echo-chamber warning)."""
+        if current.author_diversity_score is None:
+            return None
+
+        historical_scores = [
+            h.author_diversity_score for h in history if h.author_diversity_score is not None
+        ]
+        if len(historical_scores) < self.min_history_points:
+            return None
+
+        mean_diversity = float(np.mean(historical_scores))
+
+        # HHI: higher = less diverse. Alert when current is significantly higher.
+        if (
+            current.author_diversity_score > mean_diversity * 1.5
+            and current.author_diversity_score > 0.15
+        ):
+            return DetectedAnomaly(
+                alert_type=AlertType.DIVERSITY_DROP,
+                severity=Severity.INFO,
+                message=f"🔄 {title_name}: Author diversity declining "
+                f"(HHI: {mean_diversity:.2f} → {current.author_diversity_score:.2f})",
+                details={
+                    "current_hhi": round(current.author_diversity_score, 3),
+                    "historical_mean_hhi": round(mean_diversity, 3),
+                    "unique_authors": current.unique_authors,
                 },
                 detected_at=now,
                 title_id=title_id,

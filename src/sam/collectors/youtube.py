@@ -15,7 +15,12 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
 from sam.config import get_settings
-from sam.quota import YOUTUBE_SEARCH_COST, YOUTUBE_VIDEOS_COST, get_quota_tracker
+from sam.quota import (
+    YOUTUBE_COMMENT_THREADS_COST,
+    YOUTUBE_SEARCH_COST,
+    YOUTUBE_VIDEOS_COST,
+    get_quota_tracker,
+)
 
 
 def _should_retry(exc: BaseException) -> bool:
@@ -321,6 +326,152 @@ class YouTubeCollector(BaseCollector):
             },
             raw_data=video,
         )
+
+    async def collect_comments(
+        self,
+        video_id: str,
+        limit: int = 30,
+    ) -> list[CollectedPost]:
+        """Collect top-level comments for a YouTube video.
+
+        Uses the ``commentThreads.list`` endpoint (1 quota unit per call).
+        Comments are returned as :class:`CollectedPost` instances with
+        ``source_type="comment"``.
+
+        Args:
+            video_id: YouTube video ID to fetch comments for
+            limit: Maximum number of comments to collect
+
+        Returns:
+            List of comments as CollectedPost objects
+        """
+        if self.demo_mode:
+            return self._generate_demo_comments(video_id, limit)
+
+        if not self._client:
+            return []
+
+        comments: list[CollectedPost] = []
+        next_page: str | None = None
+
+        try:
+            while len(comments) < limit:
+                params: dict[str, Any] = {
+                    "part": "snippet",
+                    "videoId": video_id,
+                    "maxResults": min(100, limit - len(comments)),
+                    "order": "relevance",
+                    "textFormat": "plainText",
+                }
+                if next_page:
+                    params["pageToken"] = next_page
+
+                data = await self._get_json(
+                    "/commentThreads",
+                    params=params,
+                    quota_endpoint="commentThreads.list",
+                    quota_units=YOUTUBE_COMMENT_THREADS_COST,
+                )
+
+                for item in data.get("items", []):
+                    comment = self._parse_comment(item, video_id)
+                    if comment:
+                        comments.append(comment)
+
+                next_page = data.get("nextPageToken")
+                if not next_page:
+                    break
+
+            logger.debug(f"[youtube] Collected {len(comments)} comments for video {video_id}")
+        except httpx.HTTPStatusError as e:
+            # Comments disabled or other error – silently skip
+            if e.response.status_code in {403, 404}:
+                logger.debug(
+                    f"[youtube] Comments unavailable for video {video_id} "
+                    f"(HTTP {e.response.status_code})"
+                )
+            else:
+                logger.warning(f"[youtube] Failed to fetch comments for video {video_id}: {e}")
+        except Exception as e:
+            logger.warning(f"[youtube] Comment collection failed for {video_id}: {e}")
+
+        return comments[:limit]
+
+    def _parse_comment(self, item: dict[str, Any], video_id: str) -> CollectedPost | None:
+        """Parse a commentThread item into a CollectedPost."""
+        try:
+            snippet = item.get("snippet", {})
+            top_comment = snippet.get("topLevelComment", {})
+            comment_snippet = top_comment.get("snippet", {})
+
+            text = comment_snippet.get("textDisplay", "")
+            if not text or not text.strip():
+                return None
+
+            published_at = comment_snippet.get("publishedAt")
+            if published_at:
+                created_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            else:
+                created_at = datetime.now(UTC)
+
+            comment_id = top_comment.get("id", item.get("id", ""))
+
+            return CollectedPost(
+                platform=self.platform_name,
+                source_id=comment_id,
+                source_type="comment",
+                content=text,
+                author=comment_snippet.get("authorDisplayName"),
+                url=f"https://youtube.com/watch?v={video_id}&lc={comment_id}",
+                created_at=created_at,
+                metrics={
+                    "like_count": int(comment_snippet.get("likeCount", 0)),
+                    "reply_count": int(snippet.get("totalReplyCount", 0)),
+                    "video_id": video_id,
+                },
+                raw_data=item,
+            )
+        except Exception as e:
+            logger.warning(f"[youtube] Error parsing comment: {e}")
+            return None
+
+    def _generate_demo_comments(self, video_id: str, limit: int) -> list[CollectedPost]:
+        """Generate demo YouTube comments for testing."""
+        demo_comments = [
+            "This is absolutely incredible! Best thing I've watched all year 🔥",
+            "Meh, the first season was way better. This feels forced.",
+            "The cinematography in this is insane. Every frame is a painting.",
+            "Am I the only one who thinks the plot makes no sense?",
+            "Just binged the whole thing in one sitting. No regrets!",
+            "The acting is phenomenal but the writing is so weak this season.",
+            "I can't believe they killed off that character. I'm devastated 😭",
+            "Overrated. I don't understand why everyone likes this.",
+            "This is a masterpiece. Changed my perspective on storytelling.",
+            "The ending was so disappointing. They ruined everything.",
+            "Finally a show that respects its audience's intelligence!",
+            "Mid at best. Nothing special about it honestly.",
+        ]
+
+        posts = []
+        base_time = datetime.now(UTC)
+        for i in range(min(limit, len(demo_comments))):
+            posts.append(
+                CollectedPost(
+                    platform=self.platform_name,
+                    source_id=f"demo_comment_{video_id}_{i}_{random.randint(1000, 9999)}",
+                    source_type="comment",
+                    content=demo_comments[i % len(demo_comments)],
+                    author=f"Demo_Commenter_{random.randint(1, 100)}",
+                    url=f"https://youtube.com/watch?v={video_id}&lc=demo{i}",
+                    created_at=base_time - timedelta(hours=random.randint(1, 72)),
+                    metrics={
+                        "like_count": random.randint(0, 500),
+                        "reply_count": random.randint(0, 20),
+                        "video_id": video_id,
+                    },
+                )
+            )
+        return posts
 
     def _generate_demo_data(self, query: str | None, limit: int) -> list[CollectedPost]:
         """Generate demo YouTube videos for testing."""
