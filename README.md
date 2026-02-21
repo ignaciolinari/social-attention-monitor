@@ -1,6 +1,14 @@
 # Social Attention Monitor (SAM)
 
-[![CI](https://github.com/ignaciolinari/social-attention-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/ignaciolinari/social-attention-monitor/actions) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/ignaciolinari/social-attention-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/ignaciolinari/social-attention-monitor/actions) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/) [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io/) [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/) [![Docker](https://img.shields.io/badge/Docker-2CA5E0?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
+
+**Supported Platforms (tested):**<br>
+![TMDB](https://img.shields.io/badge/TMDB-01B4E4?style=for-the-badge&logo=themoviedb&logoColor=white) ![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white) ![Bluesky](https://img.shields.io/badge/Bluesky-0285FF?style=for-the-badge&logo=bluesky&logoColor=white) <br>
+**Supported Platforms (not tested):**<br>
+![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=for-the-badge&logo=reddit&logoColor=white) *(implemented, missing API keys)* <br>
+**Pending Integration:**<br>
+![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)
 
 A near–real-time data pipeline that monitors social engagement and public sentiment around newly released movies and TV series.
 

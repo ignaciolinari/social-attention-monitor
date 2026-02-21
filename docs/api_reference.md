@@ -2,8 +2,8 @@
 
 The FastAPI server provides REST endpoints for data access and a WebSocket connection for real-time alerting.
 
-**Base URL**: `http://localhost:8000`  
-**Swagger Docs**: `GET /docs`  
+**Base URL**: `http://localhost:8000`
+**Swagger Docs**: `GET /docs`
 **Redoc**: `GET /redoc`
 
 ---

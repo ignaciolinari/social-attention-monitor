@@ -61,14 +61,14 @@ If it still fails (e.g. missing CUDA, out-of-memory), set `SAM_SENTIMENT_FALLBAC
 
 ## FAQ
 
-**Can I run SAM without Reddit?**  
+**Can I run SAM without Reddit?**
 Yes. Reddit defaults to disabled. YouTube and Bluesky are sufficient for the pipeline.
 
-**Can I add Twitter/X?**  
+**Can I add Twitter/X?**
 The architecture supports it. A Twitter collector would need to be implemented; Twitter's API now requires paid access.
 
-**Is data retention configurable?**  
+**Is data retention configurable?**
 Data is stored indefinitely. See [Setup](setup.md#data-retention--privacy) for privacy notes. Retention policies can be added (e.g. periodic cleanup jobs).
 
-**How do I run the full stack in Docker?**  
+**How do I run the full stack in Docker?**
 `docker compose up -d` starts postgres, redis, api, collector, and dashboard.
