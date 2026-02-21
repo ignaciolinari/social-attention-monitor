@@ -1,0 +1,80 @@
+# System Architecture
+
+Social Attention Monitor (SAM) uses a modular, near-real-time data pipeline architecture composed of several specialized services to track, process, and visualize engagement across social platforms.
+
+## Overview
+
+The core pipeline follows an Extract-Transform-Load (ETL) approach, enriched with real-time NLP processing:
+
+```
+[External Social APIs] (Reddit, YouTube, Bluesky, TMDB)
+        ↓ (Polling)
+[Collectors Layer] → Managed by APScheduler (every 5 mins)
+        ↓
+[Processors Layer] → Text cleaning, Spam filtering, multi-model Sentiment Analysis
+        ↓
+[Storage Layer]    → PostgreSQL + TimescaleDB (Time-series metrics)
+        ↓
+[FastAPI Server]   → REST endpoints + WebSocket real-time alerts
+        ↓
+[Streamlit App]    → Interactive Dashboard
+```
+
+---
+
+## 1. Collectors Layer
+The collector architecture is built around the `BaseCollector` interface, ensuring a consistent contract for fetching posts and comments.
+
+- **Execution**: Managed by `APScheduler` in `runner.py`.
+- **Concurrency**: Collectors run in parallel via `asyncio.gather`.
+- **Target Polling**: Polls external platform APIs at defined intervals (default: 5 minutes) for a dynamic list of tracked titles.
+
+*(See [Features Documentation](features.md) for details on supported platforms.)*
+
+---
+
+## 2. Processors Layer
+Data flows from collectors through a sequence of processing modules before storage:
+
+1. **Text Cleaning**: Removes URLs, HTML tags, and normalizing whitespace.
+2. **Spam Detection**: Rule-based and heuristic filtering to drop likely bot or spam content.
+3. **Sentiment Analysis**:
+   - Primary: VADER (fast, rules-based).
+   - Secondary: RoBERTa (transformer-based, deep contextual understanding).
+   - Translation: Non-English text can optionally be translated via `deep-translator` before sentiment scoring.
+4. **Advanced NLP (Optional)**:
+   - Sarcasm Detection
+   - Emotion Classification (Joy, Anger, Sadness, etc.)
+   - Keyword / Topic Extraction
+5. **Metrics Calculation**: Aggregates individual posts into time-windowed snapshots (calculating moving averages, velocities, and composite scores like Attention Index).
+
+---
+
+## 3. Storage & Caching Layer
+
+### Primary Database (PostgreSQL)
+- **Time-Series Optimization**: Leverages TimescaleDB extensions when available for efficient storage and querying of high-volume sentiment snapshots over time. TimescaleDB is *optional*—migrations detect if the extension is preloaded and skip gracefully on plain PostgreSQL (e.g. CI, simple dev setups).
+- **ORM**: SQLAlchemy 2.0 (asyncio).
+- **Alembic**: Used for schema migrations.
+- **Lease & PipelineRun Models**: Distributed lease records prevent concurrent collector runs across instances; pipeline run history tracks execution stats for observability.
+
+### Cache Engine (Redis)
+Redis serves three crucial functions:
+1. **API Caching**: Caches intense DB queries (e.g., trending titles, search, and aggregated metrics) with configurable TTLs.
+2. **Distributed Toggles**: Shares feature flags (like `YOUTUBE_ENABLED`) safely across separate processes (e.g., FastAPI vs. the Scheduler).
+3. **Anomaly Alerts Pub/Sub**: Facilitates system-wide distribution of anomaly alerts before they push to connected WebSocket clients.
+
+---
+
+## 4. API Layer (FastAPI)
+The backend service exposes data to the dashboard and external clients.
+- **REST Endpoints**: Serves metrics, configuration states, platform quotas, and system health.
+- **Rate Limiting**: Custom token-bucket rate-limiting middleware to prevent abuse.
+- **WebSockets (`/ws`)**: Pushes real-time alerting anomalies instantly to active clients.
+
+---
+
+## 5. Presentation Layer (Streamlit)
+The dashboard provides operational observability.
+- **Multipage Navigation**: Uses a tabbed interface or sidebar to separate high-level metrics from granular deep-dives.
+- **State Management**: Heavily utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.

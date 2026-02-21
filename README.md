@@ -1,264 +1,114 @@
 # Social Attention Monitor (SAM)
 
+[![CI](https://github.com/ignaciolinari/social-attention-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/ignaciolinari/social-attention-monitor/actions) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A near–real-time data pipeline that monitors social engagement and public sentiment around newly released movies and TV series.
 
-## Features
+<!-- ![Dashboard Preview](docs/assets/dashboard_demo.webp) -->
 
-- **Multi-platform tracking**: Reddit and YouTube data collection
-- **TMDB integration**: Authoritative movie/TV metadata
-- **Sentiment analysis**: VADER-based sentiment scoring
-- **Real-time metrics**: Attention Index, Hype Acceleration, and more
-- **Interactive dashboard**: Streamlit-based visualization
-- **REST API**: FastAPI backend for data access
+### Dashboard Highlights
 
-## Quick Start
+**Trending Now:** Monitor real-time traction and acceleration of social discussions.
+<!-- ![Trending Now Snapshot](docs/assets/tab_trending.png) -->
 
-### 1. Installation
+**Sentiment Analysis:** Understand public sentiment using VADER & RoBERTa models.
+<!-- ![Sentiment Analysis Snapshot](docs/assets/tab_sentiment.png) -->
+
+**Live Alerts:** Catch viral hype spikes and sentiment shifts the moment they happen.
+<!-- ![Live Alerts Snapshot](docs/assets/tab_alerts.png) -->
+
+## Overview
+
+SAM is a highly configurable ETL and Processing pipeline that tracks trending media from **TMDB**, polls social platforms (**Reddit, YouTube, and Bluesky**) for mentions, processes text through advanced **NLP Sentiment Engines**, and visualizes attention metrics in a unified **Interactive Dashboard**.
+
+### API Access & Compliance
+
+The pipeline is designed to operate **fully within official APIs and their terms of service**. It uses YouTube (with built-in quota limits), Bluesky (generous limits), and TMDB (liberal usage). Reddit only with approved access. Twitter/X could be added with paid API access. The architecture can also be adapted to ingest externally sourced or scraped data, but responsibility for compliance with applicable laws and platform ToS lies with the operator.
+
+## Key Features
+
+- **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky.
+- **Advanced NLP Processors**: Dual-engine sentiment analysis (VADER & RoBERTa), translation fallbacks, emotion classification, and sarcasm detection.
+- **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration".
+- **Real-Time Alerting**: Statistical anomaly detection for mention spikes and viral breakouts pushed instantly via WebSockets.
+- **API Quota Management**: Built-in limits tracking for external platforms (e.g., YouTube Daily Budget protection).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and pull request workflow.
+
+## Documentation
+
+Comprehensive guides on the internals, configuration, and API:
+
+- **[System Architecture](docs/architecture.md)**: Details on the Collector -> Processor -> Storage -> API flow.
+- **[Feature Deep-Dive](docs/features.md)**: NLP capabilities, platform tracking, alert specifications, and Dashboard tabs.
+- **[Setup & Configuration](docs/setup.md)**: Local macOS, Docker Compose, and environment variable references.
+- **[Troubleshooting](docs/troubleshooting.md)**: Common issues and FAQ.
+- **[API Reference](docs/api_reference.md)**: REST endpoints, Rate Limiting, and WebSockets.
+
+## Requirements
+
+- **Python 3.11+**
+- PostgreSQL 16 (with optional TimescaleDB)
+- Redis
+
+## Quick Start (Demo Mode)
+
+You can run the full pipeline instantly using mock data (no API keys required).
 
 ```bash
-# Clone and install
-git clone https://github.com/your-username/social-attention-monitor.git
+# 1. Clone and install
+git clone https://github.com/ignaciolinari/social-attention-monitor.git
 cd social-attention-monitor
 pip install -e ".[dev]"
-```
 
-### 2. Configuration
-
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env and add your API keys (optional for demo mode)
-```
-
-### 3. Database Setup
-
-Recommended (Docker):
-
-```bash
-# Install Docker first (pick one):
-# - Docker Desktop (official)
-# - OrbStack (macOS)
-# - Colima (macOS)
-
-# Start Postgres (+ TimescaleDB) and Redis
+# 2. Start PostgreSQL (+ TimescaleDB) and Redis via Docker Compose
 make db-up
-
-# Apply migrations
 alembic upgrade head
-```
 
-Alternative (native Postgres on macOS):
-
-```bash
-brew install postgresql@16
-brew services start postgresql@16
-
-# Create database and user
-createdb sam
-psql -d sam -c "CREATE USER sam WITH PASSWORD 'sam';"
-psql -d sam -c "GRANT ALL PRIVILEGES ON DATABASE sam TO sam;"
-psql -d sam -c "GRANT ALL ON SCHEMA public TO sam;"
-
-alembic upgrade head
-```
-
-### 4. Run Demo
-
-```bash
-# Run demo with mock data (no API keys required)
-python -m sam.cli demo
-```
-
-### 5. Start Services
-
-```bash
-# Start the API server
+# 3. Start the API Server
 make run-api
 
-# In another terminal, start the dashboard
+# 4. In a new terminal, start the Interactive Dashboard
 make run-dashboard
-```
 
-Optional (run everything via Docker):
-
-```bash
-cp .env.example .env
-docker compose up -d
+# 5. In a third terminal, start the Background Collector
+make run-collector
 ```
 
 Then visit:
-- **API**: http://localhost:8000/docs
-- **Dashboard**: http://localhost:8501
+- **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Dashboard**: [http://localhost:8501](http://localhost:8501)
 
-## Architecture
-
-```
-[Reddit / YouTube APIs]
-        ↓
-[Collectors] → Poll every 5 minutes
-        ↓
-[Processors] → Sentiment analysis, metrics calculation
-        ↓
-[Storage] → PostgreSQL + TimescaleDB
-        ↓
-[FastAPI] → REST endpoints
-        ↓
-[Streamlit] → Interactive dashboard
-```
-
-## Key Metrics
-
-| Metric | Description |
-|--------|-------------|
-| **Attention Index** | Composite score: mentions + velocity + unique users + sentiment |
-| **Hype Acceleration** | Rate of change in mention velocity |
-| **Sentiment Score** | VADER compound sentiment (-1 to 1) |
-| **Platform Engagement** | Normalized engagement across Reddit/YouTube |
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Health check |
-| `GET /api/v1/pipeline/health` | Pipeline health stats (data freshness, counts) |
-| `GET /api/v1/trending` | Trending movies/TV shows from TMDB |
-| `GET /api/v1/search` | Search for titles |
-| `GET /api/v1/db/titles` | List tracked titles from DB |
-| `GET /api/v1/mentions/reddit` | Reddit mentions for a title |
-| `GET /api/v1/mentions/youtube` | YouTube videos for a title |
-| `GET /api/v1/metrics/trending` | Titles ranked by Attention Index |
-| `GET /api/v1/metrics/timeseries` | Time series metrics for a title |
-| `GET /api/v1/sentiment/analyze` | Analyze arbitrary text sentiment |
-| `GET /api/v1/alerts` | List detected anomalies/alerts |
-| `GET /api/v1/alerts/counts` | Alert counts by severity |
-| `POST /api/v1/alerts/{id}/acknowledge` | Acknowledge an alert |
-| `WS /ws` | WebSocket for real-time updates |
-
-## Features
-
-### Anomaly Detection
-
-SAM includes statistical anomaly detection that monitors for:
-- **Mention Spikes** - Unusual volume increases
-- **Sentiment Shifts** - Rapid positive/negative changes
-- **Velocity Surges** - Acceleration in mention rate
-- **Viral Breakouts** - Multiple simultaneous anomalies
-
-### Real-Time Updates
-
-WebSocket support for live notifications:
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws');
-ws.onmessage = (event) => console.log(JSON.parse(event.data));
-ws.send(JSON.stringify({action: 'subscribe', topic: 'alerts'}));
-```
-
-### Rate Limiting
-
-API includes built-in rate limiting (120 requests/minute per IP) with standard headers:
-- `X-RateLimit-Limit` - Maximum requests per window
-- `X-RateLimit-Remaining` - Remaining requests
-- `Retry-After` - Seconds until reset (when limited)
+> [!NOTE]
+> For full live data setup with actual API keys for Reddit/YouTube/Bluesky, refer to the [Setup Guide](docs/setup.md).
 
 ## Project Structure
 
-```
+```text
 social-attention-monitor/
 ├── src/
 │   ├── sam/
-│   │   ├── alerts/        # Anomaly detection & alerts
-│   │   ├── collectors/    # API data collectors
-│   │   ├── processors/    # Sentiment, metrics
-│   │   ├── pipeline/      # Data pipeline components
-│   │   ├── scheduler/     # APScheduler jobs
-│   │   ├── storage/       # Database models & repository
-│   │   ├── api/           # FastAPI app
-│   │   └── config.py      # Configuration
-│   └── dashboard/         # Streamlit app
+│   │   ├── alerts/        # Anomaly detection & WebSockets
+│   │   ├── collectors/    # Polling integrations (Reddit, YouTube, Bluesky)
+│   │   ├── processors/    # Text cleaning, spam, sentiment NLP
+│   │   ├── storage/       # PostgreSQL models & Redis configuration
+│   │   ├── scheduler/     # APScheduler runner for periodic ETL
+│   │   └── api/           # FastAPI application
+│   └── dashboard/         # Streamlit visual interface
+├── docs/                  # In-depth architectural and operational guides
 ├── tests/                 # Unit & integration tests
-├── .github/workflows/     # CI pipeline
-├── pyproject.toml
-└── Makefile
+└── docker-compose.yml     # Container orchestration
 ```
 
-## Configuration
+## CI/CD Pipeline
 
-### API Keys (Optional for demo mode)
-
-| Service | Environment Variable | Get Key |
-|---------|---------------------|---------|
-| Reddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` | [Reddit Apps](https://www.reddit.com/prefs/apps) |
-| YouTube | `YOUTUBE_API_KEY` | [Google Cloud Console](https://console.cloud.google.com) |
-| TMDB | `TMDB_API_KEY` or `TMDB_ACCESS_TOKEN` | [TMDB Settings](https://www.themoviedb.org/settings/api) |
-
-### Demo Mode
-
-Set `DEMO_MODE=true` in `.env` to use generated mock data without API keys.
-
-### All Configuration Options
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| **Core** | | |
-| `SAM_ENV` | `development` | Environment: development, staging, production |
-| `DEMO_MODE` | `true` | Use mock data instead of live APIs |
-| `LOG_LEVEL` | `INFO` | Logging: DEBUG, INFO, WARNING, ERROR |
-| `LOG_JSON` | `false` | Emit structured JSON logs |
-| **Database** | | |
-| `DATABASE_URL` | `postgresql+asyncpg://sam:sam@localhost:5432/sam` | Async database URL |
-| `DATABASE_SYNC_URL` | `postgresql://sam:sam@localhost:5432/sam` | Sync URL for migrations |
-| **Redis** | | |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| **API Server** | | |
-| `API_HOST` | `0.0.0.0` | API server host |
-| `API_PORT` | `8000` | API server port |
-| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated CORS allowlist |
-| **Cache TTLs** | | |
-| `SAM_CACHE_TTL_TRENDING` | `300` | Cache TTL for trending (seconds) |
-| `SAM_CACHE_TTL_SEARCH` | `300` | Cache TTL for search (seconds) |
-| `SAM_CACHE_TTL_METRICS` | `60` | Cache TTL for metrics (seconds) |
-| `SAM_CACHE_TTL_PIPELINE_HEALTH` | `30` | Cache TTL for pipeline health (seconds) |
-| **WebSocket** | | |
-| `SAM_WS_CLEANUP_INTERVAL` | `60` | Dead connection cleanup interval (seconds) |
-| **Collection** | | |
-| `POLLING_INTERVAL_MINUTES` | `5` | Data collection interval |
-| `TARGET_SUBREDDITS` | `movies,television,...` | Subreddits to monitor |
-| `MAX_POSTS_PER_SUBREDDIT` | `100` | Max posts per subreddit per poll |
-| **Storage** | | |
-| `SAM_STORAGE_ENABLE_RAW_DATA_STORAGE` | `false` | Persist raw data to filesystem |
-| `SAM_STORAGE_RAW_DATA_DIR` | `data/raw` | Directory for raw JSONL files |
-
-## Development
-
-```bash
-# Install dev dependencies
-make dev
-
-# Run tests
-make test
-
-# Run tests with coverage
-pytest tests/ -v --cov=src/sam
-
-# Lint code
-make lint
-
-# Format code
-make format
-
-# Type check
-mypy src
-```
-
-## CI/CD
-
-The project includes GitHub Actions for:
-- **Lint & Format** - ruff check and format validation
-- **Type Check** - mypy static analysis
-- **Tests** - pytest with coverage (Python 3.11 & 3.12)
-- **Security** - pip-audit vulnerability scanning
-- **Smoke Test** - End-to-end test with real Postgres & Redis
+The project uses GitHub Actions to enforce quality:
+- code linting (`ruff`)
+- static type checking (`mypy`)
+- tested coverage (`pytest`)
+- dependency security audits (`pip-audit`)
 
 ## License
 
