@@ -221,7 +221,8 @@ class TestRecomputeMetrics:
             patch("sam.storage.database.get_session") as mock_session_ctx,
             patch("sam.storage.repository.list_active_titles") as mock_list,
             patch(
-                "sam.pipeline.metrics_snapshots.compute_and_upsert_metrics_snapshot"
+                "sam.pipeline.metrics_snapshots.compute_and_upsert_metrics_snapshots_multi",
+                new_callable=AsyncMock,
             ) as mock_compute,
             patch("sys.stdout", new_callable=StringIO),
         ):
@@ -243,5 +244,5 @@ class TestRecomputeMetrics:
                 bucket_hours=1,
             )
 
-            # Should compute for each hour bucket and window
-            assert mock_compute.call_count == 2  # 2 snapshots (00:00 and 01:00)
+            # Should compute for each hour bucket (00:00 and 01:00)
+            assert mock_compute.call_count == 2

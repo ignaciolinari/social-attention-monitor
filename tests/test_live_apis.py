@@ -152,16 +152,18 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
 
     Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
+    # Monkeypatch the database module so that get_session() uses our test engine.
+    import sam.storage.database as _db_mod
+
+    monkeypatch.setattr(_db_mod, "_session_factory", Session)
+
     try:
-        async with Session() as session:
-            stats = await collect_once(
-                session,
-                limit_titles=2,
-                limit_reddit=0,  # Reddit not available
-                limit_youtube=3,
-                limit_bluesky=0,  # Keep this test scoped to TMDB + YouTube
-            )
-            await session.commit()
+        stats = await collect_once(
+            limit_titles=2,
+            limit_reddit=0,  # Reddit not available
+            limit_youtube=3,
+            limit_bluesky=0,  # Keep this test scoped to TMDB + YouTube
+        )
 
         # -- Verify titles were upserted --
         assert stats["titles"] >= 1, "Expected at least 1 title from TMDB"

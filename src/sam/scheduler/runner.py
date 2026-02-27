@@ -25,7 +25,6 @@ from typing import Any, cast
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.alerts import AlertManager
 from sam.collectors.base import CollectedPost
@@ -35,7 +34,9 @@ from sam.collectors.tmdb import TMDBCollector
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
-from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
+from sam.pipeline.metrics_snapshots import (
+    compute_and_upsert_metrics_snapshots_multi,
+)
 from sam.pipeline.raw_storage import persist_collection_result
 from sam.processors.sentiment import (
     SentimentResult,
@@ -90,7 +91,7 @@ def _merge_numeric_stats(target: dict[str, int | float], update: dict[str, int |
 JOB_NAME = "collector-cycle"
 
 
-def _snapshot_hour(dt: datetime) -> datetime:
+def _snapshot_bucket(dt: datetime) -> datetime:
     """Round *up* to the next 30-minute boundary so that each collection cycle
     gets its own snapshot bucket.
 
@@ -181,7 +182,6 @@ async def _build_enriched_sentiment_map(
 
 
 async def collect_once(
-    session: AsyncSession,
     *,
     limit_titles: int,
     limit_reddit: int,
@@ -194,6 +194,12 @@ async def collect_once(
     youtube: YouTubeCollector | None = None,
     bluesky: BlueskyCollector | None = None,
 ) -> dict[str, int | float]:
+    """Run one collection cycle across all trending titles.
+
+    Each title is processed inside its own DB session/transaction so that
+    a failure (or even a commit error) for one title does not roll back work
+    already committed for previous titles (A1 fix).
+    """
     settings = get_settings()
     logger.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
     _translate_setting = getattr(settings, "translate_before_sentiment", False)
@@ -237,11 +243,17 @@ async def collect_once(
         "translate_skipped_english": 0,
         "sentiment_ms_total": 0.0,
         "spam_filtered": 0,
+        "raw_storage_failures": 0,
     }
 
     # Track YouTube video IDs already seen during *this* cycle to avoid
     # burning quota on the same video discovered via different title queries.
     seen_yt_video_ids: set[str] = set()
+
+    # Circuit breaker: skip a platform for remaining titles after
+    # MAX_PLATFORM_FAILURES consecutive failures (C1).
+    _MAX_PLATFORM_FAILURES = 2
+    platform_failures: dict[str, int] = {"reddit": 0, "youtube": 0, "bluesky": 0}
 
     try:
         titles = await tmdb.get_trending(media_type="all", time_window="week", limit=limit_titles)
@@ -249,7 +261,7 @@ async def collect_once(
         stats["titles"] = len(titles)
 
         # Read runtime toggle states once per cycle (not per title) to
-        # avoid redundant Redis reads — Finding 6.
+        # avoid redundant Redis reads.
         reddit_runtime = await collector_toggle_get("reddit")
         yt_runtime = await collector_toggle_get("youtube")
         bsky_runtime = await collector_toggle_get("bluesky")
@@ -258,209 +270,273 @@ async def collect_once(
         yt_enabled = yt_runtime if yt_runtime is not None else settings.youtube.enabled
         bsky_enabled = bsky_runtime if bsky_runtime is not None else settings.bluesky.enabled
 
-        snapshot_time = _snapshot_hour(datetime.now(UTC))
+        # Compute snapshot_time once per cycle so all titles in this run
+        # share the same snapshot bucket.  Computing per-title risks
+        # splitting titles across buckets when a cycle spans a 30-min
+        # boundary, making cross-title comparison harder.
+        snapshot_time = _snapshot_bucket(datetime.now(UTC))
+
         for t in titles:
+            title_start = perf_counter()
             try:
-                db_title = await upsert_title(session, t)
+                # A1: Each title gets its own DB session/transaction.
+                async with get_session() as session:
+                    db_title = await upsert_title(session, t)
 
-                # -- Reddit --
-                # Use has_credentials (not is_configured) so a runtime toggle
-                # can enable collection even when env enabled=false.
-                if (settings.reddit.has_credentials or settings.demo_mode) and reddit_enabled:
-                    reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
-                    if reddit_result.success and reddit_result.posts:
-                        if settings.storage.enable_raw_data_storage:
-                            await persist_collection_result(
-                                reddit_result,
-                                raw_data_dir=settings.storage.raw_data_dir,
-                                title=t.title,
-                                title_id=db_title.id,
-                                query=t.title,
-                                run_id=run_id,
+                    # -- Phase 1: Collect from all platforms -----------------
+                    # We gather posts first, then run sentiment in a single
+                    # batch across platforms (B3 optimisation).
+                    all_posts: list[CollectedPost] = []
+                    # (platform, stats_key, posts, collected_at)
+                    platform_batches: list[tuple[str, str, list[CollectedPost], datetime]] = []
+
+                    # -- Reddit --
+                    reddit_eligible = (
+                        (settings.reddit.has_credentials or settings.demo_mode)
+                        and reddit_enabled
+                        and platform_failures["reddit"] < _MAX_PLATFORM_FAILURES
+                    )
+                    if reddit_eligible:
+                        try:
+                            reddit_result = await reddit.collect(query=t.title, limit=limit_reddit)
+                        except Exception as exc:
+                            platform_failures["reddit"] += 1
+                            logger.warning(f"[runner] Reddit collect failed for '{t.title}': {exc}")
+                            reddit_result = None
+                        if reddit_result is None:
+                            pass
+                        elif reddit_result.success and reddit_result.posts:
+                            # A4: Deduplicate posts by source_id (crossposts).
+                            seen_ids: set[str] = set()
+                            deduped: list[CollectedPost] = []
+                            for p in reddit_result.posts:
+                                if p.source_id not in seen_ids:
+                                    seen_ids.add(p.source_id)
+                                    deduped.append(p)
+
+                            if settings.storage.enable_raw_data_storage:
+                                ok = await persist_collection_result(
+                                    reddit_result,
+                                    raw_data_dir=settings.storage.raw_data_dir,
+                                    title=t.title,
+                                    title_id=db_title.id,
+                                    query=t.title,
+                                    run_id=run_id,
+                                )
+                                if not ok:
+                                    stats["raw_storage_failures"] += 1
+
+                            platform_batches.append(
+                                (
+                                    "reddit",
+                                    "reddit_mentions_inserted",
+                                    deduped,
+                                    reddit_result.collected_at,
+                                )
                             )
-                        # Run CPU-bound VADER sentiment in a thread to avoid
-                        # blocking the async event loop.
-                        sentiments, analysis_stats = await asyncio.to_thread(
-                            _analyze_texts_for_sentiment_with_stats,
-                            [p.content for p in reddit_result.posts],
-                            translate=translate_before_sentiment,
-                        )
-                        _merge_numeric_stats(stats, analysis_stats)
-                        inserted = await insert_mentions(
-                            session,
-                            title_id=db_title.id,
-                            platform="reddit",
-                            posts=reddit_result.posts,
-                            sentiment_by_source_id=await _build_enriched_sentiment_map(
-                                reddit_result.posts,
-                                sentiments,
-                                settings,
-                            ),
-                            collected_at=reddit_result.collected_at,
-                        )
-                        stats["reddit_mentions_inserted"] += inserted
-                        logger.info(f"[runner] {t.title} reddit mentions inserted: {inserted}")
+                            all_posts.extend(deduped)
+                            platform_failures["reddit"] = 0
+                        elif not reddit_result.success:
+                            platform_failures["reddit"] += 1
 
-                # -- YouTube --
-                # Use has_credentials (not is_configured) so a runtime toggle
-                # can enable collection even when env enabled=false.
-                if (settings.youtube.has_credentials or settings.demo_mode) and yt_enabled:
-                    # Guard: skip YouTube for this title if we'd exceed the daily budget.
-                    estimated_cost = 100 + 1  # search.list (100) + videos.list (1)
-                    if not quota.youtube_has_budget(cost=estimated_cost) and not settings.demo_mode:
-                        stats["youtube_skipped_quota"] += 1
-                        logger.warning(
-                            f"[runner] Skipping YouTube for '{t.title}' — daily quota budget exhausted"
-                        )
-                        yt_result = None
-                    else:
-                        yt_query = t.title
-                        yt_result = await youtube.collect(
-                            query=yt_query,
-                            limit=limit_youtube,
-                            exclude_source_ids=seen_yt_video_ids,
-                        )
-                else:
+                    # -- YouTube --
+                    yt_eligible = (
+                        (settings.youtube.has_credentials or settings.demo_mode)
+                        and yt_enabled
+                        and platform_failures["youtube"] < _MAX_PLATFORM_FAILURES
+                    )
                     yt_result = None
+                    if yt_eligible:
+                        estimated_cost = 100 + 1  # search.list + videos.list
+                        if (
+                            not quota.youtube_has_budget(cost=estimated_cost)
+                            and not settings.demo_mode
+                        ):
+                            stats["youtube_skipped_quota"] += 1
+                            logger.warning(
+                                f"[runner] Skipping YouTube for '{t.title}' "
+                                "— daily quota budget exhausted"
+                            )
+                        else:
+                            try:
+                                yt_result = await youtube.collect(
+                                    query=t.title,
+                                    limit=limit_youtube,
+                                    exclude_source_ids=seen_yt_video_ids,
+                                )
+                            except Exception as exc:
+                                platform_failures["youtube"] += 1
+                                logger.warning(
+                                    f"[runner] YouTube collect failed for '{t.title}': {exc}"
+                                )
+                                yt_result = None
 
-                if yt_result:
-                    yt_query = t.title
-                    if yt_result.success and yt_result.posts:
-                        # Track IDs so subsequent titles skip already-seen videos.
+                    if yt_result and yt_result.success and yt_result.posts:
                         seen_yt_video_ids.update(p.source_id for p in yt_result.posts)
 
-                    if yt_result.success and yt_result.posts:
                         if settings.storage.enable_raw_data_storage:
-                            await persist_collection_result(
+                            ok = await persist_collection_result(
                                 yt_result,
                                 raw_data_dir=settings.storage.raw_data_dir,
                                 title=t.title,
                                 title_id=db_title.id,
-                                query=yt_query,
-                                run_id=run_id,
-                            )
-                        sentiments, analysis_stats = await asyncio.to_thread(
-                            _analyze_texts_for_sentiment_with_stats,
-                            [p.content for p in yt_result.posts],
-                            translate=translate_before_sentiment,
-                        )
-                        _merge_numeric_stats(stats, analysis_stats)
-                        inserted = await insert_mentions(
-                            session,
-                            title_id=db_title.id,
-                            platform="youtube",
-                            posts=yt_result.posts,
-                            sentiment_by_source_id=await _build_enriched_sentiment_map(
-                                yt_result.posts,
-                                sentiments,
-                                settings,
-                            ),
-                            collected_at=yt_result.collected_at,
-                        )
-                        stats["youtube_mentions_inserted"] += inserted
-                        logger.info(f"[runner] {t.title} youtube mentions inserted: {inserted}")
-
-                        # Collect YouTube comments for each video
-                        if enable_youtube_comments:
-                            for yt_post in yt_result.posts:
-                                comment_budget = YOUTUBE_COMMENT_THREADS_COST
-                                if (
-                                    not quota.youtube_has_budget(cost=comment_budget)
-                                    and not settings.demo_mode
-                                ):
-                                    logger.debug(
-                                        f"[runner] Skipping comments for {yt_post.source_id} — quota"
-                                    )
-                                    break
-                                comments = await youtube.collect_comments(
-                                    yt_post.source_id,
-                                    limit=comments_per_video,
-                                )
-                                if comments:
-                                    # Run spam filter on comments
-                                    if enable_spam_filter:
-                                        from sam.processors.spam_detector import filter_spam
-
-                                        comments, spam_count = filter_spam(comments)
-                                        stats["spam_filtered"] += spam_count
-
-                                    if comments:
-                                        comment_sentiments, comment_stats = await asyncio.to_thread(
-                                            _analyze_texts_for_sentiment_with_stats,
-                                            [c.content for c in comments],
-                                            translate=translate_before_sentiment,
-                                        )
-                                        _merge_numeric_stats(stats, comment_stats)
-                                        comment_inserted = await insert_mentions(
-                                            session,
-                                            title_id=db_title.id,
-                                            platform="youtube",
-                                            posts=comments,
-                                            sentiment_by_source_id=await _build_enriched_sentiment_map(
-                                                comments,
-                                                comment_sentiments,
-                                                settings,
-                                            ),
-                                            collected_at=yt_result.collected_at,
-                                        )
-                                        stats["youtube_comments_inserted"] += comment_inserted
-                                        if comment_inserted:
-                                            logger.info(
-                                                f"[runner] {t.title} youtube comments inserted: "
-                                                f"{comment_inserted} (video {yt_post.source_id})"
-                                            )
-
-                # -- Bluesky --
-                # Use has_credentials (not is_configured) so a runtime toggle
-                # can enable collection even when env enabled=false.
-                if (settings.bluesky.has_credentials or settings.demo_mode) and bsky_enabled:
-                    bluesky_result = await bluesky.collect(query=t.title, limit=limit_bluesky)
-                    if bluesky_result.success and bluesky_result.posts:
-                        if settings.storage.enable_raw_data_storage:
-                            await persist_collection_result(
-                                bluesky_result,
-                                raw_data_dir=settings.storage.raw_data_dir,
-                                title=t.title,
-                                title_id=db_title.id,
                                 query=t.title,
                                 run_id=run_id,
                             )
-                        # Run sentiment analysis
+                            if not ok:
+                                stats["raw_storage_failures"] += 1
+
+                        platform_batches.append(
+                            (
+                                "youtube",
+                                "youtube_mentions_inserted",
+                                yt_result.posts,
+                                yt_result.collected_at,
+                            )
+                        )
+                        all_posts.extend(yt_result.posts)
+                        platform_failures["youtube"] = 0
+
+                        # B2: Collect YouTube comments in parallel.
+                        if enable_youtube_comments:
+                            (
+                                all_comments,
+                                spam_total,
+                                comment_failures,
+                            ) = await _collect_youtube_comments_parallel(
+                                youtube=youtube,
+                                posts=yt_result.posts,
+                                limit=comments_per_video,
+                                enable_spam_filter=enable_spam_filter,
+                                quota=quota,
+                                demo_mode=settings.demo_mode,
+                            )
+                            stats["spam_filtered"] += spam_total
+                            # Feed comment-endpoint failures into the circuit
+                            # breaker so persistent YouTube issues (e.g. global
+                            # 403) are detected even when video search succeeds.
+                            if comment_failures and not all_comments:
+                                platform_failures["youtube"] += 1
+                            if all_comments:
+                                platform_batches.append(
+                                    (
+                                        "youtube",
+                                        "youtube_comments_inserted",
+                                        all_comments,
+                                        yt_result.collected_at,
+                                    )
+                                )
+                                all_posts.extend(all_comments)
+                    elif yt_result and not yt_result.success:
+                        platform_failures["youtube"] += 1
+
+                    # -- Bluesky --
+                    bsky_eligible = (
+                        (settings.bluesky.has_credentials or settings.demo_mode)
+                        and bsky_enabled
+                        and platform_failures["bluesky"] < _MAX_PLATFORM_FAILURES
+                    )
+                    if bsky_eligible:
+                        try:
+                            bluesky_result = await bluesky.collect(
+                                query=t.title, limit=limit_bluesky
+                            )
+                        except Exception as exc:
+                            platform_failures["bluesky"] += 1
+                            logger.warning(
+                                f"[runner] Bluesky collect failed for '{t.title}': {exc}"
+                            )
+                            bluesky_result = None
+
+                        if bluesky_result is None:
+                            pass
+                        elif bluesky_result.success and bluesky_result.posts:
+                            # Deduplicate posts by source_id (reposts).
+                            bsky_seen: set[str] = set()
+                            bsky_deduped: list[CollectedPost] = []
+                            for p in bluesky_result.posts:
+                                if p.source_id not in bsky_seen:
+                                    bsky_seen.add(p.source_id)
+                                    bsky_deduped.append(p)
+
+                            if settings.storage.enable_raw_data_storage:
+                                ok = await persist_collection_result(
+                                    bluesky_result,
+                                    raw_data_dir=settings.storage.raw_data_dir,
+                                    title=t.title,
+                                    title_id=db_title.id,
+                                    query=t.title,
+                                    run_id=run_id,
+                                )
+                                if not ok:
+                                    stats["raw_storage_failures"] += 1
+
+                            platform_batches.append(
+                                (
+                                    "bluesky",
+                                    "bluesky_mentions_inserted",
+                                    bsky_deduped,
+                                    bluesky_result.collected_at,
+                                )
+                            )
+                            all_posts.extend(bsky_deduped)
+                            platform_failures["bluesky"] = 0
+                        elif not bluesky_result.success:
+                            platform_failures["bluesky"] += 1
+
+                    # -- Phase 2: Batch sentiment analysis (B3) -------------
+                    full_sentiment_map: dict[str, dict[str, Any]] = {}
+                    if all_posts:
                         sentiments, analysis_stats = await asyncio.to_thread(
                             _analyze_texts_for_sentiment_with_stats,
-                            [p.content for p in bluesky_result.posts],
+                            [p.content for p in all_posts],
                             translate=translate_before_sentiment,
                         )
                         _merge_numeric_stats(stats, analysis_stats)
+                        full_sentiment_map = await _build_enriched_sentiment_map(
+                            all_posts,
+                            sentiments,
+                            settings,
+                        )
+
+                    # -- Phase 3: Persist mentions per platform batch --------
+                    for plat, stats_key, posts, collected_at in platform_batches:
                         inserted = await insert_mentions(
                             session,
                             title_id=db_title.id,
-                            platform="bluesky",
-                            posts=bluesky_result.posts,
-                            sentiment_by_source_id=await _build_enriched_sentiment_map(
-                                bluesky_result.posts,
-                                sentiments,
-                                settings,
-                            ),
-                            collected_at=bluesky_result.collected_at,
+                            platform=plat,
+                            posts=posts,
+                            sentiment_by_source_id=full_sentiment_map,
+                            collected_at=collected_at,
                         )
-                        stats["bluesky_mentions_inserted"] += inserted
-                        logger.info(f"[runner] {t.title} bluesky mentions inserted: {inserted}")
+                        stats[stats_key] += inserted
+                        if inserted:
+                            logger.info(f"[runner] {t.title} {stats_key}: {inserted}")
 
-                # Persist metrics snapshots (hourly buckets).
-                for window_hours in (1, 24):
-                    await compute_and_upsert_metrics_snapshot(
+                    # -- Phase 4: Metrics snapshots (B4 shared query) --------
+                    snapshots_upserted = await compute_and_upsert_metrics_snapshots_multi(
                         session,
                         title_id=db_title.id,
                         snapshot_time=snapshot_time,
-                        window_hours=window_hours,
+                        window_hours_list=[1, 24],
                     )
-                    stats["metrics_snapshots_upserted"] += 1
+                    stats["metrics_snapshots_upserted"] += snapshots_upserted
 
             except Exception as exc:
                 logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
                 # Continue with the next title instead of aborting the entire run.
                 continue
+            finally:
+                # D1: Per-title timing for observability.
+                title_elapsed = perf_counter() - title_start
+                logger.info(f"[runner] {t.title}: completed in {title_elapsed:.1f}s")
+
+        # C1: Log circuit breaker activations.
+        for plat, failures in platform_failures.items():
+            if failures >= _MAX_PLATFORM_FAILURES:
+                logger.warning(
+                    f"[runner] Circuit breaker tripped for {plat} ({failures} consecutive failures)"
+                )
 
     finally:
         # Only close collectors we created ourselves.
@@ -490,6 +566,69 @@ async def collect_once(
     return stats
 
 
+async def _collect_youtube_comments_parallel(
+    *,
+    youtube: YouTubeCollector,
+    posts: list[CollectedPost],
+    limit: int,
+    enable_spam_filter: bool,
+    quota: Any,
+    demo_mode: bool,
+    max_concurrent: int = 5,
+) -> tuple[list[CollectedPost], int, int]:
+    """Fetch comments for multiple videos concurrently (B2 optimisation).
+
+    Returns ``(all_comments, total_spam_filtered, comment_failures)``.
+    """
+    sem = asyncio.Semaphore(max_concurrent)
+    total_spam = 0
+
+    async def _fetch_one(video_id: str) -> tuple[list[CollectedPost], bool]:
+        async with sem:
+            result = await youtube.collect_comments(video_id, limit=limit)
+            return (result.comments, result.had_error)
+
+    # Pre-filter by quota budget.
+    video_ids: list[str] = []
+    for p in posts:
+        # Reserve budget virtually as we build the batch so we don't schedule
+        # N parallel calls that each individually pass the same pre-check.
+        projected_cost = YOUTUBE_COMMENT_THREADS_COST * (len(video_ids) + 1)
+        if not quota.youtube_has_budget(cost=projected_cost) and not demo_mode:
+            logger.debug(f"[runner] Skipping comments for {p.source_id} — quota")
+            break
+        video_ids.append(p.source_id)
+
+    if not video_ids:
+        return [], 0, 0
+
+    results = await asyncio.gather(
+        *[_fetch_one(vid) for vid in video_ids],
+        return_exceptions=True,
+    )
+
+    all_comments: list[CollectedPost] = []
+    comment_failures = 0
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning(f"[runner] Comment fetch failed: {result}")
+            comment_failures += 1
+            continue
+        comments, had_error = result
+        if had_error:
+            comment_failures += 1
+        if comments:
+            all_comments.extend(comments)
+
+    # Run spam filter on the combined comment set.
+    if enable_spam_filter and all_comments:
+        from sam.processors.spam_detector import filter_spam
+
+        all_comments, total_spam = filter_spam(all_comments)
+
+    return all_comments, total_spam, comment_failures
+
+
 async def _collection_job(
     *,
     owner_id: uuid.UUID,
@@ -508,6 +647,9 @@ async def _collection_job(
 
     quota_tracker = get_quota_tracker()
 
+    # --- Session 1: acquire lease + create PipelineRun ---
+    # Commit immediately so the lease and "running" status are visible to
+    # other processes without waiting for the full collection cycle.
     async with get_session() as session:
         acquired = await acquire_lease(
             session,
@@ -533,21 +675,28 @@ async def _collection_job(
                 "limit_bluesky": limit_bluesky,
             },
         )
+        run_id = run.id
+        run_stats = run.stats or {}
+    # Session 1 commits here — lease and PipelineRun(status="running") are
+    # now persisted and visible to other processes.
 
-        try:
-            quota_start = quota_tracker.get_usage("youtube")
-            stats = await collect_once(
-                session,
-                limit_titles=limit_titles,
-                limit_reddit=limit_reddit,
-                limit_youtube=limit_youtube,
-                limit_bluesky=limit_bluesky,
-                run_id=run.id,
-                tmdb=tmdb,
-                reddit=reddit,
-                youtube=youtube,
-                bluesky=bluesky,
-            )
+    # --- Run collection outside any long-held session ---
+    try:
+        quota_start = quota_tracker.get_usage("youtube")
+        stats = await collect_once(
+            limit_titles=limit_titles,
+            limit_reddit=limit_reddit,
+            limit_youtube=limit_youtube,
+            limit_bluesky=limit_bluesky,
+            run_id=run_id,
+            tmdb=tmdb,
+            reddit=reddit,
+            youtube=youtube,
+            bluesky=bluesky,
+        )
+
+        # --- Session 2: finalize (alerts, finish run, release lease) ---
+        async with get_session() as session:
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
             try:
                 manager = AlertManager()
@@ -595,20 +744,21 @@ async def _collection_job(
             }
             await finish_pipeline_run(
                 session,
-                run_id=run.id,
+                run_id=run_id,
                 status="success",
                 stats={
-                    **(run.stats or {}),
+                    **run_stats,
                     **stats,
                     **alert_stats,
                     "elapsed_seconds": int(elapsed),
                     "api_quota": quota_stats,
                 },
             )
-        except Exception as e:
-            logger.exception(f"[runner] collection cycle failed: {e}")
-            await finish_pipeline_run(session, run_id=run.id, status="failed", error=str(e))
-        finally:
+            await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
+    except Exception as e:
+        logger.exception(f"[runner] collection cycle failed: {e}")
+        async with get_session() as session:
+            await finish_pipeline_run(session, run_id=run_id, status="failed", error=str(e))
             await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
 
 

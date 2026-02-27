@@ -7,6 +7,7 @@ Command-line interface for Social Attention Monitor.
 import argparse
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sam import __version__
 from sam.config import get_settings
@@ -224,7 +225,7 @@ async def recompute_metrics(
     """Backfill/recompute metrics snapshots for all active titles."""
     setup_logging()
 
-    from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
+    from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshots_multi
     from sam.storage.database import get_session
     from sam.storage.repository import list_active_titles
 
@@ -245,24 +246,28 @@ async def recompute_metrics(
     async with get_session() as session:
         offset = 0
         titles_total = 0
+        all_titles: list[Any] = []
         while True:
             titles = await list_active_titles(session, limit=200, offset=offset)
             if not titles:
                 break
             offset += len(titles)
             titles_total += len(titles)
+            all_titles.extend(titles)
 
-            for title in titles:
-                snapshot_time = start
-                while snapshot_time <= end:
-                    for w in window_hours:
-                        await compute_and_upsert_metrics_snapshot(
-                            session,
-                            title_id=title.id,
-                            snapshot_time=snapshot_time,
-                            window_hours=w,
-                        )
-                    snapshot_time = snapshot_time + timedelta(hours=bucket_hours)
+    # Process each title in its own session/transaction so that a failure
+    # on one title does not roll back work already committed for others.
+    for title in all_titles:
+        async with get_session() as session:
+            snapshot_time = start
+            while snapshot_time <= end:
+                await compute_and_upsert_metrics_snapshots_multi(
+                    session,
+                    title_id=title.id,
+                    snapshot_time=snapshot_time,
+                    window_hours_list=window_hours,
+                )
+                snapshot_time = snapshot_time + timedelta(hours=bucket_hours)
 
     print(f"✅ Done. Processed {titles_total} titles.")
 
