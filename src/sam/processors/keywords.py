@@ -6,12 +6,29 @@ extraction from social media text.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import Counter
+from typing import Any
 
 from loguru import logger
 
 _HASHTAG_RE = re.compile(r"#(\w+)")
+
+
+@functools.lru_cache(maxsize=8)
+def _get_yake_extractor(
+    language: str, max_ngram: int, top_n: int, dedup_lim: float = 0.7
+) -> Any:  # yake.KeywordExtractor
+    """Return a cached YAKE extractor for the given parameters.
+
+    Uses ``lru_cache`` with a bounded size (max 8 entries) to avoid
+    unbounded memory growth while still caching the most common
+    parameter combinations.
+    """
+    import yake  # noqa: F811
+
+    return yake.KeywordExtractor(lan=language, n=max_ngram, top=top_n, dedupLim=dedup_lim)
 
 
 def extract_keywords(
@@ -38,14 +55,7 @@ def extract_keywords(
         return []
 
     try:
-        import yake
-
-        extractor = yake.KeywordExtractor(
-            lan=language,
-            n=max_ngram,
-            top=top_n,
-            dedupLim=0.7,
-        )
+        extractor = _get_yake_extractor(language, max_ngram, top_n)
         raw = extractor.extract_keywords(combined)
         # Invert score so higher = more relevant (YAKE uses lower = better)
         return [(kw, round(1.0 - min(score, 1.0), 4)) for kw, score in raw]

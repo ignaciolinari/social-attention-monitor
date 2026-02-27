@@ -61,3 +61,36 @@ class TestExtractHashtags:
     def test_no_hashtags(self) -> None:
         result = extract_hashtags(["No hashtags here at all"], top_n=5)
         assert result == []
+
+
+class TestYakeExtractorCache:
+    """B9: YAKE extractor instances are cached and reused."""
+
+    def test_same_params_return_same_instance(self) -> None:
+        from sam.processors.keywords import _get_yake_extractor
+
+        # Clear lru_cache to start fresh.
+        _get_yake_extractor.cache_clear()
+
+        ext1 = _get_yake_extractor("en", 2, 15)
+        ext2 = _get_yake_extractor("en", 2, 15)
+        assert ext1 is ext2
+
+    def test_different_params_return_different_instances(self) -> None:
+        from sam.processors.keywords import _get_yake_extractor
+
+        _get_yake_extractor.cache_clear()
+
+        ext_a = _get_yake_extractor("en", 2, 15)
+        ext_b = _get_yake_extractor("en", 3, 10)
+        assert ext_a is not ext_b
+
+    def test_dedup_lim_in_cache_key(self) -> None:
+        """Different dedup_lim values should produce separate cached instances."""
+        from sam.processors.keywords import _get_yake_extractor
+
+        _get_yake_extractor.cache_clear()
+
+        ext_a = _get_yake_extractor("en", 2, 15, dedup_lim=0.7)
+        ext_b = _get_yake_extractor("en", 2, 15, dedup_lim=0.5)
+        assert ext_a is not ext_b
