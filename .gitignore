@@ -212,3 +212,7 @@ data/
 # Notes
 notes.txt
 notes.md
+
+# Editor config folders
+.vscode/
+.cursor/
