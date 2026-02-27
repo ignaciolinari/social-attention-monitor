@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
+from sam.pipeline.metrics_snapshots import (
+    compute_and_upsert_metrics_snapshot,
+    compute_and_upsert_metrics_snapshots_multi,
+)
 from sam.processors.metrics import EngagementMetrics
 
 
@@ -393,3 +396,62 @@ class TestComputeAndUpsertMetricsSnapshot:
             )
 
             mock_upsert.assert_called_once()
+
+
+class TestComputeAndUpsertMetricsSnapshotsMulti:
+    """Tests for multi-window snapshot computation."""
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_window_list(self) -> None:
+        with (
+            patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
+            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
+            patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
+            patch("sam.pipeline.metrics_snapshots.get_settings") as mock_get_settings,
+        ):
+            mock_calc = MagicMock()
+            mock_result = EngagementMetrics(
+                mention_count=0,
+                unique_authors=0,
+                total_engagement=0,
+                mention_velocity=0.0,
+                velocity_change=0.0,
+                avg_sentiment=0.0,
+                sentiment_volatility=0.0,
+                positive_ratio=0.0,
+                negative_ratio=0.0,
+                attention_index=0.0,
+                hype_acceleration=0.0,
+                window_start=datetime(2026, 1, 30, 0, 0, 0, tzinfo=UTC),
+                window_end=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                platform_breakdown={},
+            )
+            mock_calc.calculate.return_value = mock_result
+            mock_get_calc.return_value = mock_calc
+            mock_get_mentions.return_value = []
+            mock_get_latest.return_value = None
+
+            mock_settings = MagicMock()
+            mock_settings.enable_keyword_extraction = False
+            mock_get_settings.return_value = mock_settings
+
+            count = await compute_and_upsert_metrics_snapshots_multi(
+                AsyncMock(),
+                title_id=uuid.uuid4(),
+                snapshot_time=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                window_hours_list=[24, 1, 24, 1],
+            )
+
+            assert count == 2
+            assert mock_upsert.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_windows(self) -> None:
+        with pytest.raises(ValueError, match="positive integers"):
+            await compute_and_upsert_metrics_snapshots_multi(
+                AsyncMock(),
+                title_id=uuid.uuid4(),
+                snapshot_time=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
+                window_hours_list=[1, 0, 24],
+            )
