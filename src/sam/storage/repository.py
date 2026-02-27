@@ -209,6 +209,7 @@ async def get_mentions_in_window(
     title_id: uuid.UUID,
     window_start: datetime,
     window_end: datetime,
+    limit: int = 10_000,
 ) -> list[Mention]:
     """Get mentions for a title within a time window.
 
@@ -216,6 +217,13 @@ async def get_mentions_in_window(
     ``created_at`` (when the content was originally published).  This matters
     because YouTube videos are often published days/weeks before we discover
     them, so ``created_at`` would place them outside the snapshot window.
+
+    A ``limit`` cap (default 10 000) prevents unbounded memory usage on
+    viral titles. When capped, this returns the **most recent** mentions
+    in the window (closest to ``window_end``), which better represents
+    current attention than returning the oldest rows.
+
+    Callers that need exact totals should use SQL aggregates.
     """
     stmt = (
         select(Mention)
@@ -224,10 +232,13 @@ async def get_mentions_in_window(
             Mention.collected_at >= window_start,
             Mention.collected_at < window_end,
         )
-        .order_by(Mention.collected_at.asc())
+        .order_by(Mention.collected_at.desc(), Mention.id.desc())
+        .limit(limit)
     )
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    mentions = list(result.scalars().all())
+    mentions.reverse()
+    return mentions
 
 
 async def get_latest_metrics_snapshot(

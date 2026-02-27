@@ -41,9 +41,10 @@ def get_engine() -> AsyncEngine:
             echo=settings.database.echo,
             pool_size=settings.database.pool_size,
             pool_pre_ping=True,
-            # Guard against zombie connections: if a query doesn't complete
-            # within 30s, the connection is killed rather than hanging forever.
-            connect_args={"timeout": 10, "command_timeout": 30},
+            # Guard against zombie connections.  The 120s command_timeout
+            # accommodates heavier queries like 24h mention-window fetches on
+            # popular titles while still catching truly stuck connections.
+            connect_args={"timeout": 10, "command_timeout": 120},
         )
         logger.info(f"[db] Created async engine for {db_url.split('@')[-1]}")
 

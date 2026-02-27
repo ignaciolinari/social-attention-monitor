@@ -315,7 +315,7 @@ async def test_snapshot_window_captures_recent_mentions() -> None:
     """Verify that a snapshot with ceil-to-hour timing captures mentions
     collected during the current hour.
 
-    This validates the _snapshot_hour ceil fix: if we collect at 14:37, the
+    This validates the _snapshot_bucket ceil fix: if we collect at 14:37, the
     snapshot_time becomes 15:00, and the 1-hour window (14:00-15:00) includes
     the mention collected at ~14:37.
     """
@@ -382,6 +382,91 @@ async def test_snapshot_window_captures_recent_mentions() -> None:
             f"Expected 1 mention in the 1-hour window, got {snap.mention_count}"
         )
         assert snap.youtube_mentions == 1
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_mentions_in_window_respects_limit() -> None:
+    """B5: get_mentions_in_window honours the ``limit`` parameter and returns
+    the most recent mentions when capped."""
+    db_url = os.getenv("SAM_TEST_DATABASE_URL")
+    if not db_url:
+        pytest.skip("SAM_TEST_DATABASE_URL not set")
+
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except InvalidCatalogNameError:
+        await engine.dispose()
+        pytest.skip("Test database not available")
+
+    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with Session() as session:
+        title = TMDBTitle(
+            tmdb_id=99999,
+            title="LimitTestTitle",
+            original_title="LimitTestTitle",
+            media_type="movie",
+            release_date=datetime.now(UTC),
+            overview="limit test",
+            poster_path=None,
+            backdrop_path=None,
+            popularity=1.0,
+            vote_average=7.0,
+            vote_count=5,
+            genres=[],
+            original_language="en",
+            raw_data={},
+        )
+
+        db_title = await upsert_title(session, title)
+        await session.commit()
+
+        now = datetime.now(UTC)
+        posts = [
+            CollectedPost(
+                platform="reddit",
+                source_id=f"limit_test_{i}",
+                source_type="post",
+                content=f"Post {i}",
+                author=f"author_{i}",
+                url=f"https://reddit.com/{i}",
+                created_at=now - timedelta(minutes=10 - i),  # 0 is oldest
+                metrics={},
+            )
+            for i in range(5)
+        ]
+
+        await insert_mentions(
+            session,
+            title_id=db_title.id,
+            platform="reddit",
+            posts=posts,
+        )
+        await session.commit()
+
+        # Fetch all
+        all_mentions = await get_mentions_in_window(
+            session,
+            title_id=db_title.id,
+            window_start=now - timedelta(hours=1),
+            window_end=now + timedelta(hours=1),
+        )
+        assert len(all_mentions) == 5
+
+        # Fetch with limit=3 — should get the 3 most recent
+        limited = await get_mentions_in_window(
+            session,
+            title_id=db_title.id,
+            window_start=now - timedelta(hours=1),
+            window_end=now + timedelta(hours=1),
+            limit=3,
+        )
+        assert len(limited) == 3
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
