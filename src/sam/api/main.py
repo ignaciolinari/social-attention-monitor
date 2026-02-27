@@ -660,10 +660,11 @@ async def _collect_youtube_comment_posts(
 
         per_video_limit = min(comments_per_video, remaining_budget)
         try:
-            comments = await youtube_collector.collect_comments(
+            result = await youtube_collector.collect_comments(
                 video_post.source_id,
                 limit=per_video_limit,
             )
+            comments = result.comments
         except Exception as exc:
             logger.debug(
                 f"[api] YouTube comment collection skipped ({video_post.source_id}): {exc}"
@@ -1696,7 +1697,7 @@ async def metrics_timeseries(
     window_hours: int = Query(1, ge=1, le=168),
     hours: int = Query(24, ge=1, le=24 * 30),
 ) -> MetricsTimeseriesResponse:
-    # Add a 1-hour buffer to `until` because _snapshot_hour() rounds up to the
+    # Add a 1-hour buffer to `until` because _snapshot_bucket() rounds up to the
     # next hour boundary.  Without this, snapshots from the current collection
     # cycle are invisible until the clock passes the snapshot hour.
     now = datetime.now(UTC)

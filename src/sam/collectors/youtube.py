@@ -13,7 +13,12 @@ import httpx
 from loguru import logger
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
+from sam.collectors.base import (
+    BaseCollector,
+    CollectedPost,
+    CollectionResult,
+    CommentCollectionResult,
+)
 from sam.config import get_settings
 from sam.quota import (
     YOUTUBE_COMMENT_THREADS_COST,
@@ -122,12 +127,18 @@ class YouTubeCollector(BaseCollector):
             raise RuntimeError("YouTube client not initialized")
 
         response = await self._client.get(path, params=params)
-        # Record quota on response receipt (even if it's an error like 403 quotaExceeded).
-        # If we never got a response (timeouts, network errors), we don't record.
+        # Only record quota for successful responses.  When the server
+        # rejects a call with 403/quotaExceeded no units are consumed,
+        # so debiting the tracker would inflate reported usage and cause
+        # the budget guard to block calls prematurely.
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            # Don't record quota for failed requests
+            raise
         if quota_endpoint and quota_units:
             quota = get_quota_tracker()
             quota.record("youtube", quota_endpoint, quota_units)
-        response.raise_for_status()
         return cast(dict[str, Any], response.json())
 
     async def collect(
@@ -331,7 +342,7 @@ class YouTubeCollector(BaseCollector):
         self,
         video_id: str,
         limit: int = 30,
-    ) -> list[CollectedPost]:
+    ) -> CommentCollectionResult:
         """Collect top-level comments for a YouTube video.
 
         Uses the ``commentThreads.list`` endpoint (1 quota unit per call).
@@ -343,16 +354,18 @@ class YouTubeCollector(BaseCollector):
             limit: Maximum number of comments to collect
 
         Returns:
-            List of comments as CollectedPost objects
+            A :class:`CommentCollectionResult` with the collected comments
+            and a ``had_error`` flag indicating whether an error occurred.
         """
         if self.demo_mode:
-            return self._generate_demo_comments(video_id, limit)
+            return CommentCollectionResult(comments=self._generate_demo_comments(video_id, limit))
 
         if not self._client:
-            return []
+            return CommentCollectionResult(comments=[], had_error=True)
 
         comments: list[CollectedPost] = []
         next_page: str | None = None
+        had_error = False
 
         try:
             while len(comments) < limit:
@@ -384,7 +397,7 @@ class YouTubeCollector(BaseCollector):
 
             logger.debug(f"[youtube] Collected {len(comments)} comments for video {video_id}")
         except httpx.HTTPStatusError as e:
-            # Comments disabled or other error – silently skip
+            had_error = True
             if e.response.status_code in {403, 404}:
                 logger.debug(
                     f"[youtube] Comments unavailable for video {video_id} "
@@ -393,9 +406,10 @@ class YouTubeCollector(BaseCollector):
             else:
                 logger.warning(f"[youtube] Failed to fetch comments for video {video_id}: {e}")
         except Exception as e:
+            had_error = True
             logger.warning(f"[youtube] Comment collection failed for {video_id}: {e}")
 
-        return comments[:limit]
+        return CommentCollectionResult(comments=comments[:limit], had_error=had_error)
 
     def _parse_comment(self, item: dict[str, Any], video_id: str) -> CollectedPost | None:
         """Parse a commentThread item into a CollectedPost."""

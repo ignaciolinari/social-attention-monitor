@@ -42,6 +42,19 @@ class CollectionResult:
     rate_limit_remaining: int | None = None
 
 
+@dataclass
+class CommentCollectionResult:
+    """Result of a comment collection operation.
+
+    Unlike :class:`CollectionResult`, this carries an explicit ``had_error``
+    flag so callers can distinguish "zero comments available" from "the
+    request failed" — even when the collector swallows exceptions internally.
+    """
+
+    comments: list[CollectedPost]
+    had_error: bool = False
+
+
 class BaseCollector(abc.ABC):
     """
     Abstract base class for social media data collectors.
