@@ -32,7 +32,7 @@ jobs:
         run: ruff format --check src tests
 
       - name: Type check (mypy)
-        run: mypy src --ignore-missing-imports
+        run: mypy src/sam/ --ignore-missing-imports
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4

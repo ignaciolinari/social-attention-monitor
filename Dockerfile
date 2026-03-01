@@ -19,4 +19,13 @@ COPY .env.example /app/.env.example
 RUN python -m pip install --upgrade pip && \
     python -m pip install .
 
+# Run as non-root user
+RUN groupadd --gid 1000 sam && \
+    useradd --uid 1000 --gid sam --shell /bin/sh sam && \
+    chown -R sam:sam /app
+USER sam
+
 EXPOSE 8000 8501
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1

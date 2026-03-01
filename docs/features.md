@@ -25,10 +25,12 @@ SAM doesn't just count mentions; it attempts to understand them through a multi-
 - **RoBERTa (Transformer-Based)**: A deep-learning model from Hugging Face that understands complex context and nuance better than VADER. SAM can use either, or *both* simultaneously, falling back to VADER if RoBERTa fails to initialize.
 
 ### Advanced Capabilities
-- **Translation (`deep-translator`)**: Optional pipeline step that detects non-English text and translates it to English *before* scoring, ensuring RoBERTa and VADER maintain high accuracy globally.
+- **Translation (`deep-translator`)**: Optional pipeline step that detects non-English text and translates it to English *before* scoring, ensuring RoBERTa and VADER maintain high accuracy globally. Includes per-language locks, a configurable timeout (`_TRANSLATE_TIMEOUT_SECONDS`), and `ThreadPoolExecutor`-based concurrency for throughput.
 - **Emotion Classification**: Maps text into discrete categories (e.g., Joy, Anger, Sadness, Surprise).
 - **Sarcasm Detection**: Identifies potentially sarcastic comments that might otherwise skew the core sentiment score.
-- **Keyword Extraction**: Identifies the most prominent terms used alongside the tracked entity to highlight trending topics.
+- **Aspect-Based Sentiment** *(optional)*: When `SAM_ENABLE_ASPECT_SENTIMENT=true`, long-form content (>100 chars) is analyzed for per-aspect sentiment (e.g., "acting", "plot", "visuals"), stored in the sentiment JSONB payload.
+- **Keyword Extraction**: Identifies the most prominent terms used alongside the tracked entity to highlight trending topics. Input is sampled to a max of 500 texts for performance.
+- **Content Deduplication**: `detect_duplicate_content` runs in the pipeline before persistence, removing near-duplicate mentions across collection cycles to improve data quality.
 - **Text Cleaning & Spam Filtering**: Strips URLs and HTML. Evaluates text against heuristic patterns (like excessive repetition or known spam phrases) to drop low-quality data early.
 
 ---
@@ -84,16 +86,56 @@ SAM continuously monitors the calculated metrics against historical baselines to
 A dedicated `Streamlit` application provides a window into the pipeline's operational state and unlocks powerful data storytelling.
 
 **Analytical Views:**
-- **System Metrics**: High-level overview of tracking counts, pipeline health, and top trending titles ranked by the dynamic **Attention Index**.
-- **Search & Analyze**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity against Average Sentiment over custom time windows.
+- **Trending Now**: High-level overview of tracking counts, pipeline health, and top trending titles ranked by the dynamic **Attention Index**.
+- **Time Series**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity against Average Sentiment over custom time windows.
 - **Sentiment Comparison**: A side-by-side analysis of how different platforms (e.g., Reddit vs. YouTube) compare in their sentiment for a specific title, bringing the **Sentiment Divergence** metric to life.
+- **Alpha Metrics**: Dashboard for advanced analytical scores like Audience Fatigue, Viral Coefficient, and Author Diversity.
 - **Anomaly Alerts**: A live feed of triggered anomalies (Spikes, Shifts, Breakouts), allowing operators to trace exactly *when* public opinion turned.
-- **API Quota**: Visualizations of external API usage (especially YouTube's daily budget) to ensure the system stays within limits. YouTube quota resets at midnight Pacific Time (PT).
-- **System Config**: UI for dynamically toggling collectors on or off.
+- **API Quota**: Visualizations of external API usage (especially YouTube's daily budget) to ensure the system stays within limits.
+- **Pipeline Observability**: Per-run timing breakdown, per-title processing times (`per_title_ms`), collector stats, and translation metrics.
+- **System Config**: UI for dynamically toggling collectors on or off (sends API key automatically when `SAM_API_KEY` is configured).
 
 ---
 
-## 6. Developer CLI Utilities
+## 6. Security & Authentication
+
+SAM supports optional API key authentication to protect sensitive and expensive endpoints.
+
+- **API Key Middleware**: When `SAM_API_KEY` is set, mutation endpoints (`PUT`, `DELETE`, `POST` for alerts) and the sentiment analysis endpoint require an `Authorization: Bearer <key>` or `X-API-Key: <key>` header.
+- **Rate Limiting**: Sliding-window rate limiter (default 120 req/min per IP). Health and metrics endpoints are excluded from rate limiting to support monitoring integrations.
+- **CORS**: Configurable allowlist via `CORS_ALLOW_ORIGINS`; defaults to `*` in development and `[]` in production.
+
+> [!TIP]
+> See the [API Reference](api_reference.md#authentication) for the full list of protected endpoints.
+
+---
+
+## 7. Observability & Metrics
+
+SAM is built for operational visibility in production.
+
+- **Prometheus `/metrics` endpoint**: Exposes counters (`collection_cycles_total`, `mentions_inserted_total`, `quota_units_used`) and histograms (`sentiment_analysis_duration_seconds`) in Prometheus text format.
+- **Pipeline Self-Health Alerts**: `AlertManager.check_system_health()` monitors for stalled ingestion, collector failures, quota thresholds, and Redis degradation — exposed at `GET /api/v1/alerts/system-health`.
+- **Log Correlation IDs**: Runner uses `logger.contextualize(run_id=..., title=...)` so every log line within a collection cycle carries structured context for easy debugging.
+- **Pipeline Run History**: `GET /api/v1/pipeline/runs` returns paginated run history with rich stats (timing, quota, spam, translation, per-title breakdown).
+- **Redis Degraded Warning**: Rate-limited warning logs when Redis becomes unreachable, without blocking the pipeline.
+
+---
+
+## 8. Pipeline Resilience
+
+The pipeline is designed to degrade gracefully under failure conditions.
+
+- **Circuit Breaker**: Per-platform failure counter; after consecutive failures, the platform is skipped for remaining titles in the cycle to avoid cascading timeouts.
+- **Title Quarantine**: Titles that fail repeatedly are temporarily excluded via a Redis-backed dead-letter mechanism, preventing a single bad title from degrading the entire run.
+- **SIGHUP Hot Reload**: Sending `SIGHUP` to the process clears the settings cache, allowing environment variable changes without a restart.
+- **Collector Fault Tolerance**: Each collector's `close()` is wrapped in `contextlib.suppress(Exception)` during shutdown to prevent one failure from blocking cleanup.
+- **Translation Fault Tolerance**: Per-language locks, configurable timeout, and `ThreadPoolExecutor`-based execution prevent translation from blocking the sentiment pipeline.
+- **NLP Concurrency Safety**: Inference locks (`_inference_lock`, `_roberta_lock`) protect transformer models from concurrent thread access. VADER uses `ProcessPoolExecutor` for batches ≥64 for true CPU parallelism.
+
+---
+
+## 9. Developer CLI Utilities
 
 SAM ships with a powerful command-line interface (`sam`) to manage the pipeline and test NLP models locally.
 

@@ -37,12 +37,13 @@ services:
       - .env
     environment:
       # Ensure services use docker hostnames
-      DATABASE_URL: postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
-      DATABASE_SYNC_URL: postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       REDIS_URL: redis://redis:6379/0
     command: ["uvicorn", "sam.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,10 +56,11 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
-      DATABASE_SYNC_URL: postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       REDIS_URL: redis://redis:6379/0
     command: ["python", "-m", "sam.scheduler.runner"]
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,8 +78,10 @@ services:
     command: ["streamlit", "run", "src/dashboard/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
     ports:
       - "8501:8501"
+    restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   sam-postgres-data:

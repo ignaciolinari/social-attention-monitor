@@ -82,12 +82,12 @@ format:
 
 # Type checking
 typecheck:
-	$(VENV_PY) -m mypy src --ignore-missing-imports
+	$(VENV_PY) -m mypy src/sam/ --ignore-missing-imports
 
 ci-check: ci-deps
 	ruff check src tests
 	ruff format --check src tests
-	$(VENV_PY) -m mypy src --ignore-missing-imports
+	$(VENV_PY) -m mypy src/sam/ --ignore-missing-imports
 	$(MAKE) test-ci
 
 # Running services

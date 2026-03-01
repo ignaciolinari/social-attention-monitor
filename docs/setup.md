@@ -54,7 +54,7 @@ psql -d sam -c "GRANT ALL ON SCHEMA public TO sam;"
 brew install redis
 brew services start redis
 ```
-5. **Start APIs, Dashboard, and Collector (in separate terminals)**:
+4. **Start APIs, Dashboard, and Collector (in separate terminals)**:
 ```bash
 make run-api
 make run-dashboard
@@ -238,6 +238,7 @@ GitHub Actions enforce lint, type check, tests, and security audit. Dependabot o
 For production, consider:
 
 - **Secrets**: Never commit `.env`. Use a secrets manager or platform-specific env injection. Rotate API keys and DB passwords periodically.
+- **API Authentication**: Set `SAM_API_KEY` to protect mutation endpoints (collector toggles, alert acknowledge, run-detection, sentiment analyze). Clients must send `Authorization: Bearer <key>` or `X-API-Key: <key>`. See [API Reference — Authentication](api_reference.md#authentication).
 - **Database**: Use a managed PostgreSQL (e.g. RDS, Cloud SQL, Supabase) with backups. TimescaleDB is optional but recommended for time-series queries.
 - **Redis**: Use managed Redis or a resilient cluster. Required for cache and collector toggles.
 - **CORS**: Set `CORS_ALLOW_ORIGINS` to specific origins, not `*`.

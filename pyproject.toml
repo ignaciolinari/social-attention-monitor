@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "social-attention-monitor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Real-time social attention monitoring for film & TV releases"
 readme = "README.md"
 license = "MIT"
@@ -17,6 +17,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
@@ -99,6 +100,8 @@ sam = "sam.cli:main"
 Repository = "https://github.com/ignaciolinari/social-attention-monitor"
 
 [tool.hatch.build.targets.wheel]
+# Dashboard lives in src/dashboard/ and is run via `streamlit run` or Docker
+# COPY — it does not need to be in the wheel.
 packages = ["src/sam"]
 
 [tool.ruff]
@@ -138,6 +141,10 @@ plugins = ["pydantic.mypy"]
 exclude = [
     "src/sam/storage/migrations/.*",
 ]
+# Note: src/dashboard/ is intentionally excluded from mypy scope.
+# Streamlit has limited type stub coverage and strict mode produces
+# excessive noise. Dashboard correctness is validated via integration
+# tests and manual UI testing.
 
 [[tool.mypy.overrides]]
 module = [

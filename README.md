@@ -35,11 +35,13 @@ The pipeline is designed to operate **fully within official APIs and their terms
 
 ## Key Features
 
-- **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky.
-- **Advanced NLP Processors**: Dual-engine sentiment analysis (VADER & RoBERTa), translation fallbacks, emotion classification, and sarcasm detection.
-- **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration".
+- **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky with per-platform circuit breakers.
+- **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), aspect-based sentiment, emotion classification, sarcasm detection, content deduplication, and auto-translation.
+- **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration", plus alpha metrics (Audience Fatigue, Viral Coefficient, Sentiment Divergence).
 - **Real-Time Alerting**: Statistical anomaly detection for mention spikes and viral breakouts pushed instantly via WebSockets.
-- **API Quota Management**: Built-in limits tracking for external platforms (e.g., YouTube Daily Budget protection).
+- **Security**: Optional API key authentication for mutation and expensive endpoints, with sliding-window rate limiting.
+- **Observability**: Prometheus-compatible `/metrics` endpoint, pipeline self-health alerts, per-title timing, and structured log correlation IDs.
+- **Resilience**: Title quarantine for failing titles, SIGHUP hot-reload, translation timeouts, and graceful collector degradation.
 
 ## Contributing
 
@@ -98,15 +100,17 @@ Then visit:
 social-attention-monitor/
 ├── src/
 │   ├── sam/
-│   │   ├── alerts/        # Anomaly detection & WebSockets
-│   │   ├── collectors/    # Polling integrations (Reddit, YouTube, Bluesky)
-│   │   ├── processors/    # Text cleaning, spam, sentiment NLP
-│   │   ├── storage/       # PostgreSQL models & Redis configuration
+│   │   ├── alerts/        # Anomaly detection & WebSocket broadcasting
+│   │   ├── api/           # FastAPI (routes/, schemas, middleware, metrics)
+│   │   ├── collectors/    # Platform integrations (Reddit, YouTube, Bluesky, TMDB)
+│   │   ├── pipeline/      # Shared enrichment & metrics snapshot logic
+│   │   ├── processors/    # NLP (sentiment, emotions, sarcasm, spam, keywords)
+│   │   ├── storage/       # PostgreSQL models, repository & Alembic migrations
 │   │   ├── scheduler/     # APScheduler runner for periodic ETL
-│   │   └── api/           # FastAPI application
-│   └── dashboard/         # Streamlit visual interface
-├── docs/                  # In-depth architectural and operational guides
-├── tests/                 # Unit & integration tests
+│   │   └── utils/         # Translation, shared helpers
+│   └── dashboard/         # Streamlit app (pages/, sidebar, api_client)
+├── docs/                  # Architecture, features, setup, API reference
+├── tests/                 # Unit & integration tests (350+)
 └── docker-compose.yml     # Container orchestration
 ```
 

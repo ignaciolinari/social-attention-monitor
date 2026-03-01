@@ -208,6 +208,8 @@ __marimo__/
 
 # Project local runtime artifacts
 data/
+tmp/
+logs/
 
 # Notes
 notes.txt

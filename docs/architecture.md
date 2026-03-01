@@ -67,14 +67,15 @@ Redis serves three crucial functions:
 ---
 
 ## 4. API Layer (FastAPI)
-The backend service exposes data to the dashboard and external clients.
-- **REST Endpoints**: Serves metrics, configuration states, platform quotas, and system health.
-- **Rate Limiting**: Custom token-bucket rate-limiting middleware to prevent abuse.
+The backend service exposes data to the dashboard and external clients. The API is structured into modular route files under `api/routes/` with shared logic in `api/dependencies.py`.
+- **REST Endpoints**: Serves metrics, configuration states, platform quotas, mentions, and system health via route modules (`health`, `pipeline`, `collectors`, `mentions`, `metrics_routes`, `alerts`, `sentiment`, `titles`, `trending`, `ws`).
+- **Middleware** (`api/middleware.py`): API key authentication for mutation endpoints, sliding-window rate limiting (in-memory with Redis upgrade path).
+- **Prometheus Metrics**: `/metrics` endpoint for operational monitoring.
 - **WebSockets (`/ws`)**: Pushes real-time alerting anomalies instantly to active clients.
 
 ---
 
 ## 5. Presentation Layer (Streamlit)
-The dashboard provides operational observability.
-- **Multipage Navigation**: Uses a tabbed interface or sidebar to separate high-level metrics from granular deep-dives.
-- **State Management**: Heavily utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.
+The dashboard provides operational observability, structured as modular pages under `dashboard/pages/` with shared helpers in `dashboard/api_client.py`, `dashboard/helpers.py`, and `dashboard/sidebar.py`.
+- **Multipage Navigation**: Sidebar-driven navigation across 9 specialized pages (Overview, Platform Explorer, Metrics Deep-Dive, Alerts, Sentiment Analysis, Pipeline Observability, etc.).
+- **State Management**: Utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.

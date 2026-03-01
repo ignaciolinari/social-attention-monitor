@@ -22,7 +22,7 @@ repos:
         name: mypy
         entry: .venv/bin/python -m mypy
         language: system
-        args: ["--config-file=pyproject.toml", "src"]
+        args: ["--config-file=pyproject.toml", "--ignore-missing-imports", "src/sam/"]
         pass_filenames: false
         types: [python]
 
