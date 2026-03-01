@@ -1,0 +1,7 @@
+[server]
+headless = true
+
+[client]
+# Disable automatic multipage navigation from the pages/ directory.
+# The dashboard uses its own sidebar navigation via render_sidebar().
+showSidebarNavigation = false
