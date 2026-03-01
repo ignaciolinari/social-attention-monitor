@@ -22,7 +22,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_computes_from_empty_mentions(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
         ):
@@ -73,7 +75,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_computes_with_mentions(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
         ):
@@ -128,7 +132,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_includes_sentiment_model_metadata(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
         ):
@@ -184,7 +190,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_uses_previous_metrics_for_velocity(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot"),
         ):
@@ -243,7 +251,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_24_hour_window(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot"),
         ):
@@ -285,7 +295,9 @@ class TestComputeAndUpsertMetricsSnapshot:
     async def test_includes_keyword_signals_when_enabled(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
             patch("sam.pipeline.metrics_snapshots.get_settings") as mock_get_settings,
@@ -346,7 +358,9 @@ class TestComputeAndUpsertMetricsSnapshot:
         """Test that null values in previous snapshot are handled."""
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
         ):
@@ -405,7 +419,9 @@ class TestComputeAndUpsertMetricsSnapshotsMulti:
     async def test_deduplicates_window_list(self) -> None:
         with (
             patch("sam.pipeline.metrics_snapshots.get_calculator") as mock_get_calc,
-            patch("sam.pipeline.metrics_snapshots.get_mentions_in_window") as mock_get_mentions,
+            patch(
+                "sam.pipeline.metrics_snapshots.get_mentions_in_window_lightweight"
+            ) as mock_get_mentions,
             patch("sam.pipeline.metrics_snapshots.get_latest_metrics_snapshot") as mock_get_latest,
             patch("sam.pipeline.metrics_snapshots.upsert_metrics_snapshot") as mock_upsert,
             patch("sam.pipeline.metrics_snapshots.get_settings") as mock_get_settings,

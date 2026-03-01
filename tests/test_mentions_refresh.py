@@ -6,7 +6,9 @@ from uuid import uuid4
 import pytest
 from fastapi import BackgroundTasks
 
+import sam.api.dependencies as deps
 import sam.api.main as api
+from sam.api.routes.mentions import get_bluesky_mentions, get_reddit_mentions
 
 
 def _fake_mention(platform: str = "reddit") -> api.MentionResponse:
@@ -35,7 +37,7 @@ async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
         offset: int,
     ):
         _ = (title, title_id, platform, limit, offset)
-        return api.DbMentionsResult(
+        return deps.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
             next_offset=None,
@@ -43,10 +45,10 @@ async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=90),
         )
 
-    monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
+    monkeypatch.setattr(deps, "get_mentions_from_db", fake_get_mentions_from_db)
     background_tasks = BackgroundTasks()
 
-    response = await api.get_reddit_mentions(
+    response = await get_reddit_mentions(
         background_tasks=background_tasks,
         title="Dune",
         limit=5,
@@ -68,7 +70,7 @@ async def test_mentions_skip_refresh_when_fresh(monkeypatch) -> None:
         offset: int,
     ):
         _ = (title, title_id, platform, limit, offset)
-        return api.DbMentionsResult(
+        return deps.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
             next_offset=None,
@@ -76,10 +78,10 @@ async def test_mentions_skip_refresh_when_fresh(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=1),
         )
 
-    monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
+    monkeypatch.setattr(deps, "get_mentions_from_db", fake_get_mentions_from_db)
     background_tasks = BackgroundTasks()
 
-    response = await api.get_reddit_mentions(
+    response = await get_reddit_mentions(
         background_tasks=background_tasks,
         title="Dune",
         limit=5,
@@ -101,7 +103,7 @@ async def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
         offset: int,
     ):
         _ = (title, title_id, platform, limit, offset)
-        return api.DbMentionsResult(
+        return deps.DbMentionsResult(
             mentions=[_fake_mention(platform)],
             total_count=1,
             next_offset=None,
@@ -109,10 +111,10 @@ async def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
             last_collected_at=datetime.now(UTC) - timedelta(minutes=90),
         )
 
-    monkeypatch.setattr(api, "_get_mentions_from_db", fake_get_mentions_from_db)
+    monkeypatch.setattr(deps, "get_mentions_from_db", fake_get_mentions_from_db)
     background_tasks = BackgroundTasks()
 
-    response = await api.get_bluesky_mentions(
+    response = await get_bluesky_mentions(
         background_tasks=background_tasks,
         title="Dune",
         limit=5,

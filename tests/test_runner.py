@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sam.collectors.base import CommentCollectionResult
+from sam.pipeline import enrichment
 from sam.processors.sentiment import SentimentBatchTranslationStats
 from sam.scheduler import runner
 
@@ -66,9 +67,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -139,7 +138,7 @@ class TestCollectOnce:
             mock_upsert.return_value = mock_db_title
 
             # Mock sentiment -- return one result per post.
-            # analyze_sentiment_batch_with_translation is called separately for
+            # analyze_texts_for_sentiment_with_stats is called separately for
             # each platform batch.
             mock_sentiment_result = MagicMock()
             mock_sentiment_result.compound = 0.5
@@ -152,7 +151,9 @@ class TestCollectOnce:
             # Side effect: each call returns one result per input text + stats.
             def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
                 _ = (translate, log_context)
-                return [mock_sentiment_result] * len(texts), SentimentBatchTranslationStats()
+                return [mock_sentiment_result] * len(
+                    texts
+                ), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake_batch_sentiment
 
@@ -242,9 +243,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -313,7 +312,9 @@ class TestCollectOnce:
 
             def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
                 _ = (translate, log_context)
-                return [mock_sentiment_result] * len(texts), SentimentBatchTranslationStats()
+                return [mock_sentiment_result] * len(
+                    texts
+                ), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake_batch_sentiment
 
@@ -340,9 +341,7 @@ class TestCollectOnce:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -405,7 +404,9 @@ class TestCollectOnce:
 
             def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
                 _ = (translate, log_context)
-                return [mock_sentiment_result] * len(texts), SentimentBatchTranslationStats()
+                return [mock_sentiment_result] * len(
+                    texts
+                ), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake_batch_sentiment
             mock_insert.return_value = 1
@@ -498,6 +499,7 @@ class TestEnrichmentHelpers:
         settings = MagicMock()
         settings.enable_emotion_detection = True
         settings.enable_sarcasm_detection = False
+        settings.enable_aspect_sentiment = False
 
         post = MagicMock()
         post.source_id = "sid1"
@@ -510,8 +512,8 @@ class TestEnrichmentHelpers:
             "model": "vader",
         }
 
-        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
-            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+        with patch("sam.pipeline.enrichment.enrich_sentiments_with_nlp") as mock_enrich:
+            result = await enrichment.build_enriched_sentiment_map([post], [sentiment], settings)
 
         assert "sid1" in result
         mock_enrich.assert_called_once()
@@ -521,6 +523,7 @@ class TestEnrichmentHelpers:
         settings = MagicMock()
         settings.enable_emotion_detection = False
         settings.enable_sarcasm_detection = True
+        settings.enable_aspect_sentiment = False
 
         post = MagicMock()
         post.source_id = "sid1"
@@ -533,8 +536,8 @@ class TestEnrichmentHelpers:
             "model": "vader",
         }
 
-        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
-            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+        with patch("sam.pipeline.enrichment.enrich_sentiments_with_nlp") as mock_enrich:
+            result = await enrichment.build_enriched_sentiment_map([post], [sentiment], settings)
 
         assert "sid1" in result
         mock_enrich.assert_called_once()
@@ -544,6 +547,7 @@ class TestEnrichmentHelpers:
         settings = MagicMock()
         settings.enable_emotion_detection = False
         settings.enable_sarcasm_detection = False
+        settings.enable_aspect_sentiment = False
 
         post = MagicMock()
         post.source_id = "sid1"
@@ -556,8 +560,8 @@ class TestEnrichmentHelpers:
             "model": "vader",
         }
 
-        with patch("sam.scheduler.runner._enrich_sentiments_with_nlp") as mock_enrich:
-            result = await runner._build_enriched_sentiment_map([post], [sentiment], settings)
+        with patch("sam.pipeline.enrichment.enrich_sentiments_with_nlp") as mock_enrich:
+            result = await enrichment.build_enriched_sentiment_map([post], [sentiment], settings)
 
         assert "sid1" in result
         mock_enrich.assert_not_called()
@@ -566,6 +570,7 @@ class TestEnrichmentHelpers:
         settings = MagicMock()
         settings.enable_emotion_detection = False
         settings.enable_sarcasm_detection = True
+        settings.enable_aspect_sentiment = False
 
         sentiment_map: dict[str, dict[str, object]] = {"sid1": {"compound": 0.2}}
         texts = ["Totally not bad at all 🙃"]
@@ -575,7 +580,7 @@ class TestEnrichmentHelpers:
         detector.detect_batch.return_value = [(True, 0.9132)]
 
         with patch("sam.processors.sarcasm.get_sarcasm_detector", return_value=detector):
-            runner._enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
+            enrichment.enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
 
         assert sentiment_map["sid1"]["is_sarcastic"] is True
         assert sentiment_map["sid1"]["sarcasm_confidence"] == 0.9132
@@ -585,6 +590,7 @@ class TestEnrichmentHelpers:
         settings = MagicMock()
         settings.enable_emotion_detection = True
         settings.enable_sarcasm_detection = False
+        settings.enable_aspect_sentiment = False
 
         sentiment_map: dict[str, dict[str, object]] = {"sid1": {"compound": 0.8}}
         texts = ["This is amazing"]
@@ -594,7 +600,7 @@ class TestEnrichmentHelpers:
         detector.detect_batch.return_value = [{"joy": 0.98123, "neutral": 0.01877}]
 
         with patch("sam.processors.emotions.get_emotion_detector", return_value=detector):
-            runner._enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
+            enrichment.enrich_sentiments_with_nlp(texts, sentiment_map, source_ids, settings)
 
         assert sentiment_map["sid1"]["emotions"] == {"joy": 0.9812, "neutral": 0.0188}
         assert "is_sarcastic" not in sentiment_map["sid1"]
@@ -692,6 +698,8 @@ class TestMain:
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
+            patch("sam.cache.close_redis", new_callable=AsyncMock),
+            patch("sam.config.install_sighup_handler"),
             patch("sys.argv", ["sam-collector", "--once"]),
         ):
             settings = MagicMock()
@@ -716,6 +724,8 @@ class TestMain:
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
+            patch("sam.cache.close_redis", new_callable=AsyncMock),
+            patch("sam.config.install_sighup_handler"),
             patch("sys.argv", ["sam-collector", "--init-db", "--once"]),
         ):
             settings = MagicMock()
@@ -740,6 +750,8 @@ class TestMain:
             patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
             patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock) as mock_run_forever,
             patch("sam.scheduler.runner.close_db", new_callable=AsyncMock) as mock_close_db,
+            patch("sam.cache.close_redis", new_callable=AsyncMock),
+            patch("sam.config.install_sighup_handler"),
             patch(
                 "sys.argv",
                 [
@@ -804,9 +816,7 @@ class TestRedditDeduplication:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -864,7 +874,7 @@ class TestRedditDeduplication:
             mock_sr.to_dict.return_value = {"compound": 0.1, "label": "neutral", "model": "vader"}
 
             def _fake(texts, *, translate, log_context="runner"):  # noqa: ARG001
-                return [mock_sr] * len(texts), SentimentBatchTranslationStats()
+                return [mock_sr] * len(texts), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake
             mock_insert.return_value = 1
@@ -901,9 +911,7 @@ class TestBlueskyDeduplication:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions") as mock_insert,
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -961,7 +969,7 @@ class TestBlueskyDeduplication:
             mock_sr.to_dict.return_value = {"compound": 0.1, "label": "neutral", "model": "vader"}
 
             def _fake(texts, *, translate, log_context="runner"):  # noqa: ARG001
-                return [mock_sr] * len(texts), SentimentBatchTranslationStats()
+                return [mock_sr] * len(texts), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake
             mock_insert.return_value = 1
@@ -999,9 +1007,7 @@ class TestCircuitBreaker:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions", return_value=0),
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -1047,7 +1053,7 @@ class TestCircuitBreaker:
 
             mock_sentiment.side_effect = lambda texts, **kw: (  # noqa: ARG005
                 [],
-                SentimentBatchTranslationStats(),
+                SentimentBatchTranslationStats().to_dict(),
             )
 
             stats = await runner.collect_once(
@@ -1077,9 +1083,7 @@ class TestRawStorageFailureTracking:
             patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
             patch("sam.scheduler.runner.upsert_title") as mock_upsert,
             patch("sam.scheduler.runner.insert_mentions", return_value=1),
-            patch(
-                "sam.scheduler.runner.analyze_sentiment_batch_with_translation"
-            ) as mock_sentiment,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
@@ -1137,7 +1141,7 @@ class TestRawStorageFailureTracking:
 
             mock_sentiment.side_effect = lambda texts, **kw: (  # noqa: ARG005
                 [mock_sr] * len(texts),
-                SentimentBatchTranslationStats(),
+                SentimentBatchTranslationStats().to_dict(),
             )
 
             stats = await runner.collect_once(

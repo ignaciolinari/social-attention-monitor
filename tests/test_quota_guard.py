@@ -98,3 +98,62 @@ class TestQuotaTrackerSummary:
         assert summary["total_units"] == 0
         assert summary["budget_remaining"] == YOUTUBE_DAILY_BUDGET
         assert summary["budget_used_pct"] == 0.0
+
+
+class TestQuotaTrackerSeed:
+    """Verify seed(), including additive merging and edge cases."""
+
+    def test_seed_basic(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", 500, {"search.list": 5})
+        usage = tracker.get_usage("youtube")
+        assert usage["total_units"] == 500
+        assert usage["calls_by_endpoint"] == {"search.list": 5}
+
+    def test_seed_additive(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", 300, {"search.list": 3})
+        tracker.seed("youtube", 200, {"search.list": 2, "videos.list": 1})
+        usage = tracker.get_usage("youtube")
+        assert usage["total_units"] == 500
+        assert usage["calls_by_endpoint"]["search.list"] == 5
+        assert usage["calls_by_endpoint"]["videos.list"] == 1
+
+    def test_seed_then_record(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", 500)
+        tracker.record("youtube", "search.list", YOUTUBE_SEARCH_COST)
+        usage = tracker.get_usage("youtube")
+        assert usage["total_units"] == 500 + YOUTUBE_SEARCH_COST
+
+    def test_seed_zero_units_no_calls_is_noop(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", 0)
+        usage = tracker.get_usage("youtube")
+        assert usage["total_units"] == 0
+
+    def test_seed_zero_units_with_calls_still_seeds(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", 0, {"search.list": 2})
+        usage = tracker.get_usage("youtube")
+        assert usage["calls_by_endpoint"]["search.list"] == 2
+
+    def test_seed_does_not_cross_days(self) -> None:
+        tracker = QuotaTracker()
+        with patch.object(tracker, "_today", return_value="2026-02-04"):
+            tracker.seed("youtube", 500)
+
+        with patch.object(tracker, "_today", return_value="2026-02-05"):
+            usage = tracker.get_usage("youtube")
+            # New day: seed from previous day should be gone
+            assert usage["total_units"] == 0
+
+    def test_seed_affects_budget_check(self) -> None:
+        tracker = QuotaTracker()
+        tracker.seed("youtube", YOUTUBE_DAILY_BUDGET - 50)
+        # 9950 + 100 = 10050 > 10000 — search doesn't fit
+        assert tracker.youtube_has_budget(cost=YOUTUBE_SEARCH_COST) is False
+        # 9950 + 50 = 10000 <= 10000 — exactly fits
+        assert tracker.youtube_has_budget(cost=50) is True
+        # 9950 + 51 = 10001 > 10000 — just over
+        assert tracker.youtube_has_budget(cost=51) is False

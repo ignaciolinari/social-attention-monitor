@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import respx
 from fastapi.testclient import TestClient
 
+import sam.api.dependencies as deps
 import sam.api.main as api
 
 
@@ -49,8 +50,8 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
     api.get_settings.cache_clear()
     api.settings = api.get_settings()
 
-    monkeypatch.setattr(api, "get_session", _fake_get_session)
-    monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr(deps, "get_session", _fake_get_session)
+    monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
     monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
 
     with TestClient(api.app) as client:
@@ -78,9 +79,9 @@ def test_health_external_checks(monkeypatch) -> None:
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
     monkeypatch.setenv("BLUESKY_IDENTIFIER", "test.bsky.social")
     monkeypatch.setenv("BLUESKY_APP_PASSWORD", "test-password")
-    monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
     monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
-    monkeypatch.setattr(api, "get_session", _fake_get_session)
+    monkeypatch.setattr(deps, "get_session", _fake_get_session)
     api.settings = api.get_settings()
 
     respx.get("https://api.themoviedb.org/3/configuration").respond(200, json={})

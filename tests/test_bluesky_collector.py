@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -186,3 +187,140 @@ class TestParsePost:
         broken = SimpleNamespace()
         result = collector._parse_post(broken)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _search_posts pagination
+# ---------------------------------------------------------------------------
+
+
+class TestSearchPostsPagination:
+    """Tests for BlueskyCollector._search_posts pagination logic."""
+
+    def test_single_page(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        # Stub the sync client
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        post_view = _make_post_view(text="hello")
+        response = SimpleNamespace(posts=[post_view], cursor=None)
+        mock_client.app.bsky.feed.search_posts.return_value = response
+
+        posts = collector._search_posts("test", limit=10)
+        assert len(posts) == 1
+        assert posts[0].content == "hello"
+
+    def test_multi_page(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        page1 = SimpleNamespace(
+            posts=[_make_post_view(text="p1", cid="cid1")],
+            cursor="cursor2",
+        )
+        page2 = SimpleNamespace(
+            posts=[_make_post_view(text="p2", cid="cid2")],
+            cursor=None,
+        )
+        mock_client.app.bsky.feed.search_posts.side_effect = [page1, page2]
+
+        posts = collector._search_posts("test", limit=10)
+        assert len(posts) == 2
+
+    def test_stops_at_limit(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        # Page returns 2 posts but limit is 1
+        page = SimpleNamespace(
+            posts=[
+                _make_post_view(text="p1", cid="cid1"),
+                _make_post_view(text="p2", cid="cid2"),
+            ],
+            cursor="more",
+        )
+        mock_client.app.bsky.feed.search_posts.return_value = page
+
+        posts = collector._search_posts("test", limit=1)
+        assert len(posts) <= 1
+
+    def test_empty_response_breaks(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        response = SimpleNamespace(posts=[], cursor=None)
+        mock_client.app.bsky.feed.search_posts.return_value = response
+
+        posts = collector._search_posts("test", limit=10)
+        assert len(posts) == 0
+
+
+# ---------------------------------------------------------------------------
+# _collect_with_retries
+# ---------------------------------------------------------------------------
+
+
+class TestCollectWithRetries:
+    """Tests for BlueskyCollector._collect_with_retries retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_success_on_first_attempt(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        response = SimpleNamespace(posts=[_make_post_view(text="hi")], cursor=None)
+        mock_client.app.bsky.feed.search_posts.return_value = response
+
+        result = await collector._collect_with_retries("test", limit=5)
+        assert result.success is True
+        assert len(result.posts) == 1
+
+    @pytest.mark.asyncio
+    async def test_retries_on_429(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        # First call raises 429, second succeeds
+        err = Exception("HTTP 429 Too Many Requests")
+        response = SimpleNamespace(posts=[_make_post_view(text="ok")], cursor=None)
+        mock_client.app.bsky.feed.search_posts.side_effect = [err, response]
+
+        with patch("sam.collectors.bluesky.asyncio.sleep"):
+            result = await collector._collect_with_retries("test", limit=5, max_attempts=3)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_fails_after_max_attempts(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        err = Exception("HTTP 429 Too Many Requests")
+        mock_client.app.bsky.feed.search_posts.side_effect = err
+
+        with patch("sam.collectors.bluesky.asyncio.sleep"):
+            result = await collector._collect_with_retries("test", limit=5, max_attempts=2)
+
+        assert result.success is False
+        assert "429" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_non_429_error_fails_immediately(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        err = Exception("Network timeout")
+        mock_client.app.bsky.feed.search_posts.side_effect = err
+
+        result = await collector._collect_with_retries("test", limit=5, max_attempts=3)
+        assert result.success is False
+        # Should fail immediately without retrying (not a rate limit)
+        assert mock_client.app.bsky.feed.search_posts.call_count == 1

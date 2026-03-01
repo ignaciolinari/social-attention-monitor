@@ -21,6 +21,8 @@ def _make_window(
     hype_acceleration: float = 0.0,
     unique_authors: int = 5,
     hours_ago: int = 0,
+    sentiment_divergence: dict[str, float] | None = None,
+    author_diversity_score: float | None = None,
 ) -> MetricsWindow:
     """Helper to create a MetricsWindow."""
     return MetricsWindow(
@@ -33,6 +35,8 @@ def _make_window(
         hype_acceleration=hype_acceleration,
         unique_authors=unique_authors,
         snapshot_time=datetime.now(UTC) - timedelta(hours=hours_ago),
+        sentiment_divergence=sentiment_divergence,
+        author_diversity_score=author_diversity_score,
     )
 
 
@@ -243,3 +247,103 @@ class TestDetectedAnomaly:
         assert anomaly.details == {"key": "value"}
         assert anomaly.title_id == "test-id"
         assert anomaly.title_name == "Test Title"
+
+
+class TestSentimentDivergence:
+    """Tests for _detect_sentiment_divergence."""
+
+    def test_no_divergence_when_field_is_none(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(sentiment_divergence=None)
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_no_divergence_below_threshold(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(sentiment_divergence={"reddit_vs_youtube": 0.2})
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_info_divergence_at_04(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(sentiment_divergence={"reddit_vs_youtube": 0.45})
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is not None
+        assert result.alert_type == AlertType.SENTIMENT_DIVERGENCE
+        assert result.severity == Severity.INFO
+
+    def test_warning_divergence_at_06(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(sentiment_divergence={"reddit_vs_youtube": 0.65})
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is not None
+        assert result.severity == Severity.WARNING
+
+    def test_picks_max_pair(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        div = {"reddit_vs_youtube": 0.3, "reddit_vs_bluesky": 0.5}
+        current = _make_window(sentiment_divergence=div)
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is not None
+        assert result.details["pair"] == "reddit_vs_bluesky"
+
+    def test_ignores_keys_without_vs(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        # Keys without _vs_ should be ignored
+        current = _make_window(sentiment_divergence={"overall": 0.8})
+        result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+
+class TestDiversityDrop:
+    """Tests for _detect_diversity_drop."""
+
+    def test_no_alert_when_score_is_none(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(author_diversity_score=None)
+        result = detector._detect_diversity_drop(current, [], "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_no_alert_with_insufficient_history(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        current = _make_window(author_diversity_score=0.5)
+        history = [_make_window(author_diversity_score=0.1, hours_ago=i) for i in range(2)]
+        result = detector._detect_diversity_drop(current, history, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_alert_on_significant_hhi_increase(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        # Historical HHI is low (~0.1 mean), current is much higher (0.25 > 0.1*1.5 and > 0.15)
+        history = [_make_window(author_diversity_score=0.1, hours_ago=i) for i in range(5)]
+        current = _make_window(author_diversity_score=0.25)
+        result = detector._detect_diversity_drop(current, history, "t1", "Title", datetime.now(UTC))
+        assert result is not None
+        assert result.alert_type == AlertType.DIVERSITY_DROP
+        assert result.severity == Severity.INFO
+
+    def test_no_alert_when_within_normal_range(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        history = [_make_window(author_diversity_score=0.1, hours_ago=i) for i in range(5)]
+        current = _make_window(author_diversity_score=0.12)  # Slightly above, not 1.5x
+        result = detector._detect_diversity_drop(current, history, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_no_alert_when_below_015_threshold(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        # Even if 1.5x mean, if absolute < 0.15, no alert
+        history = [_make_window(author_diversity_score=0.05, hours_ago=i) for i in range(5)]
+        current = _make_window(author_diversity_score=0.12)  # 2.4x but < 0.15
+        result = detector._detect_diversity_drop(current, history, "t1", "Title", datetime.now(UTC))
+        assert result is None
+
+    def test_history_none_scores_filtered(self) -> None:
+        detector = AnomalyDetector(min_history_points=3)
+        history = [
+            _make_window(author_diversity_score=None, hours_ago=5),
+            _make_window(author_diversity_score=0.1, hours_ago=4),
+            _make_window(author_diversity_score=0.1, hours_ago=3),
+            _make_window(author_diversity_score=0.1, hours_ago=2),
+        ]
+        current = _make_window(author_diversity_score=0.25)
+        result = detector._detect_diversity_drop(current, history, "t1", "Title", datetime.now(UTC))
+        assert result is not None

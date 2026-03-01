@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi.testclient import TestClient
 
+import sam.api.dependencies as deps
 import sam.api.main as api
 import sam.cache as cache
 
@@ -47,15 +48,15 @@ def _setup(monkeypatch) -> None:
     api.get_settings.cache_clear()
     api.settings = api.get_settings()
 
-    monkeypatch.setattr(api, "get_session", _fake_get_session)
-    monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr(deps, "get_session", _fake_get_session)
+    monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
 
     # Ensure cache module uses no Redis so collector_toggle_get returns None
     monkeypatch.setattr(cache, "_redis", None)
     monkeypatch.setattr(cache, "get_redis", lambda: None)
 
     # Reset runtime overrides between tests
-    api._collector_enabled_overrides.clear()
+    deps.collector_enabled_overrides.clear()
 
 
 def test_collectors_status_defaults(monkeypatch) -> None:

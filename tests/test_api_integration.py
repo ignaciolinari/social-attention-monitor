@@ -9,8 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+import sam.api.dependencies as deps
 import sam.api.main as api
-from sam.processors.sentiment import SentimentBatchTranslationStats, SentimentResult
+import sam.api.routes.alerts as alerts_mod
+from sam.config import get_settings
+from sam.processors.sentiment import SentimentResult
 
 
 class _DummySession:
@@ -42,8 +45,8 @@ async def _fake_get_session():
 @pytest.fixture
 def client(monkeypatch):
     """Create a test client with mocked dependencies."""
-    monkeypatch.setattr(api, "get_session", _fake_get_session)
-    monkeypatch.setattr(api, "get_redis", lambda: _DummyRedis())
+    monkeypatch.setattr(deps, "get_session", _fake_get_session)
+    monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
     monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
 
     with TestClient(api.app) as c:
@@ -140,8 +143,8 @@ class TestAlertsEndpoints:
         async def mock_get_unack(*_args, **_kwargs):
             return 0
 
-        monkeypatch.setattr(api, "get_recent_alerts", mock_get_alerts)
-        monkeypatch.setattr(api, "get_unacknowledged_count", mock_get_unack)
+        monkeypatch.setattr(deps, "get_recent_alerts", mock_get_alerts)
+        monkeypatch.setattr(deps, "get_unacknowledged_count", mock_get_unack)
 
         response = client.get("/api/v1/alerts")
         assert response.status_code == 200
@@ -159,8 +162,8 @@ class TestAlertsEndpoints:
         async def mock_get_unack(*_args, **_kwargs):
             return 2
 
-        monkeypatch.setattr(api, "get_alert_counts_by_severity", mock_get_counts)
-        monkeypatch.setattr(api, "get_unacknowledged_count", mock_get_unack)
+        monkeypatch.setattr(deps, "get_alert_counts_by_severity", mock_get_counts)
+        monkeypatch.setattr(deps, "get_unacknowledged_count", mock_get_unack)
 
         response = client.get("/api/v1/alerts/counts")
         assert response.status_code == 200
@@ -183,12 +186,12 @@ class TestAlertsEndpoints:
         }
 
         monkeypatch.setattr(
-            api.AlertManager,
+            deps.AlertManager,
             "run_detection_cycle",
             AsyncMock(return_value=(1, [created_alert])),
         )
         mock_broadcast = AsyncMock()
-        monkeypatch.setattr(api, "broadcast_alert", mock_broadcast)
+        monkeypatch.setattr(alerts_mod, "broadcast_alert", mock_broadcast)
 
         response = client.post("/api/v1/alerts/run-detection")
         assert response.status_code == 200
@@ -230,7 +233,7 @@ class TestPipelineHealth:
             }
 
         # Mock both the stats function and cache
-        monkeypatch.setattr(api, "get_pipeline_health_stats", mock_get_stats)
+        monkeypatch.setattr(deps, "get_pipeline_health_stats", mock_get_stats)
 
         async def mock_cache_get(_key):
             return None
@@ -239,8 +242,8 @@ class TestPipelineHealth:
             del ttl_seconds
             pass
 
-        monkeypatch.setattr(api, "cache_get_json", mock_cache_get)
-        monkeypatch.setattr(api, "cache_set_json", mock_cache_set)
+        monkeypatch.setattr(deps, "cache_get_json", mock_cache_get)
+        monkeypatch.setattr(deps, "cache_set_json", mock_cache_set)
 
         response = client.get("/api/v1/pipeline/health")
         assert response.status_code == 200
@@ -260,7 +263,7 @@ class TestMetricsEndpoints:
         async def mock_get_trending(*_args, **_kwargs):
             return []
 
-        monkeypatch.setattr(api, "get_trending_by_attention_index", mock_get_trending)
+        monkeypatch.setattr(deps, "get_trending_by_attention_index", mock_get_trending)
 
         async def mock_cache_get(_key):
             return None
@@ -269,8 +272,8 @@ class TestMetricsEndpoints:
             del ttl_seconds
             pass
 
-        monkeypatch.setattr(api, "cache_get_json", mock_cache_get)
-        monkeypatch.setattr(api, "cache_set_json", mock_cache_set)
+        monkeypatch.setattr(deps, "cache_get_json", mock_cache_get)
+        monkeypatch.setattr(deps, "cache_set_json", mock_cache_set)
 
         response = client.get(
             "/api/v1/metrics/trending",
@@ -305,7 +308,7 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
         posts=[post],
         collected_at=datetime.now(UTC),
     )
-    monkeypatch.setattr(api, "_reddit_collector", collector)
+    monkeypatch.setattr(deps, "reddit_collector", collector)
 
     roberta_result = SentimentResult(
         compound=0.7,
@@ -327,15 +330,13 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
         extra={"roberta": roberta_result},
     )
 
-    def _fake_batch_with_translation(_texts, *, translate, log_context="api"):
+    def _fake_analyze_texts(texts, *, translate, log_context="api"):
         _ = (translate, log_context)
-        return [both_result], SentimentBatchTranslationStats()
+        return [both_result] * len(texts)
 
-    monkeypatch.setattr(
-        api, "analyze_sentiment_batch_with_translation", _fake_batch_with_translation
-    )
+    monkeypatch.setattr(deps, "analyze_texts_for_sentiment", _fake_analyze_texts)
 
-    mentions, sentiment_by_source_id, _posts, _collected_at = await api._collect_mentions_live(
+    mentions, sentiment_by_source_id, _posts, _collected_at = await deps.collect_mentions_live(
         platform="reddit",
         title="Dune",
         limit=1,
@@ -386,7 +387,7 @@ class TestSentimentEndpoint:
             raw_scores={},
             extra={"roberta": roberta},
         )
-        monkeypatch.setattr(api, "analyze_sentiment", lambda _text: both)
+        monkeypatch.setattr(deps, "analyze_sentiment", lambda _text: both)
 
         response = client.get(
             "/api/v1/sentiment/analyze",
@@ -403,3 +404,121 @@ class TestSentimentEndpoint:
         """Sentiment analysis should require text parameter."""
         response = client.get("/api/v1/sentiment/analyze")
         assert response.status_code == 422
+
+
+class TestPipelineRunsEndpoint:
+    """Tests for pipeline runs endpoint."""
+
+    def test_pipeline_runs_returns_structure(self, client, monkeypatch) -> None:
+        """Pipeline runs should return paginated response structure."""
+
+        async def mock_get_runs(_session, *, limit, offset, status):
+            del status
+            return {"runs": [], "total": 0, "limit": limit, "offset": offset}
+
+        monkeypatch.setattr(deps, "get_pipeline_runs", mock_get_runs)
+
+        response = client.get("/api/v1/pipeline/runs")
+        assert response.status_code == 200
+        data = response.json()
+        assert "runs" in data
+        assert "total" in data
+        assert data["total"] == 0
+        assert isinstance(data["runs"], list)
+
+    def test_pipeline_runs_accepts_params(self, client, monkeypatch) -> None:
+        """Pipeline runs should accept limit, offset, and status params."""
+
+        async def mock_get_runs(_session, *, limit, offset, status):
+            del status
+            return {"runs": [], "total": 0, "limit": limit, "offset": offset}
+
+        monkeypatch.setattr(deps, "get_pipeline_runs", mock_get_runs)
+
+        response = client.get(
+            "/api/v1/pipeline/runs",
+            params={"limit": 5, "offset": 0, "status": "success"},
+        )
+        assert response.status_code == 200
+
+    def test_pipeline_runs_limit_capped_at_100(self, client) -> None:
+        """Limit > 100 should be rejected."""
+        response = client.get("/api/v1/pipeline/runs", params={"limit": 101})
+        assert response.status_code == 422
+
+
+class TestSystemHealthEndpoint:
+    """Tests for system health endpoint."""
+
+    def test_system_health_returns_structure(self, client, monkeypatch) -> None:
+        """System health should return healthy flag and issues list."""
+        monkeypatch.setattr(
+            deps.AlertManager,
+            "check_system_health",
+            AsyncMock(return_value=[]),
+        )
+
+        response = client.get("/api/v1/alerts/system-health")
+        assert response.status_code == 200
+        data = response.json()
+        assert "healthy" in data
+        assert data["healthy"] is True
+        assert "issues" in data
+        assert isinstance(data["issues"], list)
+        assert "timestamp" in data
+
+
+class TestPrometheusMetrics:
+    """Tests for /metrics endpoint."""
+
+    def test_metrics_returns_text(self, client) -> None:
+        """Prometheus /metrics should return text content."""
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        # Prometheus text format returns text/plain or similar
+        assert "text" in response.headers.get("content-type", "")
+
+    def test_metrics_bypasses_rate_limit(self, client) -> None:
+        """/metrics should bypass rate limiting like /health."""
+        for _ in range(150):
+            response = client.get("/metrics")
+            assert response.status_code == 200
+
+
+class TestSentimentAuthProtection:
+    """Tests for sentiment endpoint auth when SAM_API_KEY is set."""
+
+    def test_sentiment_requires_auth_when_key_set(self, monkeypatch) -> None:
+        """Sentiment analyze should require API key when SAM_API_KEY is configured."""
+        original_settings = get_settings()
+        fake_settings = original_settings.model_copy(update={"api_key": "test-key"})
+        monkeypatch.setattr("sam.api.middleware.get_settings", lambda: fake_settings)
+
+        monkeypatch.setattr(deps, "get_session", _fake_get_session)
+        monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
+        monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
+
+        with TestClient(api.app) as c:
+            response = c.get(
+                "/api/v1/sentiment/analyze",
+                params={"text": "Hello world"},
+            )
+            assert response.status_code == 401
+
+    def test_sentiment_accessible_with_key(self, monkeypatch) -> None:
+        """Sentiment analyze should succeed when correct API key is provided."""
+        original_settings = get_settings()
+        fake_settings = original_settings.model_copy(update={"api_key": "test-key"})
+        monkeypatch.setattr("sam.api.middleware.get_settings", lambda: fake_settings)
+
+        monkeypatch.setattr(deps, "get_session", _fake_get_session)
+        monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
+        monkeypatch.setattr("sam.cache.get_redis", lambda: _DummyRedis())
+
+        with TestClient(api.app) as c:
+            response = c.get(
+                "/api/v1/sentiment/analyze",
+                params={"text": "Hello world"},
+                headers={"X-API-Key": "test-key"},
+            )
+            assert response.status_code == 200
