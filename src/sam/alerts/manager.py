@@ -3,6 +3,7 @@ Alert Manager - Orchestrates anomaly detection and alert lifecycle.
 
 Provides:
 - Periodic anomaly detection for all active titles
+- System-level self-health checks (no ingest, collector failures, quota)
 - Alert persistence and deduplication
 - Alert acknowledgment and resolution
 """
@@ -13,14 +14,17 @@ from uuid import UUID
 
 from loguru import logger
 from sqlalchemy import and_, select
+from sqlalchemy import func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.alerts.detector import (
+    AlertType,
     AnomalyDetector,
     DetectedAnomaly,
     MetricsWindow,
+    Severity,
 )
-from sam.storage.models import Alert, MetricsSnapshot, Title
+from sam.storage.models import Alert, MetricsSnapshot, PipelineRun, Title
 
 
 class AlertManager:
@@ -195,6 +199,159 @@ class AlertManager:
         created_alerts = await self.persist_anomalies(session, anomalies)
         return len(anomalies), created_alerts
 
+    # ------------------------------------------------------------------
+    # Self-health checks (system-level)
+    # ------------------------------------------------------------------
+
+    async def check_system_health(
+        self,
+        session: AsyncSession,
+        *,
+        no_ingest_minutes: int = 120,
+        quota_warn_pct: float = 80.0,
+    ) -> list[DetectedAnomaly]:
+        """Run system-level health checks and return detected anomalies.
+
+        Checks:
+        1. **No-ingest** – no new mentions across *any* title within the
+           look-back window (``no_ingest_minutes``).
+        2. **Collector failures** – the most recent ``collector-cycle`` pipeline
+           run ended with ``status = 'failed'``.
+        3. **Quota threshold** – YouTube daily quota usage exceeds
+           ``quota_warn_pct`` (requires ``sam.quota``).
+        4. **Redis degraded** – Redis is unreachable (graceful degradation is
+           still active, but caching / toggles are impaired).
+
+        .. note::
+           Because the ``Alert`` table has a FK to ``titles``, system-level
+           anomalies are **not** persisted in the DB.  Callers can broadcast
+           them via WebSocket or log them for observability.
+        """
+        now = datetime.now(UTC)
+        anomalies: list[DetectedAnomaly] = []
+        # Use a well-known UUID for system-level alerts (not tied to a title).
+        system_title_id = "00000000-0000-0000-0000-000000000000"
+
+        # 1. No-ingest check ------------------------------------------------
+        cutoff = now - timedelta(minutes=no_ingest_minutes)
+        from sam.storage.models import Mention
+
+        count_stmt = (
+            select(sa_func.count()).select_from(Mention).where(Mention.collected_at >= cutoff)
+        )
+        result = await session.execute(count_stmt)
+        recent_count = int(result.scalar_one())
+        if recent_count == 0:
+            anomalies.append(
+                DetectedAnomaly(
+                    alert_type=AlertType.NO_INGEST,
+                    severity=Severity.WARNING,
+                    message=(
+                        f"No mentions ingested in the last {no_ingest_minutes} minutes. "
+                        "Collectors may be stalled or misconfigured."
+                    ),
+                    details={"look_back_minutes": no_ingest_minutes},
+                    detected_at=now,
+                    title_id=system_title_id,
+                    title_name="[system]",
+                )
+            )
+
+        # 2. Collector failure check ----------------------------------------
+        last_run_stmt = (
+            select(PipelineRun)
+            .where(PipelineRun.job_name == "collector-cycle")
+            .order_by(PipelineRun.started_at.desc())
+            .limit(1)
+        )
+        last_run_result = await session.execute(last_run_stmt)
+        last_run = last_run_result.scalars().first()
+        if last_run is not None and last_run.status == "failed":
+            anomalies.append(
+                DetectedAnomaly(
+                    alert_type=AlertType.COLLECTOR_FAILURE,
+                    severity=Severity.WARNING,
+                    message=(
+                        f"Last collector-cycle run failed"
+                        f"{': ' + last_run.error if last_run.error else '.'}"
+                    ),
+                    details={
+                        "run_id": str(last_run.id),
+                        "started_at": last_run.started_at.isoformat(),
+                        "error": last_run.error,
+                    },
+                    detected_at=now,
+                    title_id=system_title_id,
+                    title_name="[system]",
+                )
+            )
+
+        # 3. YouTube quota threshold ----------------------------------------
+        try:
+            from sam.quota import YOUTUBE_DAILY_BUDGET, aggregate_youtube_quota_from_db
+
+            quota = await aggregate_youtube_quota_from_db(session)
+            if quota.budget_used_pct is not None and quota.budget_used_pct >= quota_warn_pct:
+                sev = Severity.CRITICAL if quota.budget_used_pct >= 95.0 else Severity.WARNING
+                anomalies.append(
+                    DetectedAnomaly(
+                        alert_type=AlertType.QUOTA_THRESHOLD,
+                        severity=sev,
+                        message=(
+                            f"YouTube API quota at {quota.budget_used_pct:.1f}% "
+                            f"({quota.total_units}/{YOUTUBE_DAILY_BUDGET} units)."
+                        ),
+                        details={
+                            "used_pct": quota.budget_used_pct,
+                            "total_units": quota.total_units,
+                            "daily_budget": YOUTUBE_DAILY_BUDGET,
+                        },
+                        detected_at=now,
+                        title_id=system_title_id,
+                        title_name="[system]",
+                    )
+                )
+        except Exception as exc:
+            logger.debug(f"[alerts] Quota check skipped: {exc}")
+
+        # 4. Redis degraded -------------------------------------------------
+        try:
+            from sam.cache import get_redis
+
+            redis = get_redis()
+            if redis is None:
+                anomalies.append(
+                    DetectedAnomaly(
+                        alert_type=AlertType.REDIS_DEGRADED,
+                        severity=Severity.INFO,
+                        message="Redis is unavailable — caching and collector toggles are impaired.",
+                        details={},
+                        detected_at=now,
+                        title_id=system_title_id,
+                        title_name="[system]",
+                    )
+                )
+            else:
+                pong = await redis.ping()  # type: ignore[misc]
+                if not pong:
+                    raise ConnectionError("ping returned False")
+        except Exception:
+            anomalies.append(
+                DetectedAnomaly(
+                    alert_type=AlertType.REDIS_DEGRADED,
+                    severity=Severity.INFO,
+                    message="Redis is unavailable — caching and collector toggles are impaired.",
+                    details={},
+                    detected_at=now,
+                    title_id=system_title_id,
+                    title_name="[system]",
+                )
+            )
+
+        if anomalies:
+            logger.info(f"[alerts] System health check found {len(anomalies)} issue(s)")
+        return anomalies
+
     def _snapshot_to_window(self, snapshot: MetricsSnapshot) -> MetricsWindow:
         """Convert a MetricsSnapshot to a MetricsWindow."""
         raw = snapshot.raw_metrics or {}
@@ -262,9 +419,7 @@ async def count_alerts(
     since: datetime | None = None,
 ) -> int:
     """Count alerts matching optional filters."""
-    from sqlalchemy import func
-
-    stmt = select(func.count()).select_from(Alert)
+    stmt = select(sa_func.count()).select_from(Alert)
     if title_id:
         stmt = stmt.where(Alert.title_id == title_id)
     if severity:
@@ -282,9 +437,7 @@ async def get_alert_counts_by_severity(
     since: datetime | None = None,
 ) -> dict[str, int]:
     """Get alert counts grouped by severity."""
-    from sqlalchemy import func
-
-    stmt = select(Alert.severity, func.count().label("cnt")).group_by(Alert.severity)
+    stmt = select(Alert.severity, sa_func.count().label("cnt")).group_by(Alert.severity)
     if since:
         stmt = stmt.where(Alert.created_at >= since)
 
@@ -309,9 +462,7 @@ async def acknowledge_alert(
 
 async def get_unacknowledged_count(session: AsyncSession) -> int:
     """Get count of unacknowledged alerts."""
-    from sqlalchemy import func
-
-    stmt = select(func.count()).where(Alert.acknowledged_at.is_(None))
+    stmt = select(sa_func.count()).where(Alert.acknowledged_at.is_(None))
     result = await session.execute(stmt)
     return result.scalar_one()
 
@@ -324,9 +475,7 @@ async def count_unacknowledged_alerts(
     since: datetime | None = None,
 ) -> int:
     """Count unacknowledged alerts matching optional filters."""
-    from sqlalchemy import func
-
-    stmt = select(func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))
+    stmt = select(sa_func.count()).select_from(Alert).where(Alert.acknowledged_at.is_(None))
     if title_id:
         stmt = stmt.where(Alert.title_id == title_id)
     if severity:

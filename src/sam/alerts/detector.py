@@ -27,6 +27,11 @@ class AlertType(StrEnum):
     ATTENTION_SPIKE = "attention_spike"
     SENTIMENT_DIVERGENCE = "sentiment_divergence"
     DIVERSITY_DROP = "diversity_drop"
+    # Self-health (system-level) alerts
+    NO_INGEST = "no_ingest"
+    COLLECTOR_FAILURE = "collector_failure"
+    QUOTA_THRESHOLD = "quota_threshold"
+    REDIS_DEGRADED = "redis_degraded"
 
 
 class Severity(StrEnum):

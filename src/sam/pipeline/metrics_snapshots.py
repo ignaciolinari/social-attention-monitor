@@ -12,10 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sam.config import get_settings
 from sam.processors.keywords import extract_hashtags, extract_keywords
 from sam.processors.metrics import EngagementMetrics, MentionData, get_calculator
-from sam.storage.models import Mention
 from sam.storage.repository import (
+    MentionProjection,
     get_latest_metrics_snapshot,
-    get_mentions_in_window,
+    get_mentions_in_window_lightweight,
     upsert_metrics_snapshot,
 )
 
@@ -69,11 +69,11 @@ async def compute_and_upsert_metrics_snapshots_multi(
     settings = get_settings()
     enable_keywords = getattr(settings, "enable_keyword_extraction", True)
 
-    # Fetch mentions for the largest window once.
+    # Fetch mentions for the largest window once (lightweight projection).
     max_window = max(normalized_windows)
     max_window_start = snapshot_time - timedelta(hours=max_window)
     mention_fetch_limit = 10_000
-    all_mentions = await get_mentions_in_window(
+    all_mentions = await get_mentions_in_window_lightweight(
         session,
         title_id=title_id,
         window_start=max_window_start,
@@ -236,7 +236,7 @@ def _reconstruct_previous_metrics(
     )
 
 
-def _extract_keyword_signals(mentions: list[Mention]) -> dict[str, Any] | None:
+def _extract_keyword_signals(mentions: list[MentionProjection]) -> dict[str, Any] | None:
     """Extract keyword/hashtag signals from mention content for snapshot payloads."""
     texts = [m.content for m in mentions if isinstance(m.content, str) and m.content.strip()]
     if not texts:
@@ -254,7 +254,7 @@ def _extract_keyword_signals(mentions: list[Mention]) -> dict[str, Any] | None:
 
 
 def _aggregate_sentiment_models(
-    mentions: list[Mention],
+    mentions: list[MentionProjection],
 ) -> tuple[dict[str, int], dict[str, Any] | None]:
     """Single-pass aggregation of primary + secondary sentiment model stats.
 
