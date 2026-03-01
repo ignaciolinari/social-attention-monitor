@@ -137,6 +137,7 @@ class Mention(Base):
         UniqueConstraint("platform", "source_id", "title_id", name="uq_platform_source_title"),
         Index("ix_mentions_title_platform", "title_id", "platform"),
         Index("ix_mentions_collected_at_title", "collected_at", "title_id"),
+        Index("ix_mentions_title_source_type", "title_id", "source_type"),
     )
 
     def __repr__(self) -> str:

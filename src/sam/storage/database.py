@@ -4,6 +4,7 @@ Database Connection and Session Management
 Provides async database connection pool and session factory.
 """
 
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,7 @@ from sam.storage.models import Base
 # Global engine and session factory
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_db_lock = threading.RLock()
 
 
 def get_engine() -> AsyncEngine:
@@ -28,25 +30,24 @@ def get_engine() -> AsyncEngine:
     global _engine
 
     if _engine is None:
-        settings = get_settings()
+        with _db_lock:
+            if _engine is None:
+                settings = get_settings()
 
-        db_url = settings.database.effective_url(demo_mode=settings.demo_mode)
-        if settings.demo_mode and db_url == settings.database.url:
-            logger.warning(
-                "[db] DEMO_MODE=true but DATABASE_DEMO_URL not set; "
-                "demo data will be written into the primary database"
-            )
-        _engine = create_async_engine(
-            db_url,
-            echo=settings.database.echo,
-            pool_size=settings.database.pool_size,
-            pool_pre_ping=True,
-            # Guard against zombie connections.  The 120s command_timeout
-            # accommodates heavier queries like 24h mention-window fetches on
-            # popular titles while still catching truly stuck connections.
-            connect_args={"timeout": 10, "command_timeout": 120},
-        )
-        logger.info(f"[db] Created async engine for {db_url.split('@')[-1]}")
+                db_url = settings.database.effective_url(demo_mode=settings.demo_mode)
+                if settings.demo_mode and db_url == settings.database.url:
+                    logger.warning(
+                        "[db] DEMO_MODE=true but DATABASE_DEMO_URL not set; "
+                        "demo data will be written into the primary database"
+                    )
+                _engine = create_async_engine(
+                    db_url,
+                    echo=settings.database.echo,
+                    pool_size=settings.database.pool_size,
+                    pool_pre_ping=True,
+                    connect_args={"timeout": 10, "command_timeout": 120},
+                )
+                logger.info(f"[db] Created async engine for {db_url.split('@')[-1]}")
 
     return _engine
 
@@ -56,14 +57,16 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     global _session_factory
 
     if _session_factory is None:
-        engine = get_engine()
-        _session_factory = async_sessionmaker(
-            engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-            autoflush=False,
-        )
-        logger.info("[db] Created async session factory")
+        with _db_lock:
+            if _session_factory is None:
+                engine = get_engine()
+                _session_factory = async_sessionmaker(
+                    engine,
+                    class_=AsyncSession,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
+                logger.info("[db] Created async session factory")
 
     return _session_factory
 
@@ -112,21 +115,26 @@ async def cleanup_stale_state() -> None:
     without releasing its lease or finishing its pipeline run.  Without this,
     the next runner would block forever trying to acquire the same lease row.
     """
-    from sqlalchemy import text
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import delete, update
+
+    from sam.storage.models import Lease, PipelineRun
 
     async with get_session() as session:
-        # Expire any lease whose TTL has passed
-        result = await session.execute(text("DELETE FROM leases WHERE expires_at < now()"))
+        # Expire any lease whose TTL has passed.
+        result = await session.execute(delete(Lease).where(Lease.expires_at < datetime.now(UTC)))
         expired = getattr(result, "rowcount", 0) or 0
 
-        # Mark any "running" pipeline runs older than 10 minutes as failed
+        # Mark any "running" pipeline runs older than 10 minutes as failed.
+        stale_cutoff = datetime.now(UTC) - timedelta(minutes=10)
         result = await session.execute(
-            text(
-                "UPDATE pipeline_runs SET status = 'failed', "
-                "error = 'process terminated abnormally (stale run cleaned up)', "
-                "finished_at = now() "
-                "WHERE status = 'running' "
-                "AND started_at < now() - interval '10 minutes'"
+            update(PipelineRun)
+            .where(PipelineRun.status == "running", PipelineRun.started_at < stale_cutoff)
+            .values(
+                status="failed",
+                error="process terminated abnormally (stale run cleaned up)",
+                finished_at=datetime.now(UTC),
             )
         )
         orphans = getattr(result, "rowcount", 0) or 0

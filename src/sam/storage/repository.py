@@ -6,6 +6,7 @@ Keeps the scheduler runner simple and testable.
 
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,7 +51,12 @@ async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
     title_id = result.scalar_one()
 
     # Use the ORM identity map (and a SELECT if needed) to return a fully-tracked ORM object.
-    return await session.get(Title, title_id)  # type: ignore[return-value]
+    title = await session.get(Title, title_id)
+    if title is None:
+        raise RuntimeError(
+            f"Title {title_id} not found after upsert — possible transaction isolation issue"
+        )
+    return title
 
 
 async def insert_mentions(
@@ -239,6 +245,75 @@ async def get_mentions_in_window(
     mentions = list(result.scalars().all())
     mentions.reverse()
     return mentions
+
+
+@dataclass
+class MentionProjection:
+    """Lightweight mention projection for metrics computation.
+
+    Avoids loading full ORM ``Mention`` objects with large ``content`` and
+    ``raw_data`` JSONB blobs — only the fields needed by the metrics calculator
+    and snapshot builder are fetched.
+    """
+
+    collected_at: datetime
+    platform: str
+    author: str | None
+    source_type: str | None
+    metrics: dict[str, Any] | None
+    sentiment: dict[str, Any] | None
+    content: str | None
+
+
+async def get_mentions_in_window_lightweight(
+    session: AsyncSession,
+    *,
+    title_id: uuid.UUID,
+    window_start: datetime,
+    window_end: datetime,
+    limit: int = 10_000,
+) -> list[MentionProjection]:
+    """Get lightweight mention projections for metrics snapshot computation.
+
+    Same semantics as :func:`get_mentions_in_window` but only loads the
+    columns required by the metrics calculator and snapshot builder,
+    avoiding the heavy ``raw_data`` JSONB column.  This significantly
+    reduces memory usage on viral titles hitting the 10K cap.
+    """
+    stmt = (
+        select(
+            Mention.collected_at,
+            Mention.platform,
+            Mention.author,
+            Mention.source_type,
+            Mention.metrics,
+            Mention.sentiment,
+            Mention.content,
+        )
+        .where(
+            Mention.title_id == title_id,
+            Mention.collected_at >= window_start,
+            Mention.collected_at < window_end,
+        )
+        .order_by(Mention.collected_at.desc(), Mention.id.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+    # Reverse to get chronological order (oldest first).
+    projections = [
+        MentionProjection(
+            collected_at=row.collected_at,
+            platform=row.platform,
+            author=row.author,
+            source_type=row.source_type,
+            metrics=row.metrics,
+            sentiment=row.sentiment,
+            content=row.content,
+        )
+        for row in reversed(rows)
+    ]
+    return projections
 
 
 async def get_latest_metrics_snapshot(
@@ -584,3 +659,47 @@ async def get_pipeline_health_stats(
         },
         "latest_pipeline_runs": latest_runs,
     }
+
+
+async def get_pipeline_runs(
+    session: AsyncSession,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Return paginated pipeline run history.
+
+    Returns ``{"runs": [...], "total": int, "limit": int, "offset": int}``.
+    """
+    base = select(PipelineRun)
+    count_base = select(func.count()).select_from(PipelineRun)
+    if status:
+        base = base.where(PipelineRun.status == status)
+        count_base = count_base.where(PipelineRun.status == status)
+
+    # Total count
+    total = int((await session.execute(count_base)).scalar_one())
+
+    # Fetch page
+    stmt = base.order_by(PipelineRun.started_at.desc()).limit(min(limit, 100)).offset(offset)
+    result = await session.execute(stmt)
+    runs = [
+        {
+            "id": str(row.id),
+            "job_name": row.job_name,
+            "status": row.status,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "elapsed_seconds": (
+                int((row.finished_at - row.started_at).total_seconds())
+                if row.finished_at and row.started_at
+                else None
+            ),
+            "error": row.error,
+            "stats": row.stats or {},
+        }
+        for row in result.scalars().all()
+    ]
+
+    return {"runs": runs, "total": total, "limit": limit, "offset": offset}
