@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from threading import Lock
 
@@ -27,10 +29,22 @@ _MULTISPACE_RE = re.compile(r"\s+")
 _ENGLISH_CONFIDENCE_THRESHOLD = 0.80
 _MIN_DETECTION_CHARS = 20
 
+# Timeout (seconds) for a single translation call.  Prevents the pipeline
+# from blocking indefinitely if the translation provider is slow/unreachable.
+_TRANSLATE_TIMEOUT_SECONDS = 10
+
+# Dedicated executor for translation calls so timeouts work even when
+# the caller is already inside a thread pool.
+_translate_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="translate")
+
 # Cache translator instances per source language
 _translators: dict[str, GoogleTranslator] = {}
 _translators_lock = Lock()
-_translate_call_lock = Lock()
+# Per-language locks so translations for different languages can run in
+# parallel while still serializing calls for the same shared translator
+# instance (deep-translator is not documented as thread-safe).
+_translate_locks: dict[str, Lock] = {}
+_translate_locks_guard = Lock()
 
 
 @dataclass(frozen=True)
@@ -39,6 +53,17 @@ class TranslationBatchStats:
     changed_count: int = 0
     failed_count: int = 0
     skipped_english_count: int = 0
+
+
+def _get_translate_lock(source_lang: str) -> Lock:
+    """Return a per-language lock, creating it lazily if needed."""
+    lock = _translate_locks.get(source_lang)
+    if lock is not None:
+        return lock
+    with _translate_locks_guard:
+        if source_lang not in _translate_locks:
+            _translate_locks[source_lang] = Lock()
+        return _translate_locks[source_lang]
 
 
 def get_translator(source: str = "auto") -> GoogleTranslator:
@@ -148,7 +173,11 @@ def translate_text(text: str) -> str:
 
 
 def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[str, bool, bool]:
-    """Translate text and return (text, changed, failed)."""
+    """Translate text and return (text, changed, failed).
+
+    Applies a per-call timeout so the pipeline never blocks indefinitely
+    on a slow/unreachable translation provider.
+    """
     if not text or not text.strip():
         return text, False, False
 
@@ -165,13 +194,30 @@ def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[s
                 truncated_length=4500,
             )
         truncated = text[:4500]  # Safety truncate
+
         # deep-translator does not document thread safety for shared instances.
-        # Serialize calls on the cached translator to avoid concurrent access.
-        with _translate_call_lock:
-            result = translator.translate(truncated)
+        # Use per-language locks so translations for different source languages
+        # can proceed in parallel while serializing calls for the same translator.
+        call_lock = _get_translate_lock(source_lang)
+
+        def _do_translate() -> str | None:
+            with call_lock:
+                return translator.translate(truncated)  # type: ignore[no-any-return]
+
+        future = _translate_executor.submit(_do_translate)
+        result: str | None = future.result(timeout=_TRANSLATE_TIMEOUT_SECONDS)
+
         if result is None:
             return text, False, False
         return result, result != text, False
+    except FuturesTimeoutError:
+        # Cancel the future to prevent result delivery.  Note: the underlying
+        # thread may still hold the per-language lock until the translation call
+        # returns from the provider.  Subsequent calls for the same source
+        # language will block behind it until that completes.
+        future.cancel()
+        logger.warning("Translation timed out after {timeout}s", timeout=_TRANSLATE_TIMEOUT_SECONDS)
+        return text, False, True
     except Exception as exc:
         logger.warning("Translation failed ({error_type})", error_type=type(exc).__name__)
         return text, False, True

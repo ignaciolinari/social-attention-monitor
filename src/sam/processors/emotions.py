@@ -26,6 +26,9 @@ class EmotionDetector:
         self._tokenizer: Any | None = None
         self._model: Any | None = None
         self._available = False
+        # Guard concurrent transformer forward-passes from multiple
+        # ``asyncio.to_thread`` workers — model is not thread-safe.
+        self._inference_lock = Lock()
         self._load()
 
     # ------------------------------------------------------------------
@@ -77,7 +80,7 @@ class EmotionDetector:
                 max_length=512,
                 padding=True,
             )
-            with torch.no_grad():
+            with self._inference_lock, torch.no_grad():
                 output = self._model(**inputs)  # type: ignore[misc]
             logits = output.logits.detach().cpu().numpy()
 

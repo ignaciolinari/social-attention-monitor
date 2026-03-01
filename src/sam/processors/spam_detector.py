@@ -21,7 +21,6 @@ _EMOJI_SPAM_RE = re.compile(
     r"([\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
     r"\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF]){5,}",
 )
-_CAPS_RE = re.compile(r"[A-Z]")
 _HASHTAG_RE = re.compile(r"#\w+")
 
 # Thresholds
@@ -56,10 +55,11 @@ def compute_spam_score(post: CollectedPost) -> float:
         score += 0.15
 
     # 4. ALL-CAPS ratio
-    alpha_chars = [c for c in text if c.isalpha()]
-    if alpha_chars:
-        caps_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
-        if caps_ratio > 0.7 and len(alpha_chars) > 20:
+    alpha_count = sum(1 for c in text if c.isalpha())
+    if alpha_count > 20:
+        caps_count = sum(1 for c in text if c.isupper())
+        caps_ratio = caps_count / alpha_count
+        if caps_ratio > 0.7:
             score += 0.15
 
     # 5. Very short + many hashtags

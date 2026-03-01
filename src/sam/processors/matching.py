@@ -89,7 +89,7 @@ try:
     def _ratio(a: str, b: str) -> float:
         if not a or not b:
             return 0.0
-        return _rapidfuzz_ratio(a, b) / 100.0  # rapidfuzz returns 0-100
+        return float(_rapidfuzz_ratio(a, b) / 100.0)  # rapidfuzz returns 0-100
 
     _BACKEND = "rapidfuzz"
 except ImportError:

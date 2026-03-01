@@ -7,6 +7,7 @@ extraction from social media text.
 from __future__ import annotations
 
 import functools
+import random
 import re
 from collections import Counter
 from typing import Any
@@ -14,6 +15,11 @@ from typing import Any
 from loguru import logger
 
 _HASHTAG_RE = re.compile(r"#(\w+)")
+
+# Maximum number of texts to feed into YAKE.  Keywords converge well with
+# sampling, and this avoids O(n) string concatenation + YAKE memory usage
+# on viral titles with thousands of mentions.
+_MAX_KEYWORD_TEXTS = 500
 
 
 @functools.lru_cache(maxsize=8)
@@ -50,6 +56,12 @@ def extract_keywords(
         List of ``(keyword, score)`` tuples.  Lower YAKE score = more relevant.
         Scores are inverted (1 - score) so higher = more relevant.
     """
+    # Cap input size BEFORE joining to avoid O(n) string concatenation
+    # on viral titles with thousands of mentions.  Keywords converge well
+    # with sampling, so this doesn't meaningfully affect quality.
+    if len(texts) > _MAX_KEYWORD_TEXTS:
+        texts = random.sample(texts, _MAX_KEYWORD_TEXTS)
+
     combined = " ".join(t for t in texts if t and t.strip())
     if not combined.strip():
         return []

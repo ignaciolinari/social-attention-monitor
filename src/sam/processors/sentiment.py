@@ -7,7 +7,9 @@ Extensible to support transformer-based models.
 
 from __future__ import annotations
 
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import Lock
@@ -18,6 +20,25 @@ from loguru import logger
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from sam.processors.text_cleaning import clean_text_for_sentiment
+
+# ---------------------------------------------------------------------------
+# Module-level worker for ProcessPoolExecutor (must be picklable)
+# ---------------------------------------------------------------------------
+
+# Each worker process lazily creates its own VADER instance.
+_worker_analyzer: SentimentIntensityAnalyzer | None = None
+
+
+def _vader_worker(text: str) -> dict[str, float]:
+    """Score a single text using VADER inside a worker process."""
+    global _worker_analyzer  # noqa: PLW0603
+    if _worker_analyzer is None:
+        _worker_analyzer = SentimentIntensityAnalyzer()
+    return _worker_analyzer.polarity_scores(text)  # type: ignore[no-any-return]
+
+
+# Minimum batch size that justifies the overhead of spawning workers.
+_PARALLEL_BATCH_THRESHOLD = 64
 
 
 class SentimentModel(StrEnum):
@@ -108,17 +129,30 @@ class SentimentAnalyzer:
     ROBERTA_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
     ROBERTA_BATCH_SIZE = 32
 
-    def __init__(self, model: SentimentModel = SentimentModel.VADER) -> None:
+    def __init__(
+        self,
+        model: SentimentModel = SentimentModel.VADER,
+        parallel_workers: int | None = None,
+    ) -> None:
         """
         Initialize the sentiment analyzer.
 
         Args:
             model: Sentiment model to use
+            parallel_workers: Number of worker processes for VADER batch
+                analysis.  ``0`` disables multiprocessing (default for small
+                batches); ``None`` uses ``os.cpu_count()`` when the batch
+                exceeds ``_PARALLEL_BATCH_THRESHOLD``.
         """
         self.model = model
+        self._parallel_workers = parallel_workers
         self._analyzer: SentimentIntensityAnalyzer | None = None
         self._tokenizer: Any | None = None
         self._roberta: Any | None = None
+        # Guard concurrent transformer forward-passes from multiple
+        # ``asyncio.to_thread`` workers.  The model is not documented as
+        # thread-safe and sharing weights across threads can cause data races.
+        self._roberta_lock = Lock()
 
         self._setup_analyzer()
 
@@ -201,6 +235,11 @@ class SentimentAnalyzer:
         """
         Analyze sentiment of multiple texts.
 
+        For VADER mode with large batches, uses a :class:`ProcessPoolExecutor`
+        to parallelise the CPU-bound scoring across cores.  The pool is only
+        created when the batch exceeds ``_PARALLEL_BATCH_THRESHOLD`` (default
+        64) and ``parallel_workers != 0``.
+
         For RoBERTa / BOTH modes, tokenizes in batches for efficient GPU/CPU
         utilisation instead of one-by-one.
 
@@ -211,7 +250,7 @@ class SentimentAnalyzer:
             List of SentimentResults
         """
         if self.model == SentimentModel.VADER:
-            return [self.analyze(text) for text in texts]
+            return self._analyze_vader_batch(texts)
 
         # For ROBERTA / BOTH: preprocess, then batch-infer RoBERTa once
         cleaned = []
@@ -281,6 +320,83 @@ class SentimentAnalyzer:
             confidence=round(abs(compound), 4),
         )
 
+    # ------------------------------------------------------------------
+    # VADER parallel batch
+    # ------------------------------------------------------------------
+
+    def _analyze_vader_batch(self, texts: list[str]) -> list[SentimentResult]:
+        """Analyse multiple texts with VADER, optionally in parallel.
+
+        When *parallel_workers* is not ``0`` and the batch exceeds
+        ``_PARALLEL_BATCH_THRESHOLD``, a :class:`ProcessPoolExecutor` is used
+        so that each worker gets its own ``SentimentIntensityAnalyzer``.
+        """
+        # Preprocess
+        cleaned: list[str] = []
+        empty_indices: set[int] = set()
+        for i, t in enumerate(texts):
+            if not t or not t.strip():
+                cleaned.append("")
+                empty_indices.add(i)
+            else:
+                cleaned.append(self._preprocess(t))
+
+        non_empty = [c for i, c in enumerate(cleaned) if i not in empty_indices]
+
+        workers = self._parallel_workers
+        use_pool = workers != 0 and len(non_empty) >= _PARALLEL_BATCH_THRESHOLD
+
+        if use_pool:
+            max_workers = workers if workers and workers > 0 else os.cpu_count() or 2
+            logger.debug(
+                f"[sentiment] VADER parallel batch: {len(non_empty)} texts, {max_workers} workers"
+            )
+            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+                raw_scores_list = list(pool.map(_vader_worker, non_empty))
+        else:
+            if not self._analyzer:
+                raise RuntimeError("VADER analyzer not initialized")
+            raw_scores_list = [self._analyzer.polarity_scores(t) for t in non_empty]
+
+        # Build results
+        results: list[SentimentResult] = []
+        scores_iter = iter(raw_scores_list)
+        for i in range(len(cleaned)):
+            if i in empty_indices:
+                results.append(
+                    SentimentResult(
+                        compound=0.0,
+                        positive=0.0,
+                        negative=0.0,
+                        neutral=1.0,
+                        label="neutral",
+                        model=self.model.value,
+                        raw_scores={},
+                    )
+                )
+            else:
+                scores = next(scores_iter)
+                compound = scores["compound"]
+                if compound >= self.POSITIVE_THRESHOLD:
+                    label = "positive"
+                elif compound <= self.NEGATIVE_THRESHOLD:
+                    label = "negative"
+                else:
+                    label = "neutral"
+                results.append(
+                    SentimentResult(
+                        compound=compound,
+                        positive=scores["pos"],
+                        negative=scores["neg"],
+                        neutral=scores["neu"],
+                        label=label,
+                        model=self.model.value,
+                        raw_scores=scores,
+                        confidence=round(abs(compound), 4),
+                    )
+                )
+        return results
+
     def _analyze_roberta(self, text: str) -> SentimentResult:
         """Perform RoBERTa sentiment analysis."""
         import torch
@@ -293,7 +409,7 @@ class SentimentAnalyzer:
         inputs = self._tokenizer(
             text, return_tensors="pt", truncation=True, max_length=512, padding=True
         )
-        with torch.no_grad():
+        with self._roberta_lock, torch.no_grad():
             output = self._roberta(**inputs)
         scores = output[0][0].detach().cpu().numpy()
         scores = softmax(scores)
@@ -349,7 +465,7 @@ class SentimentAnalyzer:
                 max_length=512,
                 padding=True,
             )
-            with torch.no_grad():
+            with self._roberta_lock, torch.no_grad():
                 output = self._roberta(**inputs)
             logits = output[0].detach().cpu().numpy()  # shape: (batch, 3)
 
