@@ -206,8 +206,14 @@ class RedditCollector(BaseCollector):
     ) -> list[CollectedPost]:
         """Collect from a single subreddit (sync)."""
         collected_posts: list[CollectedPost] = []
+        # Grab a local reference so that a concurrent close() setting
+        # self._client = None won't cause an AttributeError mid-iteration.
+        client = self._client
+        if client is None:
+            logger.warning("[reddit] Client is None in _collect_subreddit_sync, skipping")
+            return collected_posts
         try:
-            subreddit = self._client.subreddit(subreddit_name)
+            subreddit = client.subreddit(subreddit_name)
 
             if query:
                 submissions = subreddit.search(

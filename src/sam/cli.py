@@ -195,6 +195,7 @@ async def demo() -> None:
         print(f"  • @{post.author} | Likes: {likes} | Sentiment: {sentiment.label}")
     print()
 
+    await reddit.close()
     await tmdb.close()
     await youtube.close()
     await bluesky.close()

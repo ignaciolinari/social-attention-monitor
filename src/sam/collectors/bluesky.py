@@ -150,8 +150,14 @@ class BlueskyCollector(BaseCollector):
                 return result
 
             except Exception as e:
-                error_str = str(e).lower()
-                is_rate_limit = "rate" in error_str or "429" in error_str or "limit" in error_str
+                # Prefer checking for HTTP 429 status code when available;
+                # fall back to looking for "429" in the message string.
+                is_rate_limit = False
+                status = getattr(e, "status_code", None) or getattr(
+                    getattr(e, "response", None), "status_code", None
+                )
+                if status == 429 or "429" in str(e):
+                    is_rate_limit = True
 
                 if is_rate_limit and attempt < max_attempts:
                     # Exponential backoff with jitter

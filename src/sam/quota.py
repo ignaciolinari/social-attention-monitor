@@ -151,13 +151,16 @@ class QuotaTracker:
 
 # Module-level singleton
 _tracker: QuotaTracker | None = None
+_tracker_lock = threading.Lock()
 
 
 def get_quota_tracker() -> QuotaTracker:
-    """Get or create the global quota tracker."""
+    """Get or create the global quota tracker (thread-safe)."""
     global _tracker
     if _tracker is None:
-        _tracker = QuotaTracker()
+        with _tracker_lock:
+            if _tracker is None:
+                _tracker = QuotaTracker()
     return _tracker
 
 

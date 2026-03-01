@@ -6,13 +6,11 @@ Provides common functionality for rate limiting, error handling, and data format
 """
 
 import abc
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 
 @dataclass
@@ -137,12 +135,3 @@ class BaseCollector(abc.ABC):
             )
         else:
             logger.error(f"[{self.platform_name}] Collection failed: {result.error}")
-
-    @staticmethod
-    def retry_on_rate_limit(func: Callable[..., Any]) -> Callable[..., Any]:
-        """Decorator for retrying on rate limit errors."""
-        return retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=4, max=60),
-            reraise=True,
-        )(func)

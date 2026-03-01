@@ -50,7 +50,7 @@ class RedditSettings(BaseSettings):
     client_id: str = Field(default="", description="Reddit OAuth client ID")
     client_secret: str = Field(default="", description="Reddit OAuth client secret")
     user_agent: str = Field(
-        default="SAM/0.1.0 (Social Attention Monitor)",
+        default="SAM/0.2.0 (Social Attention Monitor)",
         description="User agent for Reddit API requests",
     )
 
@@ -418,6 +418,17 @@ class Settings(BaseSettings):
         description="Interval for WebSocket dead connection cleanup (seconds)",
     )
 
+    # Security
+    api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("SAM_API_KEY", "API_KEY"),
+        description=(
+            "API key for mutation/admin endpoints. "
+            "When set, PUT/POST/DELETE requests to sensitive endpoints require "
+            "an Authorization: Bearer <key> or X-API-Key: <key> header."
+        ),
+    )
+
     # Nested settings
     reddit: RedditSettings = Field(default_factory=RedditSettings)
     youtube: YouTubeSettings = Field(default_factory=YouTubeSettings)
@@ -447,5 +458,74 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance."""
+    """Return the **singleton** application settings, cached for the process lifetime.
+
+    Uses :func:`functools.lru_cache` so that the first call constructs a
+    :class:`Settings` instance (reading env‑vars / ``.env``), and every
+    subsequent call returns the *same* object with zero overhead.
+
+    Lifecycle notes
+    ---------------
+    * The cache lives for the duration of the Python process.  In production
+      (Uvicorn with ``--workers N``) each worker gets its own copy.
+    * Changing an environment variable **after** the first call has no effect
+      unless you clear the cache explicitly.
+    * On Unix systems, sending ``SIGHUP`` to the process calls
+      :func:`reload_settings`, which clears this cache so the next call
+      picks up new environment variable values.
+
+    Testing / invalidation
+    ----------------------
+    To reset the cached settings in tests, call::
+
+        get_settings.cache_clear()
+
+    or override the FastAPI dependency with ``app.dependency_overrides``.
+
+    Returns
+    -------
+    Settings
+        The validated, frozen configuration object.
+    """
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """Clear the settings cache and return a fresh :class:`Settings` instance.
+
+    Useful for hot-reloading configuration without a full process restart.
+    Called automatically by the ``SIGHUP`` signal handler when
+    :func:`install_sighup_handler` has been invoked.
+    """
+    from loguru import logger
+
+    get_settings.cache_clear()
+    new = get_settings()
+    logger.info("[config] Settings reloaded via cache clear")
+    return new
+
+
+def install_sighup_handler() -> None:
+    """Register a ``SIGHUP`` handler that reloads settings.
+
+    Safe to call on any platform — silently no-ops on Windows where
+    ``SIGHUP`` does not exist.  Also no-ops when called from a non-main
+    thread (e.g. during test-suite startup).
+
+    Should be called once during application startup (e.g. in the FastAPI
+    lifespan or scheduler entrypoint).
+    """
+    import signal
+    import sys
+    import threading
+
+    if sys.platform == "win32":
+        return
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _on_sighup(signum: int, frame: object) -> None:  # noqa: ARG001
+        reload_settings()
+
+    signal.signal(signal.SIGHUP, _on_sighup)

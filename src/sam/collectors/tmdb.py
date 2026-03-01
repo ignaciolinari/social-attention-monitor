@@ -301,8 +301,12 @@ class TMDBCollector:
             with contextlib.suppress(ValueError):
                 release_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
 
+        tmdb_id = data.get("id")
+        if not tmdb_id:
+            raise ValueError(f"TMDB response missing 'id' field for title '{title}'")
+
         return TMDBTitle(
-            tmdb_id=data.get("id", 0),
+            tmdb_id=tmdb_id,
             title=title,
             original_title=original_title,
             media_type=mtype,

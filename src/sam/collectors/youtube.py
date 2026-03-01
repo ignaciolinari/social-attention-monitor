@@ -236,7 +236,11 @@ class YouTubeCollector(BaseCollector):
                     quota_units=YOUTUBE_VIDEOS_COST,
                 )
 
-                posts.extend(self._parse_video(video) for video in stats_data.get("items", []))
+                posts.extend(
+                    p
+                    for p in (self._parse_video(video) for video in stats_data.get("items", []))
+                    if p is not None
+                )
                 # Defensive cap: APIs can occasionally return more items than requested
                 # (or we may overshoot within a single batch). Ensure we never exceed `limit`.
                 if len(posts) >= limit:
@@ -303,40 +307,48 @@ class YouTubeCollector(BaseCollector):
         self._log_collection(result)
         return result
 
-    def _parse_video(self, video: dict[str, Any]) -> CollectedPost:
-        """Parse a YouTube video response into a CollectedPost."""
-        snippet = video.get("snippet", {})
-        statistics = video.get("statistics", {})
+    def _parse_video(self, video: dict[str, Any]) -> CollectedPost | None:
+        """Parse a YouTube video response into a CollectedPost.
 
-        published_at = snippet.get("publishedAt")
-        if published_at:
-            created_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-        else:
-            created_at = datetime.now(UTC)
+        Returns ``None`` if the video cannot be parsed (mirrors
+        ``_parse_comment`` error-handling strategy).
+        """
+        try:
+            snippet = video.get("snippet", {})
+            statistics = video.get("statistics", {})
 
-        # YouTube descriptions are often SEO spam, timestamps, and boilerplate
-        # channel info.  Truncate to ~300 chars at the nearest sentence or word
-        # boundary so sentiment analysis focuses on meaningful introductory text.
-        description = _truncate_description(snippet.get("description") or "", max_chars=300)
-        title_text = snippet.get("title", "")
+            published_at = snippet.get("publishedAt")
+            if published_at:
+                created_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            else:
+                created_at = datetime.now(UTC)
 
-        return CollectedPost(
-            platform=self.platform_name,
-            source_id=video["id"],
-            source_type="video",
-            content=f"{title_text}\n\n{description}",
-            author=snippet.get("channelTitle"),
-            url=f"https://youtube.com/watch?v={video['id']}",
-            created_at=created_at,
-            metrics={
-                "view_count": int(statistics.get("viewCount", 0)),
-                "like_count": int(statistics.get("likeCount", 0)),
-                "comment_count": int(statistics.get("commentCount", 0)),
-                "channel_id": snippet.get("channelId"),
-                "channel_title": snippet.get("channelTitle"),
-            },
-            raw_data=video,
-        )
+            # YouTube descriptions are often SEO spam, timestamps, and boilerplate
+            # channel info.  Truncate to ~300 chars at the nearest sentence or word
+            # boundary so sentiment analysis focuses on meaningful introductory text.
+            description = _truncate_description(snippet.get("description") or "", max_chars=300)
+            title_text = snippet.get("title", "")
+
+            return CollectedPost(
+                platform=self.platform_name,
+                source_id=video["id"],
+                source_type="video",
+                content=f"{title_text}\n\n{description}",
+                author=snippet.get("channelTitle"),
+                url=f"https://youtube.com/watch?v={video['id']}",
+                created_at=created_at,
+                metrics={
+                    "view_count": int(statistics.get("viewCount", 0)),
+                    "like_count": int(statistics.get("likeCount", 0)),
+                    "comment_count": int(statistics.get("commentCount", 0)),
+                    "channel_id": snippet.get("channelId"),
+                    "channel_title": snippet.get("channelTitle"),
+                },
+                raw_data=video,
+            )
+        except Exception as e:
+            logger.warning(f"[youtube] Error parsing video: {e}")
+            return None
 
     async def collect_comments(
         self,
