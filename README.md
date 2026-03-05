@@ -91,6 +91,37 @@ Then visit:
 - **API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Dashboard**: [http://localhost:8501](http://localhost:8501)
 
+### One-Command Local Launcher (venv + Docker infra)
+
+If you prefer one command for local development:
+
+```bash
+./run-all-local.sh start
+```
+
+Useful companion commands:
+
+```bash
+./run-all-local.sh status
+./run-all-local.sh logs
+./run-all-local.sh stop
+```
+
+This launcher starts:
+- `postgres` + `redis` via Docker Compose
+- `api` + `dashboard` + `collector` via `.venv`
+
+### Dashboard-Only Mode (No New DB Population)
+
+If you want to inspect the dashboard without ingesting fresh data, start API + dashboard only and leave the collector off:
+
+```bash
+make db-up
+make run-api
+make run-dashboard
+# do not run: make run-collector
+```
+
 > [!NOTE]
 > For full live data setup with actual API keys for Reddit/YouTube/Bluesky, refer to the [Setup Guide](docs/setup.md).
 

@@ -23,14 +23,22 @@ make db-up
 pip install -e ".[dev]"
 alembic upgrade head
 ```
-5. **Start APIs and Dashboard (in separate terminals)**:
+5. **Start API and Dashboard (in separate terminals)**:
 ```bash
 make run-api
 make run-dashboard
 ```
+6. **(Optional) Start Collector for new data ingestion**:
+```bash
+make run-collector
+```
 
 > [!TIP]
 > To run the entire stack—API, Dashboard, and DBs—simply use: `docker compose up -d`
+>
+> For a local `.venv`-based workflow in one command, use:
+> `./run-all-local.sh start`
+> This starts Docker `postgres` + `redis`, and local `api` + `dashboard` + `collector`.
 
 ---
 
@@ -59,6 +67,33 @@ brew services start redis
 make run-api
 make run-dashboard
 make run-collector
+```
+
+---
+
+### C. Dashboard-Only Mode (No New DB Population)
+
+If you only want to browse existing data in the dashboard without triggering fresh ingestion, run:
+
+```bash
+make db-up
+make run-api
+make run-dashboard
+# leave collector stopped
+```
+
+To run everything from a single command later, use:
+
+```bash
+./run-all-local.sh start
+```
+
+And for lifecycle helpers:
+
+```bash
+./run-all-local.sh status
+./run-all-local.sh logs
+./run-all-local.sh stop
 ```
 
 ---
