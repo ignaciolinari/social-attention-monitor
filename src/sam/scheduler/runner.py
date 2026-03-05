@@ -27,6 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from sam.alerts import AlertManager
+from sam.cache import publish_alert_event
 from sam.collectors.base import CollectedPost
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
@@ -51,6 +52,7 @@ from sam.storage.repository import (
     finish_pipeline_run,
     insert_mentions,
     release_lease,
+    renew_lease,
     start_pipeline_run,
     upsert_title,
 )
@@ -165,6 +167,60 @@ def _snapshot_bucket(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
+def _derive_run_status(stats: dict[str, int | float]) -> str:
+    """Derive overall run status from per-title outcomes."""
+    titles_failed = int(stats.get("titles_failed", 0) or 0)
+    titles_succeeded = int(stats.get("titles_succeeded", 0) or 0)
+    if titles_failed > 0 and titles_succeeded == 0:
+        return "failed"
+    if titles_failed > 0:
+        return "degraded"
+    return "success"
+
+
+def _normalized_collected_at(value: Any) -> datetime:
+    """Normalize collector timestamps to tz-aware UTC datetimes."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+    return datetime.now(UTC)
+
+
+async def _lease_heartbeat(
+    *,
+    owner_id: uuid.UUID,
+    ttl_seconds: int,
+    stop_event: asyncio.Event,
+    lost_lease_event: asyncio.Event,
+) -> None:
+    """Periodically renew the lease while a collection run is active."""
+    interval_seconds = max(10, ttl_seconds // 3)
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            return
+        except TimeoutError:
+            pass
+
+        try:
+            async with get_session() as session:
+                renewed = await renew_lease(
+                    session,
+                    name=LEASE_NAME,
+                    owner_id=owner_id,
+                    ttl_seconds=ttl_seconds,
+                )
+            if not renewed:
+                logger.error("[runner] Lease renewal failed; lease may have been stolen")
+                lost_lease_event.set()
+                return
+        except Exception as exc:
+            logger.warning(f"[runner] Lease heartbeat error: {exc}")
+            lost_lease_event.set()
+            return
+
+
 # _build_sentiment_map, _enrich_sentiments_with_nlp, _build_enriched_sentiment_map
 # are now in sam.pipeline.enrichment as build_sentiment_map, enrich_sentiments_with_nlp,
 # build_enriched_sentiment_map.
@@ -219,6 +275,8 @@ async def collect_once(
 
     stats: dict[str, int | float] = {
         "titles": 0,
+        "titles_succeeded": 0,
+        "titles_failed": 0,
         "reddit_mentions_inserted": 0,
         "youtube_mentions_inserted": 0,
         "youtube_comments_inserted": 0,
@@ -259,12 +317,6 @@ async def collect_once(
         reddit_enabled = reddit_runtime if reddit_runtime is not None else settings.reddit.enabled
         yt_enabled = yt_runtime if yt_runtime is not None else settings.youtube.enabled
         bsky_enabled = bsky_runtime if bsky_runtime is not None else settings.bluesky.enabled
-
-        # Compute snapshot_time once per cycle so all titles in this run
-        # share the same snapshot bucket.  Computing per-title risks
-        # splitting titles across buckets when a cycle spans a 30-min
-        # boundary, making cross-title comparison harder.
-        snapshot_time = _snapshot_bucket(datetime.now(UTC))
 
         for t in titles:
             title_start = perf_counter()
@@ -334,7 +386,7 @@ async def collect_once(
                                         "reddit",
                                         "reddit_mentions_inserted",
                                         deduped,
-                                        reddit_result.collected_at,
+                                        _normalized_collected_at(reddit_result.collected_at),
                                     )
                                 )
                                 all_posts.extend(deduped)
@@ -394,7 +446,7 @@ async def collect_once(
                                     "youtube",
                                     "youtube_mentions_inserted",
                                     yt_result.posts,
-                                    yt_result.collected_at,
+                                    _normalized_collected_at(yt_result.collected_at),
                                 )
                             )
                             all_posts.extend(yt_result.posts)
@@ -426,7 +478,7 @@ async def collect_once(
                                             "youtube",
                                             "youtube_comments_inserted",
                                             all_comments,
-                                            yt_result.collected_at,
+                                            _normalized_collected_at(yt_result.collected_at),
                                         )
                                     )
                                     all_posts.extend(all_comments)
@@ -479,7 +531,7 @@ async def collect_once(
                                         "bluesky",
                                         "bluesky_mentions_inserted",
                                         bsky_deduped,
-                                        bluesky_result.collected_at,
+                                        _normalized_collected_at(bluesky_result.collected_at),
                                     )
                                 )
                                 all_posts.extend(bsky_deduped)
@@ -557,10 +609,15 @@ async def collect_once(
                                 logger.info(f"[runner] {t.title} {stats_key}: {inserted}")
 
                         # -- Phase 4: Metrics snapshots (B4 shared query) --------
+                        latest_collected_at = max(
+                            (batch[3] for batch in platform_batches),
+                            default=datetime.now(UTC),
+                        )
+                        title_snapshot_time = _snapshot_bucket(latest_collected_at)
                         snapshots_upserted = await compute_and_upsert_metrics_snapshots_multi(
                             session,
                             title_id=db_title.id,
-                            snapshot_time=snapshot_time,
+                            snapshot_time=title_snapshot_time,
                             window_hours_list=[1, 24],
                         )
                         stats["metrics_snapshots_upserted"] += snapshots_upserted
@@ -568,11 +625,13 @@ async def collect_once(
                 except Exception as exc:
                     logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
                     await _record_title_failure(t.title)
+                    stats["titles_failed"] += 1
                     # Continue with the next title instead of aborting the entire run.
                     continue
                 else:
                     # Title processed successfully — reset failure counter.
                     await _clear_title_failures(t.title)
+                    stats["titles_succeeded"] += 1
                 finally:
                     # D1: Per-title timing for observability.
                     title_elapsed = perf_counter() - title_start
@@ -696,6 +755,8 @@ async def _collection_job(
 ) -> None:
     lease_ttl = max(60, interval_minutes * 60 * 2)
     started = datetime.now(UTC)
+    run_id: uuid.UUID | None = None
+    run_stats: dict[str, object] = {}
 
     quota_tracker = get_quota_tracker()
 
@@ -731,8 +792,21 @@ async def _collection_job(
         run_stats = run.stats or {}
     # Session 1 commits here — lease and PipelineRun(status="running") are
     # now persisted and visible to other processes.
+    if run_id is None:
+        logger.warning("[runner] Pipeline run was not initialized; skipping cycle")
+        return
 
     # --- Run collection outside any long-held session ---
+    heartbeat_stop = asyncio.Event()
+    lease_lost = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _lease_heartbeat(
+            owner_id=owner_id,
+            ttl_seconds=lease_ttl,
+            stop_event=heartbeat_stop,
+            lost_lease_event=lease_lost,
+        )
+    )
     try:
         quota_start = quota_tracker.get_usage("youtube")
         stats = await collect_once(
@@ -746,8 +820,13 @@ async def _collection_job(
             youtube=youtube,
             bluesky=bluesky,
         )
+        if lease_lost.is_set():
+            raise RuntimeError("collector lease lost during cycle; aborting finalize")
+        run_status = _derive_run_status(stats)
+        run_error = "all titles failed during collection cycle" if run_status == "failed" else None
 
         # --- Session 2: finalize (alerts, finish run, release lease) ---
+        created_alerts: list[dict[str, Any]] = []
         async with get_session() as session:
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
             try:
@@ -797,7 +876,8 @@ async def _collection_job(
             await finish_pipeline_run(
                 session,
                 run_id=run_id,
-                status="success",
+                status=run_status,
+                error=run_error,
                 stats={
                     **run_stats,
                     **stats,
@@ -807,11 +887,19 @@ async def _collection_job(
                 },
             )
             await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
+        for alert in created_alerts:
+            with contextlib.suppress(Exception):
+                await publish_alert_event(alert)
     except Exception as e:
         logger.exception(f"[runner] collection cycle failed: {e}")
-        async with get_session() as session:
-            await finish_pipeline_run(session, run_id=run_id, status="failed", error=str(e))
-            await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
+        if run_id is not None:
+            async with get_session() as session:
+                await finish_pipeline_run(session, run_id=run_id, status="failed", error=str(e))
+                await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
+    finally:
+        heartbeat_stop.set()
+        with contextlib.suppress(Exception):
+            await heartbeat_task
 
 
 async def run_forever(
