@@ -59,8 +59,8 @@ def _post_to_dict(post: CollectedPost) -> dict[str, Any]:
 
 def _write_jsonl(path: Path, *, header: dict[str, Any], posts: list[CollectedPost]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    with path.open("w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp-{uuid.uuid4().hex}")
+    with tmp_path.open("w", encoding="utf-8") as f:
         f.write(
             json.dumps({"type": "collection", **header}, ensure_ascii=False, default=_json_default)
         )
@@ -74,6 +74,7 @@ def _write_jsonl(path: Path, *, header: dict[str, Any], posts: list[CollectedPos
                 )
             )
             f.write("\n")
+    tmp_path.replace(path)
 
 
 async def persist_collection_result(
@@ -100,11 +101,12 @@ async def persist_collection_result(
     day = collected_at.date()
     ts = collected_at.strftime("%Y%m%dT%H%M%SZ")
     title_slug = _slugify(title) or "unknown-title"
+    unique = uuid.uuid4().hex[:8]
 
     base = Path(raw_data_dir)
     # Keep things relatively stable and human-browsable.
     path = base / result.platform / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
-    filename = f"{ts}_{title_slug}.jsonl"
+    filename = f"{ts}_{title_slug}_{unique}.jsonl"
     full_path = path / filename
 
     header: dict[str, Any] = {
