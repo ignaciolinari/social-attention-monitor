@@ -85,9 +85,11 @@ jobs:
           python -m pip install -r requirements-dev.lock
           python -m pip install -e .
 
-      - name: Security audit (pip-audit)
-        continue-on-error: true
-        run: pip-audit
+      - name: Security audit (pip-audit runtime lockfile)
+        run: pip-audit -r requirements.lock
+
+      - name: Security audit (pip-audit dev lockfile)
+        run: pip-audit -r requirements-dev.lock
 
   smoke-test:
     name: End-to-End Smoke Test

@@ -70,23 +70,23 @@ test-integration:
 	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
 
 test-fast:
-	pytest tests/ -v -x --no-cov
+	$(VENV_PY) -m pytest tests/ -v -x --no-cov
 
 # Linting and formatting
 lint:
-	ruff check src/ tests/
+	$(VENV_PY) -m ruff check src/ tests/
 
 format:
-	ruff check --fix src/ tests/
-	ruff format src/ tests/
+	$(VENV_PY) -m ruff check --fix src/ tests/
+	$(VENV_PY) -m ruff format src/ tests/
 
 # Type checking
 typecheck:
 	$(VENV_PY) -m mypy src/sam/ --ignore-missing-imports
 
 ci-check: ci-deps
-	ruff check src tests
-	ruff format --check src tests
+	$(VENV_PY) -m ruff check src tests
+	$(VENV_PY) -m ruff format --check src tests
 	$(VENV_PY) -m mypy src/sam/ --ignore-missing-imports
 	$(MAKE) test-ci
 
@@ -140,7 +140,7 @@ clean:
 
 # Demo
 demo:
-	SAM_DEMO_MODE=true python -m sam.cli demo
+	SAM_DEMO_MODE=true $(VENV_PY) -m sam.cli demo
 
 # Dependency management
 lock:
@@ -148,4 +148,4 @@ lock:
 	uv pip compile pyproject.toml --all-extras -o requirements-dev.lock
 
 audit:
-	pip-audit
+	$(VENV_PY) -m pip_audit -r requirements-dev.lock
