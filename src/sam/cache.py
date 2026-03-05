@@ -38,7 +38,10 @@ def get_redis() -> redis.Redis | None:
     if _redis is None:
         with _redis_lock:
             if _redis is None:
-                _redis = redis.from_url(settings.redis.url, decode_responses=True)
+                _redis = redis.from_url(  # type: ignore[no-untyped-call,unused-ignore]
+                    settings.redis.url,
+                    decode_responses=True,
+                )
                 logger.info("[redis] client initialized")
     return _redis
 
@@ -89,6 +92,7 @@ async def cache_set_json(key: str, value: Any, *, ttl_seconds: int) -> None:
 
 _COLLECTOR_TOGGLE_PREFIX = "sam:collector:"
 _COLLECTOR_TOGGLE_TTL = 86400  # 24h — stale overrides auto-expire
+_ALERTS_CHANNEL = "sam:alerts"
 
 
 async def collector_toggle_set(platform: str, enabled: bool) -> None:
@@ -137,7 +141,10 @@ def collector_toggle_get_sync(platform: str) -> bool | None:
     if not settings.redis.url:
         return None
     try:
-        r = sync_redis.from_url(settings.redis.url, decode_responses=True)
+        r = sync_redis.from_url(  # type: ignore[no-untyped-call,unused-ignore]
+            settings.redis.url,
+            decode_responses=True,
+        )
         key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
         val = r.get(key)
         r.close()
@@ -146,3 +153,26 @@ def collector_toggle_get_sync(platform: str) -> bool | None:
         return bool(json.loads(str(val)))
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Alerts pub/sub (cross-process real-time fanout)
+# ---------------------------------------------------------------------------
+
+
+def alerts_channel() -> str:
+    """Return the Redis channel used for alert fanout."""
+    return _ALERTS_CHANNEL
+
+
+async def publish_alert_event(alert: dict[str, Any]) -> bool:
+    """Publish an alert event for API/websocket relay processes."""
+    r = get_redis()
+    if r is None:
+        return False
+    try:
+        await r.publish(_ALERTS_CHANNEL, json.dumps(alert))
+        return True
+    except Exception as exc:
+        _warn_redis_error("publish_alert_event", exc)
+        return False

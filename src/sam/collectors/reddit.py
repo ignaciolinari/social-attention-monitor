@@ -142,21 +142,40 @@ class RedditCollector(BaseCollector):
             attempt += 1
             try:
                 all_posts: list[CollectedPost] = []
+                subreddit_failures = 0
                 for subreddit in target_subreddits:
-                    posts = await asyncio.to_thread(
+                    posts, had_error = await asyncio.to_thread(
                         self._collect_subreddit_sync,
                         subreddit,
                         query,
                         limit,
                         time_filter,
                     )
+                    if had_error:
+                        subreddit_failures += 1
                     all_posts.extend(posts)
+
+                total_subreddits = len(target_subreddits)
+                all_failed = total_subreddits > 0 and subreddit_failures >= total_subreddits
+                partial_failures = 0 < subreddit_failures < total_subreddits
+                error: str | None = None
+                if all_failed:
+                    error = (
+                        "all subreddit collection attempts failed "
+                        f"({subreddit_failures}/{total_subreddits})"
+                    )
+                elif partial_failures:
+                    error = (
+                        "partial subreddit collection failures "
+                        f"({subreddit_failures}/{total_subreddits})"
+                    )
 
                 return CollectionResult(
                     platform=self.platform_name,
                     posts=all_posts,
                     collected_at=datetime.now(UTC),
-                    success=True,
+                    success=not all_failed,
+                    error=error,
                     rate_limit_remaining=self._get_rate_limit(),
                 )
 
@@ -203,7 +222,7 @@ class RedditCollector(BaseCollector):
         query: str | None,
         limit: int,
         time_filter: str,
-    ) -> list[CollectedPost]:
+    ) -> tuple[list[CollectedPost], bool]:
         """Collect from a single subreddit (sync)."""
         collected_posts: list[CollectedPost] = []
         # Grab a local reference so that a concurrent close() setting
@@ -211,7 +230,7 @@ class RedditCollector(BaseCollector):
         client = self._client
         if client is None:
             logger.warning("[reddit] Client is None in _collect_subreddit_sync, skipping")
-            return collected_posts
+            return collected_posts, True
         try:
             subreddit = client.subreddit(subreddit_name)
 
@@ -240,7 +259,7 @@ class RedditCollector(BaseCollector):
                 collected_posts.append(post)
 
             logger.debug(f"[reddit] Collected {len(collected_posts)} posts from r/{subreddit_name}")
-            return collected_posts
+            return collected_posts, False
 
         except prawcore.exceptions.TooManyRequests as e:
             # Re-raise to be caught by the main retry loop
@@ -248,7 +267,7 @@ class RedditCollector(BaseCollector):
         except Exception as e:
             # Log individual subreddit failures but don't fail the whole batch
             logger.warning(f"[reddit] Error collecting from r/{subreddit_name}: {e}")
-            return []
+            return [], True
 
     def _parse_submission(self, submission: Any, subreddit: str) -> CollectedPost:
         """Parse a PRAW submission into a CollectedPost."""

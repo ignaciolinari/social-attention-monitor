@@ -35,6 +35,15 @@ class HealthResponse(BaseModel):
     redis_ok: bool
 
 
+class ReadinessResponse(BaseModel):
+    """Readiness probe response."""
+
+    status: str
+    timestamp: str
+    database_ok: bool
+    redis_ok: bool
+
+
 class PipelineRunInfo(BaseModel):
     """Pipeline run information."""
 

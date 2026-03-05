@@ -79,6 +79,7 @@ from sam.api.schemas import (  # noqa: F401
     PipelineRunInfo,
     PipelineRunsResponse,
     PipelineSentimentStats,
+    ReadinessResponse,
     TitleResponse,
     TitlesResponse,
     TrendingMetricsItem,
@@ -108,10 +109,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     install_sighup_handler()
     await init_collectors()
     await ws_manager.start_cleanup_task(settings.ws_cleanup_interval_seconds)
+    await ws_manager.start_alert_relay_task()
 
     yield
 
     logger.info("[api] Shutting down...")
+    await ws_manager.stop_alert_relay_task()
     await ws_manager.stop_cleanup_task()
     await close_collectors()
 

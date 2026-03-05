@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 from fastapi import WebSocket
 from loguru import logger
 from starlette.websockets import WebSocketState
+
+import sam.cache as cache_utils
 
 
 class ConnectionManager:
@@ -29,6 +32,7 @@ class ConnectionManager:
         self.subscriptions: dict[str, set[str]] = defaultdict(set)  # topic -> connection_ids
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._alert_relay_task: asyncio.Task[None] | None = None
 
     async def connect(self, websocket: WebSocket, connection_id: str) -> None:
         """Accept a new WebSocket connection."""
@@ -126,6 +130,77 @@ class ConnectionManager:
                 await self._cleanup_task
             self._cleanup_task = None
             logger.info("[ws] Stopped cleanup task")
+
+    async def start_alert_relay_task(self) -> None:
+        """Start Redis alert relay for cross-process WebSocket fanout."""
+        if self._alert_relay_task is not None:
+            return
+
+        async def _relay_loop() -> None:
+            channel = cache_utils.alerts_channel()
+            while True:
+                pubsub: Any | None = None
+                try:
+                    redis = cache_utils.get_redis()
+                    if redis is None:
+                        await asyncio.sleep(2.0)
+                        continue
+
+                    pubsub = redis.pubsub()
+                    await pubsub.subscribe(channel)
+                    logger.info(f"[ws] Started Redis alert relay on channel '{channel}'")
+
+                    while True:
+                        message = await pubsub.get_message(
+                            ignore_subscribe_messages=True,
+                            timeout=1.0,
+                        )
+                        if not message:
+                            await asyncio.sleep(0.05)
+                            continue
+
+                        if message.get("type") != "message":
+                            continue
+
+                        payload = message.get("data")
+                        if isinstance(payload, (bytes, bytearray)):
+                            payload = payload.decode("utf-8", errors="ignore")
+                        if not isinstance(payload, str):
+                            continue
+
+                        alert: Any = json.loads(payload)
+                        if not isinstance(alert, dict):
+                            continue
+                        await self.broadcast(
+                            {
+                                "type": "alert",
+                                "data": alert,
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            },
+                            topic="alerts",
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"[ws] Redis alert relay error: {exc}")
+                    await asyncio.sleep(2.0)
+                finally:
+                    if pubsub is not None:
+                        with contextlib.suppress(Exception):
+                            await pubsub.unsubscribe(channel)
+                            await pubsub.aclose()
+
+        self._alert_relay_task = asyncio.create_task(_relay_loop())
+
+    async def stop_alert_relay_task(self) -> None:
+        """Stop Redis alert relay task."""
+        if self._alert_relay_task is None:
+            return
+        self._alert_relay_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._alert_relay_task
+        self._alert_relay_task = None
+        logger.info("[ws] Stopped Redis alert relay")
 
     async def _cleanup_dead_connections(self) -> None:
         """Remove connections that are no longer alive."""

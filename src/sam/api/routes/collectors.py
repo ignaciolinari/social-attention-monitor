@@ -55,7 +55,7 @@ async def toggle_collector(
             ),
         )
 
-    deps.collector_enabled_overrides[platform] = enabled
+    deps.set_collector_override(platform, enabled)
     from sam.cache import collector_toggle_set
 
     await collector_toggle_set(platform, enabled)

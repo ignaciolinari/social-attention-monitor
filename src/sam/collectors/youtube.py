@@ -195,6 +195,10 @@ class YouTubeCollector(BaseCollector):
             )
 
             while len(posts) < limit:
+                quota = get_quota_tracker()
+                if not quota.youtube_has_budget(cost=YOUTUBE_SEARCH_COST):
+                    logger.warning("[youtube] Quota guard blocked search.list call")
+                    break
                 search_params = {
                     "part": "snippet",
                     "q": search_query,
@@ -226,6 +230,9 @@ class YouTubeCollector(BaseCollector):
                             break
                         continue
 
+                if not quota.youtube_has_budget(cost=YOUTUBE_VIDEOS_COST):
+                    logger.warning("[youtube] Quota guard blocked videos.list call")
+                    break
                 stats_data = await self._get_json(
                     "/videos",
                     params={
@@ -381,6 +388,12 @@ class YouTubeCollector(BaseCollector):
 
         try:
             while len(comments) < limit:
+                quota = get_quota_tracker()
+                if not quota.youtube_has_budget(cost=YOUTUBE_COMMENT_THREADS_COST):
+                    logger.warning(
+                        f"[youtube] Quota guard blocked commentThreads.list for {video_id}"
+                    )
+                    break
                 params: dict[str, Any] = {
                     "part": "snippet",
                     "videoId": video_id,

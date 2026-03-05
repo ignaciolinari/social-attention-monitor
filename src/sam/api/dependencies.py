@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -28,7 +29,7 @@ from sam.alerts.manager import (
 )
 from sam.api.schemas import DbTitleResponse, MentionResponse
 from sam.cache import cache_get_json, cache_set_json, close_redis, get_redis
-from sam.collectors.base import BaseCollector, CollectedPost
+from sam.collectors.base import BaseCollector, CollectedPost, collected_post_key
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
 from sam.collectors.tmdb import TMDBCollector
@@ -120,7 +121,12 @@ async def close_collectors() -> None:
 # Runtime overrides for collector enabled state.
 # Keys: "reddit", "youtube", "bluesky".  Values override the env-var defaults.
 # In-memory cache is updated on toggle; Redis is used for cross-process sharing.
-collector_enabled_overrides: dict[str, bool] = {}
+_COLLECTOR_OVERRIDE_TTL_SECONDS = 86_400
+collector_enabled_overrides: dict[str, tuple[bool, float]] = {}
+
+# Short-lived refresh dedupe lock so repeated stale-page views do not spawn
+# overlapping background refresh tasks for the same (title, platform) pair.
+_REFRESH_LOCK_TTL_SECONDS = 120
 
 TOGGLEABLE_PLATFORMS = {"youtube", "bluesky"}
 
@@ -144,16 +150,30 @@ def api_keys_configured(platform: str) -> bool:
 
 
 async def is_collector_enabled(platform: str) -> bool:
-    """Check if a collector is enabled (in-memory override > Redis > env default)."""
-    if platform in collector_enabled_overrides:
-        return collector_enabled_overrides[platform]
+    """Check if a collector is enabled (Redis > fresh in-memory > env default)."""
     from sam.cache import collector_toggle_get
 
     redis_val = await collector_toggle_get(platform)
     if redis_val is not None:
         return redis_val
+
+    override = collector_enabled_overrides.get(platform)
+    if override is not None:
+        enabled, expires_at = override
+        if time.monotonic() < expires_at:
+            return enabled
+        collector_enabled_overrides.pop(platform, None)
+
     s = get_settings()
     return getattr(getattr(s, platform, None), "enabled", False)
+
+
+def set_collector_override(platform: str, enabled: bool) -> None:
+    """Set a local fallback override (bounded TTL) for collector state."""
+    collector_enabled_overrides[platform] = (
+        enabled,
+        time.monotonic() + _COLLECTOR_OVERRIDE_TTL_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +336,9 @@ async def collect_mentions_live(
     title: str,
     limit: int,
 ) -> tuple[list[MentionResponse], dict[str, dict[str, Any]], list[Any], datetime]:
+    if platform in TOGGLEABLE_PLATFORMS and not await is_collector_enabled(platform):
+        raise HTTPException(status_code=503, detail=f"{platform} collector is currently disabled")
+
     collector: BaseCollector | None = None
     if platform == "reddit":
         collector = reddit_collector
@@ -363,7 +386,10 @@ async def collect_mentions_live(
 
     mentions: list[MentionResponse] = []
     for post in posts:
-        sentiment_for_mention = sentiment_by_source_id.get(post.source_id)
+        sentiment_for_mention = sentiment_by_source_id.get(collected_post_key(post))
+        if sentiment_for_mention is None:
+            # Backward compatibility with legacy source_id-only keys.
+            sentiment_for_mention = sentiment_by_source_id.get(post.source_id)
         is_truncated = len(post.content) > 500
         mentions.append(
             MentionResponse(
@@ -390,6 +416,12 @@ async def refresh_mentions_background(
     platform: str,
     limit: int,
 ) -> None:
+    if not await _acquire_refresh_lock(title_id=title_id, platform=platform):
+        logger.debug(
+            f"[api] {platform} background refresh already in-flight for title_id={title_id}"
+        )
+        return
+
     try:
         _mentions, sentiment_by_source_id, posts, collected_at = await collect_mentions_live(
             platform=platform,
@@ -410,3 +442,16 @@ async def refresh_mentions_background(
         logger.warning(f"[api] {platform} background refresh skipped: {exc.detail}")
     except Exception as exc:
         logger.exception(f"[api] {platform} background refresh failed: {exc}")
+
+
+async def _acquire_refresh_lock(*, title_id: UUID, platform: str) -> bool:
+    """Acquire best-effort refresh lock; fail-open when Redis is unavailable."""
+    r = get_redis()
+    if r is None:
+        return True
+    key = f"sam:mentions-refresh:{title_id}:{platform}"
+    try:
+        acquired = await r.set(key, "1", ex=_REFRESH_LOCK_TTL_SECONDS, nx=True)
+        return bool(acquired)
+    except Exception:
+        return True

@@ -298,11 +298,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS"),
         description="Comma-separated CORS allowlist (use '*' only for development)",
     )
+    trusted_proxies: str = Field(
+        default="",
+        validation_alias=AliasChoices("TRUSTED_PROXIES", "SAM_TRUSTED_PROXIES"),
+        description=(
+            "Comma-separated proxy IPs allowed to supply X-Forwarded-For. "
+            "Leave empty unless running behind a trusted reverse proxy."
+        ),
+    )
 
     @property
     def cors_allow_origins_list(self) -> list[str]:
         """Parse CORS origins into a list."""
         return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_proxies_list(self) -> list[str]:
+        """Parse trusted proxy addresses into a list."""
+        return [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
 
     # API Server
     api_host: str = Field(default="0.0.0.0", description="API server host")

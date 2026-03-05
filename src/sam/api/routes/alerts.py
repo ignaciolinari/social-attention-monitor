@@ -16,6 +16,7 @@ from sam.api.schemas import (
     AlertsListResponse,
 )
 from sam.api.websocket import broadcast_alert
+from sam.cache import publish_alert_event
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -127,7 +128,9 @@ async def run_alert_detection(
 
     # Broadcast after commit (session context exited)
     for alert in created_alerts:
-        await broadcast_alert(alert)
+        published = await publish_alert_event(alert)
+        if not published:
+            await broadcast_alert(alert)
 
     return {
         "anomalies_detected": detected,
