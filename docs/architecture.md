@@ -41,7 +41,7 @@ Data flows from collectors through a sequence of processing modules before stora
 3. **Sentiment Analysis**:
    - Primary: VADER (fast, rules-based).
    - Secondary: RoBERTa (transformer-based, deep contextual understanding).
-   - Translation: Non-English text can optionally be translated via `deep-translator` before sentiment scoring.
+   - Translation: Non-English text can optionally be translated to English via SAM's built-in translation client before sentiment scoring.
 4. **Advanced NLP (Optional)**:
    - Sarcasm Detection
    - Emotion Classification (Joy, Anger, Sadness, etc.)

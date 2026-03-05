@@ -64,7 +64,6 @@ dependencies = [
     "loguru>=0.7.0",                  # Better logging
     "tenacity>=8.2.0",                # Retry logic
     "arrow>=1.3.0",                   # Date/time handling
-    "deep-translator>=1.11.0",        # Translation
     "langdetect>=1.0.9",              # Language detection for translation gating
     "rapidfuzz>=3.0",                 # Fast fuzzy string matching
     "yake>=0.4.8",                    # Keyword extraction
@@ -161,7 +160,6 @@ module = [
     "plotly.*",
     "streamlit.*",
     "streamlit_autorefresh",
-    "deep_translator",
     "langdetect",
     "scipy.special",
     "rapidfuzz.*",

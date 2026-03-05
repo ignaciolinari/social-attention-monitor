@@ -1,4 +1,4 @@
-"""Translation utilities backed by deep-translator."""
+"""Translation utilities backed by a lightweight Google Translate client."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from threading import Lock
 
-from deep_translator import GoogleTranslator
+import httpx
 from loguru import logger
 
 try:
@@ -25,6 +25,7 @@ _NON_LATIN_SCRIPT_RE = re.compile(
 )
 _URL_RE = re.compile(r"https?://\S+")
 _MULTISPACE_RE = re.compile(r"\s+")
+_LANG_RE = re.compile(r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
 
 _ENGLISH_CONFIDENCE_THRESHOLD = 0.80
 _MIN_DETECTION_CHARS = 20
@@ -37,12 +38,58 @@ _TRANSLATE_TIMEOUT_SECONDS = 10
 # the caller is already inside a thread pool.
 _translate_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="translate")
 
+
+class GoogleTranslator:
+    """Minimal translator with the interface expected by this module."""
+
+    _ENDPOINT = "https://translate.googleapis.com/translate_a/single"
+
+    def __init__(self, source: str = "auto", target: str = "en") -> None:
+        if source != "auto" and not _LANG_RE.match(source):
+            raise ValueError(f"Unsupported source language: {source}")
+        if not _LANG_RE.match(target):
+            raise ValueError(f"Unsupported target language: {target}")
+        self.source = source
+        self.target = target
+
+    def translate(self, text: str) -> str | None:
+        if not text:
+            return text
+        response = httpx.get(
+            self._ENDPOINT,
+            params={
+                "client": "gtx",
+                "sl": self.source,
+                "tl": self.target,
+                "dt": "t",
+                "q": text,
+            },
+            timeout=_TRANSLATE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        if not isinstance(payload, list) or not payload:
+            return text
+        segments = payload[0]
+        if not isinstance(segments, list):
+            return text
+
+        translated_parts: list[str] = []
+        for seg in segments:
+            if isinstance(seg, list) and seg and isinstance(seg[0], str):
+                translated_parts.append(seg[0])
+
+        translated = "".join(translated_parts).strip()
+        return translated or text
+
+
 # Cache translator instances per source language
 _translators: dict[str, GoogleTranslator] = {}
 _translators_lock = Lock()
 # Per-language locks so translations for different languages can run in
 # parallel while still serializing calls for the same shared translator
-# instance (deep-translator is not documented as thread-safe).
+# instance.
 _translate_locks: dict[str, Lock] = {}
 _translate_locks_guard = Lock()
 
@@ -76,7 +123,7 @@ def get_translator(source: str = "auto") -> GoogleTranslator:
             try:
                 _translators[source] = GoogleTranslator(source=source, target="en")
             except Exception:
-                # Fallback to auto if the language is unsupported by deep-translator
+                # Fallback to auto if source language is unsupported.
                 if "auto" not in _translators:
                     _translators["auto"] = GoogleTranslator(source="auto", target="en")
                 return _translators["auto"]
@@ -136,8 +183,8 @@ def detect_text_language(text: str) -> str:
     if top_lang == "en" and top_prob >= _ENGLISH_CONFIDENCE_THRESHOLD:
         return "en"
 
-    # For non-Latin scripts, we ignore the confidence threshold, because we know it's not English
-    # and deep-translator usually handles it well.
+    # For non-Latin scripts, ignore confidence threshold because they are
+    # clearly non-English and our translation client handles them reliably.
     if _NON_LATIN_SCRIPT_RE.search(normalized):
         return top_lang
 
@@ -183,9 +230,7 @@ def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[s
 
     try:
         translator = get_translator(source=source_lang)
-        # deep-translator handles chunks automatically in recent versions,
-        # but basic constraints apply (5000 chars).
-        # For social media, texts are usually short enough.
+        # Keep provider requests bounded by a practical max length.
         if len(text) > 4500:
             logger.warning(
                 "Translation input truncated for provider limit "
@@ -195,14 +240,13 @@ def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[s
             )
         truncated = text[:4500]  # Safety truncate
 
-        # deep-translator does not document thread safety for shared instances.
         # Use per-language locks so translations for different source languages
         # can proceed in parallel while serializing calls for the same translator.
         call_lock = _get_translate_lock(source_lang)
 
         def _do_translate() -> str | None:
             with call_lock:
-                return translator.translate(truncated)  # type: ignore[no-any-return]
+                return translator.translate(truncated)
 
         future = _translate_executor.submit(_do_translate)
         result: str | None = future.result(timeout=_TRANSLATE_TIMEOUT_SECONDS)

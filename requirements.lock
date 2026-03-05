@@ -27,8 +27,6 @@ attrs==25.4.0
     # via
     #   jsonschema
     #   referencing
-beautifulsoup4==4.14.3
-    # via deep-translator
 blinker==1.9.0
     # via streamlit
 cachetools==6.2.6
@@ -57,8 +55,6 @@ cryptography==46.0.5
     #   google-auth
 cycler==0.12.1
     # via matplotlib
-deep-translator==1.11.4
-    # via social-attention-monitor (pyproject.toml)
 dnspython==2.8.0
     # via atproto
 fastapi==0.134.0
@@ -236,7 +232,6 @@ regex==2026.2.28
     #   segtok
 requests==2.32.5
     # via
-    #   deep-translator
     #   google-api-core
     #   prawcore
     #   streamlit
@@ -256,8 +251,6 @@ six==1.17.0
     #   python-dateutil
 smmap==5.0.2
     # via gitdb
-soupsieve==2.8.3
-    # via beautifulsoup4
 sqlalchemy==2.0.47
     # via
     #   social-attention-monitor (pyproject.toml)
@@ -288,7 +281,6 @@ typing-extensions==4.15.0
     #   altair
     #   anyio
     #   atproto
-    #   beautifulsoup4
     #   fastapi
     #   pydantic
     #   pydantic-core

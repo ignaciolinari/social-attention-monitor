@@ -25,7 +25,7 @@ SAM doesn't just count mentions; it attempts to understand them through a multi-
 - **RoBERTa (Transformer-Based)**: A deep-learning model from Hugging Face that understands complex context and nuance better than VADER. SAM can use either, or *both* simultaneously, falling back to VADER if RoBERTa fails to initialize.
 
 ### Advanced Capabilities
-- **Translation (`deep-translator`)**: Optional pipeline step that detects non-English text and translates it to English *before* scoring, ensuring RoBERTa and VADER maintain high accuracy globally. Includes per-language locks, a configurable timeout (`_TRANSLATE_TIMEOUT_SECONDS`), and `ThreadPoolExecutor`-based concurrency for throughput.
+- **Translation (built-in client)**: Optional pipeline step that detects non-English text and translates it to English *before* scoring, ensuring RoBERTa and VADER maintain high accuracy globally. Includes per-language locks, a configurable timeout (`_TRANSLATE_TIMEOUT_SECONDS`), and `ThreadPoolExecutor`-based concurrency for throughput.
 - **Emotion Classification**: Maps text into discrete categories (e.g., Joy, Anger, Sadness, Surprise).
 - **Sarcasm Detection**: Identifies potentially sarcastic comments that might otherwise skew the core sentiment score.
 - **Aspect-Based Sentiment** *(optional)*: When `SAM_ENABLE_ASPECT_SENTIMENT=true`, long-form content (>100 chars) is analyzed for per-aspect sentiment (e.g., "acting", "plot", "visuals"), stored in the sentiment JSONB payload.
