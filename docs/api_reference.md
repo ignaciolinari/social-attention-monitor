@@ -14,6 +14,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/health` | Basic system liveness, dependency states, and toggle states. |
+| `GET` | `/ready` | Readiness probe (returns 503 when required dependencies are unavailable). |
 | `GET` | `/api/v1/pipeline/health` | Comprehensive operational stats (data freshness, mention counts in last 24h, latest runs). |
 
 ### 2. Collectors
@@ -44,7 +45,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 |--------|----------|-------------|
 | `GET` | `/api/v1/alerts` | Lists recent alerts (acknowledged and unacknowledged). Filters: `limit`, `offset`, `title_id`, `severity`, `hours`. |
 | `GET` | `/api/v1/alerts/counts` | Summary counts of alerts grouped by severity. |
-| `POST`| `/api/v1/alerts/{alert_id}/acknowledge`| Marks a specific alert as acknowledged, removing it from active views. |
+| `POST`| `/api/v1/alerts/{alert_id}/acknowledge`| Marks a specific alert as acknowledged. |
 | `POST`| `/api/v1/alerts/run-detection`| Manually trigger anomaly detection run. |
 
 ### 6. Pipeline & WebSocket Status
@@ -61,7 +62,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 
 ## WebSockets
 
-Real-time anomalies and metrics are pushed to connected clients.
+Real-time anomalies and metrics are pushed to connected clients. Alerts are relayed through Redis pub/sub so scheduler-generated alerts are delivered to API WebSocket clients.
 
 **Endpoint**: `ws://localhost:8000/ws`
 
@@ -85,8 +86,8 @@ ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'connected') {
         console.log('Subscribed to:', data.subscribed);  // default: ["all"]
-    } else if (data.topic === 'alerts') {
-        console.log("New Alert!", data.payload);
+    } else if (data.type === 'alert') {
+        console.log("New Alert!", data.data);
     }
 };
 // Subscribe to alerts only
@@ -112,9 +113,10 @@ ws.send(JSON.stringify({action: 'subscribe', topic: 'alerts'}));
 | `POST` | `/api/v1/alerts/run-detection` | Admin action |
 | `POST` | `/api/v1/alerts/{id}/acknowledge` | Alert mutation |
 | `GET` | `/api/v1/sentiment/analyze` | Expensive NLP endpoint |
+| `GET` | `/health?external=true` | External dependency probes |
 | `PUT` / `DELETE` | Any `/api/*` path | Mutation operations |
 
-Unprotected endpoints (other GET requests, health checks, metrics) remain publicly accessible.
+Unprotected endpoints (other GET requests, basic health checks, metrics) remain publicly accessible.
 
 ---
 
@@ -129,7 +131,7 @@ Endpoints return the following standard headers:
 - `Retry-After`: Seconds to wait before retrying (only present if 429 Too Many Requests is triggered).
 
 > [!NOTE]
-> The following endpoints are excluded from rate limiting: `/health`, `/api/v1/pipeline/health`, `/metrics`.
+> The following endpoints are excluded from rate limiting: `/health` (without `external=true`), `/ready`, `/api/v1/pipeline/health`, `/metrics`.
 
 ---
 

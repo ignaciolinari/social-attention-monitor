@@ -183,7 +183,9 @@ class SentimentAnalyzer:
 
         logger.info(f"[sentiment] Loading RoBERTa model: {self.ROBERTA_MODEL}")
         try:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.ROBERTA_MODEL)
+            self._tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call,unused-ignore]
+                self.ROBERTA_MODEL
+            )
             self._roberta = AutoModelForSequenceClassification.from_pretrained(self.ROBERTA_MODEL)
             self._roberta.eval()
             logger.info("[sentiment] RoBERTa model loaded successfully")

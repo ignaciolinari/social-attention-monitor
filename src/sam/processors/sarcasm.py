@@ -40,7 +40,9 @@ class SarcasmDetector:
 
         try:
             logger.info(f"[sarcasm] Loading model: {SARCASM_MODEL}")
-            self._tokenizer = AutoTokenizer.from_pretrained(SARCASM_MODEL)
+            self._tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call,unused-ignore]
+                SARCASM_MODEL
+            )
             self._model = AutoModelForSequenceClassification.from_pretrained(SARCASM_MODEL)
             self._model.eval()
             self._available = True

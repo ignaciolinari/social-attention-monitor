@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from dashboard.api_client import get_json
+from dashboard.api_client import get_json, post_json
 from dashboard.pages import PageContext
 
 
@@ -48,6 +48,7 @@ def render(ctx: PageContext) -> None:
         ["All", "critical", "warning", "info"],
         key="alert_severity_filter",
     )
+    show_acknowledged = st.toggle("Show acknowledged alerts", value=False)
 
     try:
         params: dict[str, Any] = {"hours": ctx.hours, "limit": 50}
@@ -56,6 +57,8 @@ def render(ctx: PageContext) -> None:
 
         alerts_data = get_json("/api/v1/alerts", params=params)
         alerts = alerts_data.get("alerts", [])
+        if not show_acknowledged:
+            alerts = [a for a in alerts if not a.get("acknowledged_at")]
 
         if not alerts:
             st.info("No alerts in the selected time range. 🎉")
@@ -90,6 +93,18 @@ def render(ctx: PageContext) -> None:
                         details = alert.get("details", {})
                         if details:
                             st.json(details)
+                        if (not alert.get("acknowledged_at")) and st.button(
+                            "Acknowledge",
+                            key=f"ack_{alert.get('id')}",
+                            type="secondary",
+                            use_container_width=True,
+                        ):
+                            try:
+                                post_json(f"/api/v1/alerts/{alert.get('id')}/acknowledge")
+                                get_json.clear()
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Failed to acknowledge alert: {exc}")
 
     except Exception as e:
         st.error(f"Failed to load alerts: {e}")
@@ -137,9 +152,12 @@ def _render_pipeline_health(_ctx: PageContext) -> None:
         if runs:
             st.markdown("**Latest Pipeline Runs:**")
             for run in runs[:5]:
-                status_icon = {"success": "✅", "failed": "❌", "running": "🔄"}.get(
-                    run.get("status"), "⚪"
-                )
+                status_icon = {
+                    "success": "✅",
+                    "degraded": "⚠️",
+                    "failed": "❌",
+                    "running": "🔄",
+                }.get(run.get("status"), "⚪")
                 st.caption(f"  • {run.get('job_name')}: {status_icon} {run.get('status')}")
 
         sentiment_stats = pipeline.get("sentiment_stats") or {}

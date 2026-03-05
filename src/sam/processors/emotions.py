@@ -42,7 +42,9 @@ class EmotionDetector:
 
         try:
             logger.info(f"[emotions] Loading model: {EMOTION_MODEL}")
-            self._tokenizer = AutoTokenizer.from_pretrained(EMOTION_MODEL)
+            self._tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call,unused-ignore]
+                EMOTION_MODEL
+            )
             self._model = AutoModelForSequenceClassification.from_pretrained(EMOTION_MODEL)
             self._model.eval()
             self._available = True
