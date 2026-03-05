@@ -11,11 +11,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sam.collectors.base import CollectedPost
+from sam.collectors.base import CollectedPost, post_identity_key
 from sam.collectors.tmdb import TMDBTitle
 from sam.storage.models import Lease, Mention, MetricsSnapshot, PipelineRun, Title
 
@@ -68,13 +68,21 @@ async def insert_mentions(
     sentiment_by_source_id: dict[str, dict[str, Any]] | None = None,
     collected_at: datetime | None = None,
 ) -> int:
-    """Insert Mention rows (ignore duplicates). Returns inserted row count (best-effort)."""
+    """Insert Mention rows (ignore duplicates). Returns inserted row count (best-effort).
+
+    ``sentiment_by_source_id`` supports both the legacy ``source_id`` key and the
+    newer composite key ``platform:source_type:source_id``.
+    """
     sentiment_by_source_id = sentiment_by_source_id or {}
 
     rows: list[dict[str, Any]] = []
     collected_at_value = collected_at or datetime.now(UTC)
     for post in posts:
-        sentiment = sentiment_by_source_id.get(post.source_id)
+        sentiment_key = post_identity_key(platform, post.source_type, post.source_id)
+        sentiment = sentiment_by_source_id.get(sentiment_key)
+        if sentiment is None:
+            # Backward compatibility with existing payload shape.
+            sentiment = sentiment_by_source_id.get(post.source_id)
         rows.append(
             {
                 "title_id": title_id,
@@ -501,6 +509,30 @@ async def acquire_lease(
         return False
 
     # For PostgreSQL, rowcount should be 1 if inserted/updated, 0 otherwise.
+    rowcount = getattr(result, "rowcount", 0) or 0
+    return int(rowcount) > 0
+
+
+async def renew_lease(
+    session: AsyncSession,
+    *,
+    name: str,
+    owner_id: uuid.UUID,
+    ttl_seconds: int,
+) -> bool:
+    """Renew an existing lease for the same owner.
+
+    Returns ``True`` when renewed, ``False`` if the lease no longer belongs to
+    the owner or has already expired.
+    """
+    db_now = func.now()
+    db_expires = func.now() + timedelta(seconds=ttl_seconds)
+    stmt = (
+        update(Lease)
+        .where(Lease.name == name, Lease.owner_id == owner_id, Lease.expires_at >= func.now())
+        .values(acquired_at=db_now, expires_at=db_expires, updated_at=db_now)
+    )
+    result = await session.execute(stmt)
     rowcount = getattr(result, "rowcount", 0) or 0
     return int(rowcount) > 0
 

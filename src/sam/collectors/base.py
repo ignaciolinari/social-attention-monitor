@@ -28,6 +28,23 @@ class CollectedPost:
     raw_data: dict[str, Any] = field(default_factory=dict)
 
 
+def post_identity_key(platform: str, source_type: str, source_id: str) -> str:
+    """Build a stable key for a collected item identity."""
+    return f"{platform}:{source_type}:{source_id}"
+
+
+def collected_post_key(post: CollectedPost) -> str:
+    """Build identity key for a :class:`CollectedPost`."""
+    source_id = str(post.source_id)
+    platform = getattr(post, "platform", "")
+    source_type = getattr(post, "source_type", "")
+    if not isinstance(platform, str) or not platform:
+        return source_id
+    if not isinstance(source_type, str) or not source_type:
+        return source_id
+    return post_identity_key(platform, source_type, source_id)
+
+
 @dataclass
 class CollectionResult:
     """Result of a collection operation."""

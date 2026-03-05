@@ -8,12 +8,13 @@ scheduler runner and the API import from here — no duplicated logic.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from time import perf_counter
 from typing import Any, cast
 
 from loguru import logger
 
-from sam.collectors.base import CollectedPost
+from sam.collectors.base import CollectedPost, collected_post_key
 from sam.processors.sentiment import (
     SentimentResult,
     analyze_sentiment_batch_with_translation,
@@ -99,10 +100,20 @@ def build_sentiment_map(
     posts: list[CollectedPost],
     sentiments: list[SentimentResult],
 ) -> dict[str, dict[str, Any]]:
-    """Build a ``source_id -> sentiment`` dict from parallel lists."""
+    """Build a sentiment map from parallel lists.
+
+    Uses legacy ``source_id`` keys when unique. If ``source_id`` collisions are
+    present in the batch, uses ``platform:source_type:source_id`` keys for the
+    colliding entries.
+    """
     result: dict[str, dict[str, Any]] = {}
+    source_id_counts = Counter(post.source_id for post in posts)
     for post, s in zip(posts, sentiments, strict=True):
-        result[post.source_id] = s.to_dict()
+        payload = s.to_dict()
+        if source_id_counts[post.source_id] > 1:
+            result[collected_post_key(post)] = payload
+        else:
+            result[post.source_id] = payload
     return result
 
 

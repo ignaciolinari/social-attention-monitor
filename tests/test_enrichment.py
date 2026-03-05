@@ -138,6 +138,19 @@ class TestBuildSentimentMap:
         with pytest.raises(ValueError):
             build_sentiment_map(posts, sentiments)
 
+    def test_uses_composite_keys_when_source_ids_collide(self) -> None:
+        post_a = _make_post("shared")
+        post_b = _make_post("shared")
+        post_a.platform = "reddit"
+        post_b.platform = "youtube"
+        sentiments = [_make_sentiment("positive", 0.3), _make_sentiment("negative", -0.4)]
+
+        result = build_sentiment_map([post_a, post_b], sentiments)
+
+        assert "shared" not in result
+        assert result["reddit:post:shared"]["label"] == "positive"
+        assert result["youtube:post:shared"]["label"] == "negative"
+
 
 # ---------------------------------------------------------------------------
 # analyze_texts_for_sentiment
