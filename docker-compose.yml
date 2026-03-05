@@ -43,6 +43,17 @@ services:
     command: ["uvicorn", "sam.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
     depends_on:
       postgres:
@@ -60,6 +71,11 @@ services:
       DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       REDIS_URL: redis://redis:6379/0
     command: ["python", "-m", "sam.scheduler.runner"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
     depends_on:
       postgres:
@@ -78,6 +94,17 @@ services:
     command: ["streamlit", "run", "src/dashboard/app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
     ports:
       - "8501:8501"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
     depends_on:
       api:

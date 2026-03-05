@@ -288,7 +288,7 @@ class Settings(BaseSettings):
     # Demo mode
     demo_mode: bool = Field(
         default=True,
-        validation_alias=AliasChoices("DEMO_MODE", "SAM_DEMO_MODE"),
+        validation_alias=AliasChoices("SAM_DEMO_MODE", "DEMO_MODE"),
         description="Use demo/mock data instead of live APIs",
     )
 

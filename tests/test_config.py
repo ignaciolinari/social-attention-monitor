@@ -18,6 +18,25 @@ def test_demo_mode_alias_sam_demo_mode() -> None:
             os.environ["SAM_DEMO_MODE"] = old
 
 
+def test_demo_mode_alias_prefers_sam_demo_mode_when_both_present() -> None:
+    old_sam = os.environ.get("SAM_DEMO_MODE")
+    old_demo = os.environ.get("DEMO_MODE")
+    try:
+        os.environ["DEMO_MODE"] = "false"
+        os.environ["SAM_DEMO_MODE"] = "true"
+        s = Settings()
+        assert s.demo_mode is True
+    finally:
+        if old_sam is None:
+            os.environ.pop("SAM_DEMO_MODE", None)
+        else:
+            os.environ["SAM_DEMO_MODE"] = old_sam
+        if old_demo is None:
+            os.environ.pop("DEMO_MODE", None)
+        else:
+            os.environ["DEMO_MODE"] = old_demo
+
+
 def test_cors_allow_origins_list() -> None:
     old = os.environ.get("CORS_ALLOW_ORIGINS")
     try:

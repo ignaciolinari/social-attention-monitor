@@ -173,10 +173,15 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
             assert title_count >= 1, "No titles in DB after collect_once"
 
             # -- Verify YouTube mentions --
-            yt_mentions = (
+            yt_video_mentions = (
                 (
                     await session.execute(
-                        select(Mention).where(Mention.platform == "youtube").limit(20)
+                        select(Mention)
+                        .where(
+                            Mention.platform == "youtube",
+                            Mention.source_type == "video",
+                        )
+                        .limit(20)
                     )
                 )
                 .scalars()
@@ -184,12 +189,15 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
             )
 
             if stats["youtube_mentions_inserted"] > 0:
-                assert len(yt_mentions) >= 1, "Stats say mentions inserted but DB is empty"
+                assert len(yt_video_mentions) >= 1, (
+                    "Stats say YouTube videos inserted but DB has no youtube/video rows"
+                )
 
-                for m in yt_mentions:
+                for m in yt_video_mentions:
                     # Real YouTube video IDs are 11-char alphanumeric strings
                     assert m.source_id, "source_id should not be empty"
                     assert m.platform == "youtube"
+                    assert m.source_type == "video"
                     assert m.content, "content should not be empty"
 
                     # Sentiment should have been computed
@@ -198,11 +206,34 @@ async def test_mini_pipeline_collect_once(monkeypatch) -> None:
                         assert compound is not None, "sentiment should have 'compound'"
                         assert -1.0 <= compound <= 1.0, f"compound={compound} out of VADER range"
 
-                    # YouTube metrics should include view_count
+                    # Video metrics should include view_count
                     if m.metrics:
                         assert "view_count" in m.metrics, (
-                            f"YouTube mention missing view_count: {m.metrics}"
+                            f"YouTube video mention missing view_count: {m.metrics}"
                         )
+
+            youtube_comments_inserted = int(stats.get("youtube_comments_inserted", 0))
+            if youtube_comments_inserted > 0:
+                yt_comment_mentions = (
+                    (
+                        await session.execute(
+                            select(Mention)
+                            .where(
+                                Mention.platform == "youtube",
+                                Mention.source_type == "comment",
+                            )
+                            .limit(20)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert len(yt_comment_mentions) >= 1, (
+                    "Stats say YouTube comments inserted but DB has no youtube/comment rows"
+                )
+                for c in yt_comment_mentions:
+                    if c.metrics:
+                        assert "video_id" in c.metrics
 
             # -- Verify metrics snapshots --
             snapshot_count = await session.scalar(select(func.count()).select_from(MetricsSnapshot))
