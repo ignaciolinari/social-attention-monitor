@@ -8,16 +8,34 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from inspect import isawaitable
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import Integer, and_, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sam.collectors.base import CollectedPost, post_identity_key
 from sam.collectors.tmdb import TMDBTitle
-from sam.storage.models import Lease, Mention, MetricsSnapshot, PipelineRun, Title
+from sam.storage.models import Lease, Mention, MetricsSnapshot, PipelineRun, Title, Watchlist
+
+
+async def get_all_watchlist_tmdb_ids(session: AsyncSession) -> set[int]:
+    """Return the deduplicated set of TMDB IDs from all watchlists."""
+    stmt = select(Watchlist.tmdb_ids)
+    result = await session.execute(stmt)
+    rows = result.all()
+    if isawaitable(rows):
+        rows = await rows
+    ids: set[int] = set()
+    for (tmdb_ids_list,) in rows:
+        if not isinstance(tmdb_ids_list, list):
+            continue
+        for item in tmdb_ids_list:
+            if isinstance(item, int) and item > 0:
+                ids.add(item)
+    return ids
 
 
 async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
@@ -34,6 +52,8 @@ async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
         "vote_average": tmdb_title.vote_average,
         "genres": tmdb_title.genres or None,
         "extra_data": tmdb_title.raw_data,
+        "revenue": tmdb_title.revenue,
+        "budget": tmdb_title.budget,
         "is_active": True,
     }
 
@@ -66,6 +86,7 @@ async def insert_mentions(
     platform: str,
     posts: list[CollectedPost],
     sentiment_by_source_id: dict[str, dict[str, Any]] | None = None,
+    language_by_source_id: dict[str, str | None] | None = None,
     collected_at: datetime | None = None,
 ) -> int:
     """Insert Mention rows (ignore duplicates). Returns inserted row count (best-effort).
@@ -74,6 +95,7 @@ async def insert_mentions(
     newer composite key ``platform:source_type:source_id``.
     """
     sentiment_by_source_id = sentiment_by_source_id or {}
+    language_by_source_id = language_by_source_id or {}
 
     rows: list[dict[str, Any]] = []
     collected_at_value = collected_at or datetime.now(UTC)
@@ -83,6 +105,9 @@ async def insert_mentions(
         if sentiment is None:
             # Backward compatibility with existing payload shape.
             sentiment = sentiment_by_source_id.get(post.source_id)
+        detected_lang = language_by_source_id.get(sentiment_key)
+        if detected_lang is None:
+            detected_lang = language_by_source_id.get(post.source_id)
         rows.append(
             {
                 "title_id": title_id,
@@ -96,6 +121,7 @@ async def insert_mentions(
                 "collected_at": collected_at_value,
                 "metrics": post.metrics or None,
                 "sentiment": sentiment,
+                "detected_language": detected_lang,
             }
         )
 
@@ -363,6 +389,151 @@ async def get_metrics_timeseries(
     stmt = stmt.order_by(MetricsSnapshot.snapshot_time.asc()).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def get_average_benchmark_trajectory(
+    session: AsyncSession,
+    *,
+    target_title_id: uuid.UUID,
+    comparison_type: str,
+    window_hours: int,
+    days: int,
+    comparison_limit: int,
+) -> list[dict[str, float | int]]:
+    """Return day-level averaged attention for comparison titles.
+
+    Each comparison title contributes at most one averaged attention value per
+    day, preventing titles with denser snapshot histories from dominating the
+    overall benchmark.
+    """
+    comparison_titles = (
+        select(
+            Title.id.label("comparison_title_id"),
+            Title.release_date.label("release_date"),
+        )
+        .where(
+            Title.media_type == comparison_type,
+            Title.id != target_title_id,
+            Title.release_date.isnot(None),
+            Title.is_active.is_(True),
+        )
+        .order_by(Title.popularity.desc())
+        .limit(comparison_limit)
+        .subquery()
+    )
+
+    day_offset = cast(
+        func.floor(
+            func.extract(
+                "epoch",
+                MetricsSnapshot.snapshot_time - comparison_titles.c.release_date,
+            )
+            / 86_400
+        ),
+        Integer,
+    )
+
+    per_title_daily = (
+        select(
+            comparison_titles.c.comparison_title_id,
+            day_offset.label("day"),
+            func.avg(MetricsSnapshot.attention_index).label("daily_attention"),
+        )
+        .join(
+            comparison_titles,
+            MetricsSnapshot.title_id == comparison_titles.c.comparison_title_id,
+        )
+        .where(
+            MetricsSnapshot.window_hours == window_hours,
+            MetricsSnapshot.attention_index.isnot(None),
+            day_offset >= 0,
+            day_offset < days,
+        )
+        .group_by(comparison_titles.c.comparison_title_id, day_offset)
+        .subquery()
+    )
+
+    stmt = (
+        select(
+            per_title_daily.c.day,
+            func.avg(per_title_daily.c.daily_attention).label("avg_attention_index"),
+            func.count().label("sample_count"),
+        )
+        .group_by(per_title_daily.c.day)
+        .order_by(per_title_daily.c.day.asc())
+    )
+
+    result = await session.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "day": int(row.day),
+            "avg_attention_index": round(float(row.avg_attention_index), 2),
+            "sample_count": int(row.sample_count),
+        }
+        for row in rows
+    ]
+
+
+async def get_benchmark_contributors_count(
+    session: AsyncSession,
+    *,
+    target_title_id: uuid.UUID,
+    comparison_type: str,
+    window_hours: int,
+    days: int,
+    comparison_limit: int,
+) -> int:
+    """Return how many distinct comparison titles contributed benchmark data."""
+    comparison_titles = (
+        select(
+            Title.id.label("comparison_title_id"),
+            Title.release_date.label("release_date"),
+        )
+        .where(
+            Title.media_type == comparison_type,
+            Title.id != target_title_id,
+            Title.release_date.isnot(None),
+            Title.is_active.is_(True),
+        )
+        .order_by(Title.popularity.desc())
+        .limit(comparison_limit)
+        .subquery()
+    )
+
+    day_offset = cast(
+        func.floor(
+            func.extract(
+                "epoch",
+                MetricsSnapshot.snapshot_time - comparison_titles.c.release_date,
+            )
+            / 86_400
+        ),
+        Integer,
+    )
+
+    per_title_daily = (
+        select(
+            comparison_titles.c.comparison_title_id,
+            day_offset.label("day"),
+        )
+        .join(
+            comparison_titles,
+            MetricsSnapshot.title_id == comparison_titles.c.comparison_title_id,
+        )
+        .where(
+            MetricsSnapshot.window_hours == window_hours,
+            MetricsSnapshot.attention_index.isnot(None),
+            day_offset >= 0,
+            day_offset < days,
+        )
+        .group_by(comparison_titles.c.comparison_title_id, day_offset)
+        .subquery()
+    )
+
+    stmt = select(func.count(func.distinct(per_title_daily.c.comparison_title_id)))
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
 
 
 async def get_trending_by_attention_index(

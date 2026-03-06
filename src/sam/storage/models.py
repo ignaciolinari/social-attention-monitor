@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Float,
     ForeignKey,
@@ -68,6 +69,8 @@ class Title(Base):
     vote_average: Mapped[float | None] = mapped_column(Float)
     genres: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     extra_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    revenue: Mapped[int | None] = mapped_column(BigInteger)
+    budget: Mapped[int | None] = mapped_column(BigInteger)
 
     # Tracking
     created_at: Mapped[datetime] = mapped_column(
@@ -129,6 +132,9 @@ class Mention(Base):
     # Sentiment analysis results
     sentiment: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # {compound, positive, negative, neutral, model_version}
+
+    # Language detection
+    detected_language: Mapped[str | None] = mapped_column(String(10))
 
     # Relationships
     title: Mapped["Title"] = relationship(back_populates="mentions")
@@ -288,3 +294,28 @@ class PipelineRun(Base):
 
     def __repr__(self) -> str:
         return f"<PipelineRun(id={self.id}, job={self.job_name}, status={self.status})>"
+
+
+class Watchlist(Base):
+    """User-defined watchlist of titles to track.
+
+    Each watchlist stores a list of TMDB IDs that the collector should
+    monitor alongside the standard trending titles.
+    """
+
+    __tablename__ = "watchlists"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    tmdb_ids: Mapped[list[int]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Watchlist(id={self.id}, name='{self.name}')>"
