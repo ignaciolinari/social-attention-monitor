@@ -40,6 +40,12 @@ The pipeline is designed to operate **fully within official APIs and their terms
 - **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky with per-platform circuit breakers.
 - **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), aspect-based sentiment, emotion classification, sarcasm detection, content deduplication, and auto-translation.
 - **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration", plus alpha metrics (Audience Fatigue, Viral Coefficient, Sentiment Divergence).
+- **Box Office Correlation**: Automatic revenue/budget data from TMDB, scatter-plot analysis of social attention vs. commercial performance.
+- **Language Segmentation**: Automatic language detection on mentions with per-language sentiment breakdowns.
+- **Comparative Title Analytics**: Side-by-side comparison of up to 5 titles with overlaid attention, velocity, and sentiment charts.
+- **User-Defined Watchlists**: Create, edit, and delete persistent watchlists to track custom sets of titles beyond TMDB trending.
+- **Historical Benchmarking**: Compare a title's early day-level trajectory against averaged daily peer performance.
+- **Dark/Light Mode**: Toggle between dark and light themes in the dashboard.
 - **Real-Time Alerting**: Statistical anomaly detection for mention spikes and viral breakouts pushed instantly via WebSockets.
 - **Security**: Optional API key authentication for mutation and expensive endpoints, with sliding-window rate limiting.
 - **Observability**: Prometheus-compatible `/metrics` endpoint, pipeline self-health alerts, per-title timing, and structured log correlation IDs.
@@ -143,7 +149,7 @@ social-attention-monitor/
 │   │   └── utils/         # Translation, shared helpers
 │   └── dashboard/         # Streamlit app (pages/, sidebar, api_client)
 ├── docs/                  # Architecture, features, setup, API reference
-├── tests/                 # Unit & integration tests (350+)
+├── tests/                 # Unit & integration tests (370+)
 └── docker-compose.yml     # Container orchestration
 ```
 

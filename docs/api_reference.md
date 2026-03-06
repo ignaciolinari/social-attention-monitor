@@ -38,9 +38,21 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 |--------|----------|-------------|
 | `GET` | `/api/v1/metrics/trending` | Returns locally tracked titles ranked by Attention Index. |
 | `GET` | `/api/v1/metrics/timeseries` | Historical sentiment and velocity. Query: `title_id` (required), `window_hours`, `hours` (lookback). |
+| `GET` | `/api/v1/metrics/box-office` | Titles with revenue/budget alongside attention index for correlation analysis. Query: `window_hours`, `limit`. |
+| `GET` | `/api/v1/metrics/language-breakdown` | Mention aggregation by detected language with per-language sentiment. Returns `404` when `title_id` is unknown. Query: `title_id` (required), `hours`. |
+| `GET` | `/api/v1/metrics/compare` | Parallel timeseries for multi-title comparison. Query: `title_ids` (comma-separated, 2–5 required), `window_hours`, `hours`. |
+| `GET` | `/api/v1/metrics/benchmark` | Compare a title's first-N-days day-level trajectory against averaged peers of the same media type. Query: `title_id` (required), `comparison_type=movie|tv`, `days`, `window_hours`, `comparison_limit`. |
 | `GET` | `/api/v1/sentiment/analyze` | Submit arbitrary text via `?text=` for an ad-hoc sentiment score. |
 
-### 5. Alerts
+### 5. Watchlists
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/watchlists` | List all user-defined watchlists. Query: `limit`, `offset`. |
+| `POST` | `/api/v1/watchlists` | Create a new watchlist. JSON body: `{"name": "...", "tmdb_ids": [...]}`. |
+| `PUT` | `/api/v1/watchlists/{id}` | Update an existing watchlist. JSON body: `{"name": "...", "tmdb_ids": [...]}`. |
+| `DELETE` | `/api/v1/watchlists/{id}` | Delete a watchlist. |
+
+### 6. Alerts
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/alerts` | Lists recent alerts (acknowledged and unacknowledged). Filters: `limit`, `offset`, `title_id`, `severity`, `hours`. |
@@ -48,7 +60,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | `POST`| `/api/v1/alerts/{alert_id}/acknowledge`| Marks a specific alert as acknowledged. |
 | `POST`| `/api/v1/alerts/run-detection`| Manually trigger anomaly detection run. |
 
-### 6. Pipeline & WebSocket Status
+### 7. Pipeline & WebSocket Status
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/pipeline/quota` | Returns detailed usage of platform API limits (e.g., YouTube's Daily Budget). |
@@ -114,7 +126,7 @@ ws.send(JSON.stringify({action: 'subscribe', topic: 'alerts'}));
 | `POST` | `/api/v1/alerts/{id}/acknowledge` | Alert mutation |
 | `GET` | `/api/v1/sentiment/analyze` | Expensive NLP endpoint |
 | `GET` | `/health?external=true` | External dependency probes |
-| `PUT` / `DELETE` | Any `/api/*` path | Mutation operations |
+| `POST` / `PUT` / `DELETE` | Any `/api/*` path | Mutation operations |
 
 Unprotected endpoints (other GET requests, basic health checks, metrics) remain publicly accessible.
 

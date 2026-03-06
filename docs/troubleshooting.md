@@ -42,6 +42,14 @@ When the Dashboard runs in Docker or on another host:
 - Or set `SAM_API_BASE_URL=http://host:port` to override entirely.
 - Ensure the API container is healthy: `curl http://localhost:8000/health`
 
+### API fails to start: `[Errno 48] Address already in use`
+
+If `make run-api` fails with an address-in-use error, another process is already bound to port `8000`.
+
+- Find and stop the conflicting process, or
+- Start API on another port, for example: `API_PORT=8001 make run-api`
+- If you change API port, update dashboard connection settings accordingly (`SAM_API_BASE_URL` or `API_HOST`/`API_PORT`).
+
 ### RoBERTa sentiment model fails to load
 
 RoBERTa requires the `transformers` extra:
@@ -51,6 +59,13 @@ pip install ".[transformers]"
 ```
 
 If it still fails (e.g. missing CUDA, out-of-memory), set `SAM_SENTIMENT_FALLBACK_TO_VADER=true` (default) to fall back to VADER.
+
+### First live run is slow / model download warnings
+
+On the first non-demo run, NLP models (RoBERTa, sarcasm, emotions) may be downloaded and initialized, which can noticeably increase cycle time.
+
+- This is expected on first run; subsequent runs are faster due to local cache.
+- You may see Hugging Face unauthenticated warnings. Optionally set `HF_TOKEN` for higher rate limits and faster model downloads.
 
 ### No mentions / empty metrics
 

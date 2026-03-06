@@ -90,10 +90,16 @@ A dedicated `Streamlit` application provides a window into the pipeline's operat
 - **Time Series**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity against Average Sentiment over custom time windows.
 - **Sentiment Comparison**: A side-by-side analysis of how different platforms (e.g., Reddit vs. YouTube) compare in their sentiment for a specific title, bringing the **Sentiment Divergence** metric to life.
 - **Alpha Metrics**: Dashboard for advanced analytical scores like Audience Fatigue, Viral Coefficient, and Author Diversity.
+- **Compare Titles**: Side-by-side comparison of 2–5 titles with overlaid line charts for attention index, mention velocity, and sentiment.
+- **Box Office**: Scatter-plot correlation between social attention and commercial performance (revenue/budget from TMDB). Includes ROI analysis.
+- **Language Segmentation**: Geographic/linguistic breakdown of mentions with donut charts and per-language sentiment bar charts.
+- **Historical Benchmark**: Compare a title's early day-level trajectory (first N days from release) against the averaged daily trajectory of similar titles.
+- **Watchlists**: Create, edit, and delete persistent user-defined watchlists to track custom sets of TMDB titles.
 - **Anomaly Alerts**: A live feed of triggered anomalies (Spikes, Shifts, Breakouts), allowing operators to trace exactly *when* public opinion turned.
 - **API Quota**: Visualizations of external API usage (especially YouTube's daily budget) to ensure the system stays within limits.
 - **Pipeline Observability**: Per-run timing breakdown, per-title processing times (`per_title_ms`), collector stats, and translation metrics.
 - **System Config**: UI for dynamically toggling collectors on or off (sends API key automatically when `SAM_API_KEY` is configured).
+- **Dark/Light Mode**: Toggle between dark and light themes via the sidebar settings.
 
 ---
 
@@ -101,7 +107,7 @@ A dedicated `Streamlit` application provides a window into the pipeline's operat
 
 SAM supports optional API key authentication to protect sensitive and expensive endpoints.
 
-- **API Key Middleware**: When `SAM_API_KEY` is set, mutation endpoints (`PUT`, `DELETE`, `POST` for alerts) and the sentiment analysis endpoint require an `Authorization: Bearer <key>` or `X-API-Key: <key>` header.
+- **API Key Middleware**: When `SAM_API_KEY` is set, mutation endpoints (`POST`, `PUT`, `DELETE`) and the sentiment analysis endpoint require an `Authorization: Bearer <key>` or `X-API-Key: <key>` header.
 - **Rate Limiting**: Sliding-window rate limiter (default 120 req/min per IP). Health and metrics endpoints are excluded from rate limiting to support monitoring integrations.
 - **CORS**: Configurable allowlist via `CORS_ALLOW_ORIGINS`; defaults to `*` in development and `[]` in production.
 

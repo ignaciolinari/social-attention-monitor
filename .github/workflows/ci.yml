@@ -177,3 +177,18 @@ jobs:
         run: |
           curl -sf http://localhost:8000/api/v1/ws/status | jq .
           echo "WebSocket status check passed!"
+
+      - name: Box Office endpoint check
+        run: |
+          curl -sf http://localhost:8000/api/v1/metrics/box-office | jq .
+          echo "Box Office endpoint check passed!"
+
+      - name: Watchlists endpoint check
+        run: |
+          curl -sf http://localhost:8000/api/v1/watchlists | jq .
+          echo "Watchlists endpoint check passed!"
+
+      - name: Benchmark endpoint check (expects 422 without params)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/v1/metrics/benchmark)
+          if [ "$STATUS" = "422" ]; then echo "Benchmark endpoint loaded (422 as expected)"; else echo "Unexpected status $STATUS"; exit 1; fi

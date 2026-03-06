@@ -68,8 +68,8 @@ Redis serves three crucial functions:
 
 ## 4. API Layer (FastAPI)
 The backend service exposes data to the dashboard and external clients. The API is structured into modular route files under `api/routes/` with shared logic in `api/dependencies.py`.
-- **REST Endpoints**: Serves metrics, configuration states, platform quotas, mentions, and system health via route modules (`health`, `pipeline`, `collectors`, `mentions`, `metrics_routes`, `alerts`, `sentiment`, `titles`, `trending`, `ws`).
-- **Middleware** (`api/middleware.py`): API key authentication for mutation endpoints, sliding-window rate limiting (in-memory with Redis upgrade path).
+- **REST Endpoints**: Serves metrics, configuration states, platform quotas, mentions, and system health via route modules (`health`, `pipeline`, `collectors`, `mentions`, `metrics_routes`, `box_office`, `language`, `compare`, `benchmark`, `watchlists`, `alerts`, `sentiment`, `titles`, `trending`, `ws`).
+- **Middleware** (`api/middleware.py`): API key authentication for mutation endpoints (`POST`/`PUT`/`DELETE` under `/api/*`) and selected expensive/probe endpoints, plus sliding-window rate limiting (in-memory with Redis upgrade path).
 - **Prometheus Metrics**: `/metrics` endpoint for operational monitoring.
 - **WebSockets (`/ws`)**: Pushes real-time alerting anomalies instantly to active clients.
 
@@ -77,5 +77,5 @@ The backend service exposes data to the dashboard and external clients. The API 
 
 ## 5. Presentation Layer (Streamlit)
 The dashboard provides operational observability, structured as modular pages under `dashboard/pages/` with shared helpers in `dashboard/api_client.py`, `dashboard/helpers.py`, and `dashboard/sidebar.py`.
-- **Multipage Navigation**: Sidebar-driven navigation across 9 specialized pages (Overview, Platform Explorer, Metrics Deep-Dive, Alerts, Sentiment Analysis, Pipeline Observability, etc.).
+- **Multipage Navigation**: Sidebar-driven navigation across 14 pages, including newer analytical surfaces such as Compare Titles, Box Office, Language Segmentation, Historical Benchmark, and Watchlists.
 - **State Management**: Utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.

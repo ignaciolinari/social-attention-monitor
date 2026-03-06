@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-05
+
+### Added
+- **Language detection pipeline**: `detect_languages()` in `enrichment.py` uses `langdetect` to identify mention languages (ISO-639-1). Wired into `runner.py` Phase 2b; `detected_language` column is now populated in the `mentions` table.
+- **TMDB revenue/budget enrichment**: `enrich_titles_with_details()` fetches revenue and budget from TMDB's `/movie/{id}` detail endpoint for movie titles. Called automatically after `get_trending()` in the collector pipeline.
+- **Box Office endpoint** (`GET /api/v1/metrics/box-office`): Scatter-plot data correlating attention index with TMDB revenue/budget.
+- **Language Breakdown endpoint** (`GET /api/v1/metrics/language-breakdown`): Per-language mention counts and average sentiment for a title.
+- **Compare endpoint** (`GET /api/v1/metrics/compare`): Parallel timeseries for 2–5 titles. Reports `missing_ids` for titles not found.
+- **Benchmark endpoint** (`GET /api/v1/metrics/benchmark`): First-N-days trajectory comparison against averaged peers.
+- **Watchlists CRUD**: `GET/POST/PUT/DELETE /api/v1/watchlists` with `Watchlist` model, Alembic migration, and Pydantic schemas.
+- **Dashboard pages**: Box Office correlation, Language Segmentation, Historical Benchmark, Title Comparison, and Watchlists management pages in Streamlit.
+- **Pydantic response models**: `BoxOfficeResponse`, `LanguageBreakdownResponse`, `CompareResponse`, `BenchmarkResponse` wired to route decorators for OpenAPI docs.
+- **`delete_json` helper** in `dashboard/api_client.py` for consistency with `get_json`/`post_json`.
+- **CI smoke tests**: GitHub Actions checks for box-office, watchlists, and benchmark endpoints.
+- **Shared test fixtures**: `conftest.py` with `DummySession`, `DummyRedis`, and `client` fixture; duplicated boilerplate removed from 5 test files.
+- **Watchlists utilized by collector**: Runner now fetches titles from all user watchlists (via `get_all_watchlist_tmdb_ids()`), resolves them through `tmdb.get_details()` (movie→tv fallback), deduplicates against trending, and processes them alongside trending titles.
+- **Alembic migration** (`c6d7e8f9a0b1`): Adds `revenue`/`budget` columns to `titles` and `detected_language` to `mentions`.
+
+### Changed
+- **Benchmark endpoint**: Replaced fragile `[0.0]`/`[1]` average calculation with explicit logic; added `ORDER BY popularity DESC` for deterministic comparison selection; peer averages are now computed from per-title daily trajectories rather than raw snapshot density.
+- **Watchlist model**: `tmdb_ids` type annotation corrected from `dict[str, Any]` to `list[int]`.
+- **Watchlist update route**: Explicitly sets `updated_at = datetime.now(UTC)` to avoid SQLAlchemy JSONB mutation detection issues.
+- **Dashboard watchlists page**: Refactored from raw `httpx` to shared `api_client` helpers and now supports edit/update flows in addition to create/delete.
+- **Historical benchmark chart**: Both traces now use consistent day-level points and "Day N" x-axis labels.
+- **Benchmark endpoint**: `comparison_limit` query parameter (default 20, max 50) replaces hardcoded `LIMIT 20`.
+- **Language route**: `.as_string()` → `.astext` for standard SQLAlchemy JSONB access pattern.
+
+### Fixed
+- **TMDB revenue/budget always `NULL`**: `data.get('revenue') or None` treated `0` as falsy, converting valid TMDB data to `None`. Changed to `data.get('revenue')`.
+- **Compare endpoint silently dropped missing titles**: Now returns `missing_ids` list in response.
+- **Defensive `getattr`** removed from `box_office.py` and `dependencies.py` — `revenue`/`budget` are proper model attributes.
+- **Watchlist dashboard create/update requests**: Mutating requests now send JSON bodies that match the FastAPI request models.
+- **Watchlist auth coverage**: `POST /api/v1/watchlists` is now protected when `SAM_API_KEY` is configured.
+- **Language breakdown**: Unknown `title_id` now returns `404` consistently with other title-scoped metrics endpoints.
+- **Language breakdown neutral averages**: A real `0.0` average sentiment is preserved instead of being converted to `null`.
+- **Language persistence**: Detected language now uses the same composite identity keying as sentiment to avoid cross-platform/source collisions.
+- **Repository async mock warning**: Watchlist helper now tolerates async-mocked `result.all()` in tests without emitting unawaited coroutine warnings.
+- **Migration docstring** `Revises:` corrected to match actual `down_revision`.
+- **Sidebar**: Removed unused `is_light` variable assignment.
+- **Plotly `dict()` calls**: Replaced with dict literals for linter compliance.
+
 ## [0.2.0] - 2026-02-28
 
 ### Added
