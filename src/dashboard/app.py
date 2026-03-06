@@ -24,14 +24,20 @@ from dashboard.helpers import DASHBOARD_REFRESH_MINUTES
 from dashboard.pages import PageContext
 from dashboard.pages import alerts as page_alerts
 from dashboard.pages import alpha_metrics as page_alpha
+from dashboard.pages import box_office as page_box_office
+from dashboard.pages import historical_benchmark as page_benchmark
+from dashboard.pages import language_segmentation as page_language
 from dashboard.pages import pipeline_observability as page_observability
 from dashboard.pages import platform_comparison as page_platform
 from dashboard.pages import quota as page_quota
 from dashboard.pages import sentiment as page_sentiment
 from dashboard.pages import sentiment_comparison as page_sentiment_cmp
 from dashboard.pages import timeseries as page_timeseries
+from dashboard.pages import title_comparison as page_compare
 from dashboard.pages import trending as page_trending
+from dashboard.pages import watchlists as page_watchlists
 from dashboard.sidebar import render_sidebar
+from dashboard.theme import apply_theme
 
 st.set_page_config(
     page_title="SAM - Social Attention Monitor",
@@ -42,6 +48,8 @@ st.set_page_config(
 
 st_autorefresh(interval=DASHBOARD_REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
+apply_theme()
+
 
 # Page label -> renderer mapping
 _PAGES = {
@@ -51,6 +59,11 @@ _PAGES = {
     "💬 Sentiment": page_sentiment.render,
     "⚖️ Sentiment Comparison": page_sentiment_cmp.render,
     "📊 Alpha Metrics": page_alpha.render,
+    "🔎 Compare Titles": page_compare.render,
+    "💰 Box Office": page_box_office.render,
+    "🌍 Language": page_language.render,
+    "📜 Benchmark": page_benchmark.render,
+    "📌 Watchlists": page_watchlists.render,
     "🚨 Alerts": page_alerts.render,
     "📡 API Quota": page_quota.render,
     "🔧 Pipeline Observability": page_observability.render,

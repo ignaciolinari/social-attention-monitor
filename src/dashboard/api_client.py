@@ -55,11 +55,21 @@ def get_json_nocache(path: str, params: dict[str, Any] | None = None) -> dict[st
     return data
 
 
-def put_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def put_json(
+    path: str,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Send a PUT request to the API."""
     url = api_base_url() + path
     timeout_s = get_settings().dashboard_http_timeout_seconds
-    r = httpx.put(url, params=params, headers=_auth_headers(), timeout=timeout_s)
+    r = httpx.put(
+        url,
+        params=params,
+        json=json_body,
+        headers=_auth_headers(),
+        timeout=timeout_s,
+    )
     r.raise_for_status()
     data: Any = r.json()
     if not isinstance(data, dict):
@@ -67,11 +77,33 @@ def put_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     return data
 
 
-def post_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def post_json(
+    path: str,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Send a POST request to the API."""
     url = api_base_url() + path
     timeout_s = get_settings().dashboard_http_timeout_seconds
-    r = httpx.post(url, params=params, headers=_auth_headers(), timeout=timeout_s)
+    r = httpx.post(
+        url,
+        params=params,
+        json=json_body,
+        headers=_auth_headers(),
+        timeout=timeout_s,
+    )
+    r.raise_for_status()
+    data: Any = r.json()
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object from API")
+    return data
+
+
+def delete_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Send a DELETE request to the API."""
+    url = api_base_url() + path
+    timeout_s = get_settings().dashboard_http_timeout_seconds
+    r = httpx.delete(url, params=params, headers=_auth_headers(), timeout=timeout_s)
     r.raise_for_status()
     data: Any = r.json()
     if not isinstance(data, dict):
