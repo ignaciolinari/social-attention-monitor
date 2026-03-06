@@ -28,16 +28,17 @@ from loguru import logger
 
 from sam.alerts import AlertManager
 from sam.cache import publish_alert_event
-from sam.collectors.base import CollectedPost
+from sam.collectors.base import CollectedPost, post_identity_key
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
-from sam.collectors.tmdb import TMDBCollector
+from sam.collectors.tmdb import TMDBCollector, TMDBTitle
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
 from sam.pipeline.enrichment import (
     analyze_texts_for_sentiment_with_stats,
     build_enriched_sentiment_map,
+    detect_languages,
     merge_numeric_stats,
 )
 from sam.pipeline.metrics_snapshots import (
@@ -50,6 +51,7 @@ from sam.storage.database import cleanup_stale_state, close_db, get_session, ini
 from sam.storage.repository import (
     acquire_lease,
     finish_pipeline_run,
+    get_all_watchlist_tmdb_ids,
     insert_mentions,
     release_lease,
     renew_lease,
@@ -291,6 +293,9 @@ async def collect_once(
         "spam_filtered": 0,
         "duplicates_removed": 0,
         "raw_storage_failures": 0,
+        "languages_detection_failures": 0,
+        "watchlist_titles_not_found": 0,
+        "watchlist_titles_failed": 0,
     }
     per_title_ms: dict[str, float] = {}
 
@@ -307,6 +312,57 @@ async def collect_once(
         titles = await tmdb.get_trending(media_type="all", time_window="week", limit=limit_titles)
         run_log.info(f"[runner] Trending titles: {len(titles)}")
         stats["titles"] = len(titles)
+
+        # Enrich movies with revenue/budget from TMDB detail API.
+        if not settings.demo_mode and titles:
+            try:
+                await tmdb.enrich_titles_with_details(titles)
+            except Exception as exc:
+                run_log.warning(f"[runner] TMDB enrichment failed: {exc}")
+
+        # Phase 0b: Fetch watchlist titles not already in the trending set.
+        trending_tmdb_ids = {t.tmdb_id for t in titles}
+        try:
+            async with get_session() as wl_session:
+                watchlist_ids = await get_all_watchlist_tmdb_ids(wl_session)
+            extra_ids = watchlist_ids - trending_tmdb_ids
+            if extra_ids:
+                run_log.info(f"[runner] Fetching {len(extra_ids)} watchlist-only titles from TMDB")
+
+                async def _fetch_watchlist_title(tmdb_id: int) -> TMDBTitle | None:
+                    """Try movie first, then tv."""
+                    for attempt, mtype in enumerate(("movie", "tv")):
+                        result = await tmdb.get_details(
+                            tmdb_id,
+                            media_type=mtype,
+                            suppress_not_found_error=attempt == 0,
+                        )
+                        if result is not None:
+                            return result
+                    return None
+
+                detail_results = await asyncio.gather(
+                    *[_fetch_watchlist_title(tid) for tid in extra_ids],
+                    return_exceptions=True,
+                )
+                watchlist_titles = [r for r in detail_results if isinstance(r, TMDBTitle)]
+                failed_count = sum(1 for r in detail_results if isinstance(r, Exception))
+                not_found_count = sum(1 for r in detail_results if r is None)
+                stats["watchlist_titles_failed"] = (
+                    int(stats["watchlist_titles_failed"]) + failed_count
+                )
+                stats["watchlist_titles_not_found"] = (
+                    int(stats["watchlist_titles_not_found"]) + not_found_count
+                )
+                if watchlist_titles:
+                    run_log.info(
+                        f"[runner] Added {len(watchlist_titles)} watchlist titles "
+                        f"({not_found_count} not found, {failed_count} failed)"
+                    )
+                    titles.extend(watchlist_titles)
+                    stats["titles"] = len(titles)
+        except Exception as exc:
+            run_log.warning(f"[runner] Watchlist title fetch failed: {exc}")
 
         # Read runtime toggle states once per cycle (not per title) to
         # avoid redundant Redis reads.
@@ -578,6 +634,7 @@ async def collect_once(
 
                         # -- Phase 2: Batch sentiment analysis (B3) -------------
                         full_sentiment_map: dict[str, dict[str, Any]] = {}
+                        language_map: dict[str, str | None] = {}
                         if all_posts:
                             with Timer("sentiment_analysis_seconds"):
                                 sentiments, analysis_stats = await asyncio.to_thread(
@@ -593,6 +650,29 @@ async def collect_once(
                                 settings,
                             )
 
+                            # -- Phase 2b: Language detection --------------------
+                            try:
+                                detected = await asyncio.to_thread(
+                                    detect_languages,
+                                    [p.content for p in all_posts],
+                                )
+                                for post, lang in zip(all_posts, detected, strict=True):
+                                    key = post_identity_key(
+                                        post.platform,
+                                        post.source_type,
+                                        post.source_id,
+                                    )
+                                    language_map[key] = lang
+                                langs_found = sum(1 for v in detected if v is not None)
+                                stats["languages_detected"] = (
+                                    int(stats.get("languages_detected", 0)) + langs_found
+                                )
+                            except Exception as exc:
+                                stats["languages_detection_failures"] = (
+                                    int(stats["languages_detection_failures"]) + 1
+                                )
+                                logger.warning(f"[runner] Language detection failed: {exc}")
+
                         # -- Phase 3: Persist mentions per platform batch --------
                         for plat, stats_key, posts, collected_at in platform_batches:
                             inserted = await insert_mentions(
@@ -601,6 +681,7 @@ async def collect_once(
                                 platform=plat,
                                 posts=posts,
                                 sentiment_by_source_id=full_sentiment_map,
+                                language_by_source_id=language_map,
                                 collected_at=collected_at,
                             )
                             stats[stats_key] += inserted

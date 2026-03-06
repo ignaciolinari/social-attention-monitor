@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -174,6 +174,8 @@ class DbTitleResponse(BaseModel):
     media_type: str
     release_date: str | None
     popularity: float | None
+    revenue: int | None = None
+    budget: int | None = None
 
 
 class TitlesResponse(BaseModel):
@@ -278,3 +280,118 @@ class CollectorStatusResponse(BaseModel):
     """Status of all collector platforms."""
 
     collectors: list[CollectorPlatformStatus]
+
+
+# ── Watchlist schemas ────────────────────────────────────────────────────────
+
+
+class WatchlistCreateRequest(BaseModel):
+    """Request to create a watchlist."""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    tmdb_ids: list[Annotated[int, Field(ge=1)]] = Field(default_factory=list)
+
+
+class WatchlistResponse(BaseModel):
+    """Single watchlist response."""
+
+    id: str
+    name: str
+    tmdb_ids: list[int]
+    created_at: str
+    updated_at: str
+
+
+class WatchlistsListResponse(BaseModel):
+    """List of watchlists response."""
+
+    watchlists: list[WatchlistResponse]
+    total_count: int
+
+
+# ── Box Office schemas ──────────────────────────────────────────────────────
+
+
+class BoxOfficeItem(BaseModel):
+    """Single box-office correlation item."""
+
+    title_id: str
+    title: str
+    media_type: str
+    release_date: str | None
+    revenue: int | None
+    budget: int | None
+    attention_index: float | None
+    mention_count: int
+    avg_sentiment: float | None
+
+
+class BoxOfficeResponse(BaseModel):
+    """Box-office correlation response."""
+
+    window_hours: int
+    collected_at: str
+    items: list[BoxOfficeItem]
+
+
+# ── Language Breakdown schemas ──────────────────────────────────────────────
+
+
+class LanguageItem(BaseModel):
+    """Per-language mention aggregate."""
+
+    language: str
+    mention_count: int
+    avg_sentiment: float | None
+
+
+class LanguageBreakdownResponse(BaseModel):
+    """Language breakdown response."""
+
+    title_id: str
+    hours: int
+    collected_at: str
+    languages: list[LanguageItem]
+
+
+# ── Compare schemas ────────────────────────────────────────────────────────
+
+
+class CompareSeries(BaseModel):
+    """Single title's timeseries in a compare response."""
+
+    title: DbTitleResponse
+    points: list[MetricsSnapshotResponse]
+
+
+class CompareResponse(BaseModel):
+    """Compare titles response."""
+
+    window_hours: int
+    since: str
+    until: str
+    series: list[CompareSeries]
+    missing_ids: list[str] = Field(default_factory=list)
+
+
+# ── Benchmark schemas ──────────────────────────────────────────────────────
+
+
+class BenchmarkDayPoint(BaseModel):
+    """Single day in the average trajectory."""
+
+    day: int
+    avg_attention_index: float | None
+    sample_count: int
+
+
+class BenchmarkResponse(BaseModel):
+    """Historical benchmark response."""
+
+    title: DbTitleResponse
+    days: int
+    window_hours: int
+    target_points: list[MetricsSnapshotResponse]
+    avg_trajectory: list[BenchmarkDayPoint]
+    comparison_count: int
+    comparison_titles_with_data: int

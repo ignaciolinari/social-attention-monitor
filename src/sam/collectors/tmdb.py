@@ -41,6 +41,8 @@ class TMDBTitle:
     vote_count: int
     genres: list[dict[str, Any]]
     original_language: str
+    revenue: int | None
+    budget: int | None
     raw_data: dict[str, Any]
 
 
@@ -158,6 +160,39 @@ class TMDBCollector:
                 logger.error(f"[tmdb] Error fetching trending: {e}")
             return []
 
+    async def enrich_titles_with_details(self, titles: list[TMDBTitle]) -> None:
+        """Fetch revenue/budget from ``/movie/{id}`` for movie titles.
+
+        Only calls the detail endpoint for movies that don't already have
+        revenue/budget populated. Modifies titles in-place.
+        """
+        if self.demo_mode or not self._client:
+            return
+
+        movies_to_enrich = [
+            t for t in titles if t.media_type == "movie" and t.revenue is None and t.budget is None
+        ]
+
+        if not movies_to_enrich:
+            return
+
+        enriched = 0
+        for t in movies_to_enrich:
+            try:
+                data = await self._get_json(f"/movie/{t.tmdb_id}")
+                revenue = data.get("revenue")
+                budget = data.get("budget")
+                if revenue is not None:
+                    t.revenue = revenue
+                if budget is not None:
+                    t.budget = budget
+                enriched += 1
+            except Exception as exc:
+                logger.debug(f"[tmdb] Could not fetch details for movie {t.tmdb_id}: {exc}")
+
+        if enriched:
+            logger.info(f"[tmdb] Enriched {enriched}/{len(movies_to_enrich)} movies with details")
+
     async def search(
         self,
         query: str,
@@ -212,6 +247,8 @@ class TMDBCollector:
         self,
         tmdb_id: int,
         media_type: str,
+        *,
+        suppress_not_found_error: bool = False,
     ) -> TMDBTitle | None:
         """
         Get detailed information about a specific title.
@@ -219,6 +256,7 @@ class TMDBCollector:
         Args:
             tmdb_id: TMDB ID
             media_type: movie or tv
+            suppress_not_found_error: Avoid noisy logs when 404 is an expected probe
 
         Returns:
             Title details or None if not found
@@ -237,6 +275,17 @@ class TMDBCollector:
             )
 
             return self._parse_title(data, media_type=media_type)
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                message = f"[tmdb] Details not found for {media_type}/{tmdb_id}"
+                if suppress_not_found_error:
+                    logger.debug(message)
+                else:
+                    logger.warning(message)
+                return None
+            logger.error(f"[tmdb] Error fetching details for {media_type}/{tmdb_id}: {e}")
+            return None
 
         except Exception as e:
             logger.error(f"[tmdb] Error fetching details for {media_type}/{tmdb_id}: {e}")
@@ -320,6 +369,8 @@ class TMDBCollector:
             genres=data.get("genres", [])
             or [{"id": g, "name": str(g)} for g in data.get("genre_ids", [])],
             original_language=data.get("original_language", "en"),
+            revenue=data.get("revenue"),
+            budget=data.get("budget"),
             raw_data=data,
         )
 
@@ -390,6 +441,12 @@ class TMDBCollector:
                         {"id": 10765, "name": "Sci-Fi & Fantasy"},
                     ],
                     original_language="en",
+                    revenue=random.randint(50_000_000, 800_000_000)
+                    if data["media_type"] == "movie"
+                    else None,
+                    budget=random.randint(20_000_000, 200_000_000)
+                    if data["media_type"] == "movie"
+                    else None,
                     raw_data=data,
                 )
             )

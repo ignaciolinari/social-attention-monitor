@@ -36,6 +36,38 @@ def translate_before_sentiment_enabled(settings: Any | None = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Language detection
+# ---------------------------------------------------------------------------
+
+_LANG_MIN_CHARS = 20  # skip very short texts
+
+
+def detect_languages(texts: list[str]) -> list[str | None]:
+    """Detect the language of each text using *langdetect*.
+
+    Returns a list parallel to *texts* with ISO-639-1 codes (e.g. ``"en"``,
+    ``"es"``) or ``None`` when detection fails or the text is too short.
+
+    Designed to be called from ``asyncio.to_thread`` (CPU-bound).
+    """
+    from langdetect import DetectorFactory, detect
+
+    # Make langdetect deterministic across runs.
+    DetectorFactory.seed = 0
+
+    results: list[str | None] = []
+    for text in texts:
+        if len(text) < _LANG_MIN_CHARS:
+            results.append(None)
+            continue
+        try:
+            results.append(detect(text))
+        except Exception:
+            results.append(None)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Core sentiment pipeline
 # ---------------------------------------------------------------------------
 
