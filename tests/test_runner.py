@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sam.collectors.base import CommentCollectionResult
+from sam.collectors.tmdb import TMDBTitle
 from sam.pipeline import enrichment
 from sam.processors.sentiment import SentimentBatchTranslationStats
 from sam.scheduler import runner
@@ -331,6 +332,255 @@ class TestCollectOnce:
             mock_persist.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_collect_once_includes_watchlist_only_titles(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.scheduler.runner.get_session") as mock_get_session,
+            patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
+            patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
+            patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
+            patch(
+                "sam.scheduler.runner.get_all_watchlist_tmdb_ids", new_callable=AsyncMock
+            ) as mock_watchlists,
+            patch("sam.scheduler.runner.upsert_title") as mock_upsert,
+            patch("sam.scheduler.runner.insert_mentions") as mock_insert,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
+            patch(
+                "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
+                new_callable=AsyncMock,
+                return_value=2,
+            ),
+            patch("sam.scheduler.runner.persist_collection_result"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
+        ):
+            settings = MagicMock()
+            settings.demo_mode = True
+            settings.storage.enable_raw_data_storage = False
+            mock_settings.return_value = settings
+
+            mock_session = AsyncMock()
+            mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_get_session.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            trending_title = TMDBTitle(
+                tmdb_id=1,
+                title="Trending Title",
+                original_title="Trending Title",
+                media_type="movie",
+                release_date=datetime(2025, 1, 1, tzinfo=UTC),
+                overview="",
+                poster_path=None,
+                backdrop_path=None,
+                popularity=1.0,
+                vote_average=7.0,
+                vote_count=10,
+                genres=[],
+                original_language="en",
+                revenue=None,
+                budget=None,
+                raw_data={},
+            )
+            watchlist_title = TMDBTitle(
+                tmdb_id=2,
+                title="Watchlist Title",
+                original_title="Watchlist Title",
+                media_type="movie",
+                release_date=datetime(2025, 1, 2, tzinfo=UTC),
+                overview="",
+                poster_path=None,
+                backdrop_path=None,
+                popularity=2.0,
+                vote_average=7.5,
+                vote_count=20,
+                genres=[],
+                original_language="en",
+                revenue=None,
+                budget=None,
+                raw_data={},
+            )
+
+            mock_tmdb = AsyncMock()
+            mock_tmdb.get_trending.return_value = [trending_title]
+            mock_tmdb.get_details.return_value = watchlist_title
+            mock_tmdb.close = AsyncMock()
+            mock_tmdb_cls.return_value = mock_tmdb
+
+            mock_watchlists.return_value = {2}
+
+            mock_reddit = AsyncMock()
+            mock_reddit.collect.return_value = MagicMock(success=False, posts=[])
+            mock_reddit.close = AsyncMock()
+            mock_reddit_cls.return_value = mock_reddit
+
+            mock_youtube = AsyncMock()
+            mock_youtube.collect.return_value = MagicMock(success=False, posts=[])
+            mock_youtube.close = AsyncMock()
+            mock_youtube_cls.return_value = mock_youtube
+
+            mock_bluesky = AsyncMock()
+            mock_bluesky.collect.return_value = MagicMock(success=False, posts=[])
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
+            mock_db_title = MagicMock()
+            mock_db_title.id = uuid.uuid4()
+            mock_upsert.return_value = mock_db_title
+
+            sentiment = MagicMock()
+            sentiment.to_dict.return_value = {
+                "compound": 0.1,
+                "label": "positive",
+                "model": "vader",
+            }
+
+            def _sentiment_side_effect(texts, *, translate, log_context="runner"):
+                _ = (translate, log_context)
+                return [sentiment] * len(texts), SentimentBatchTranslationStats().to_dict()
+
+            mock_sentiment.side_effect = _sentiment_side_effect
+            mock_insert.return_value = 0
+
+            stats = await runner.collect_once(
+                limit_titles=1,
+                limit_reddit=1,
+                limit_youtube=1,
+                limit_bluesky=1,
+            )
+
+            assert stats["titles"] == 2
+            assert mock_upsert.call_count == 2
+            mock_tmdb.get_details.assert_awaited_once_with(
+                2,
+                media_type="movie",
+                suppress_not_found_error=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_collect_once_retries_watchlist_title_as_tv_after_movie_miss(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.scheduler.runner.get_session") as mock_get_session,
+            patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
+            patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
+            patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
+            patch(
+                "sam.scheduler.runner.get_all_watchlist_tmdb_ids", new_callable=AsyncMock
+            ) as mock_watchlists,
+            patch("sam.scheduler.runner.upsert_title") as mock_upsert,
+            patch("sam.scheduler.runner.insert_mentions") as mock_insert,
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
+            patch(
+                "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
+                new_callable=AsyncMock,
+                return_value=2,
+            ),
+            patch("sam.scheduler.runner.persist_collection_result"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
+        ):
+            settings = MagicMock()
+            settings.demo_mode = True
+            settings.storage.enable_raw_data_storage = False
+            mock_settings.return_value = settings
+
+            mock_session = AsyncMock()
+            mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_get_session.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            trending_title = TMDBTitle(
+                tmdb_id=1,
+                title="Trending Title",
+                original_title="Trending Title",
+                media_type="movie",
+                release_date=datetime(2025, 1, 1, tzinfo=UTC),
+                overview="",
+                poster_path=None,
+                backdrop_path=None,
+                popularity=1.0,
+                vote_average=7.0,
+                vote_count=10,
+                genres=[],
+                original_language="en",
+                revenue=None,
+                budget=None,
+                raw_data={},
+            )
+            watchlist_title = TMDBTitle(
+                tmdb_id=2,
+                title="Watchlist Show",
+                original_title="Watchlist Show",
+                media_type="tv",
+                release_date=datetime(2025, 1, 2, tzinfo=UTC),
+                overview="",
+                poster_path=None,
+                backdrop_path=None,
+                popularity=2.0,
+                vote_average=7.5,
+                vote_count=20,
+                genres=[],
+                original_language="en",
+                revenue=None,
+                budget=None,
+                raw_data={},
+            )
+
+            mock_tmdb = AsyncMock()
+            mock_tmdb.get_trending.return_value = [trending_title]
+            mock_tmdb.get_details.side_effect = [None, watchlist_title]
+            mock_tmdb.close = AsyncMock()
+            mock_tmdb_cls.return_value = mock_tmdb
+
+            mock_watchlists.return_value = {2}
+
+            mock_reddit = AsyncMock()
+            mock_reddit.collect.return_value = MagicMock(success=False, posts=[])
+            mock_reddit.close = AsyncMock()
+            mock_reddit_cls.return_value = mock_reddit
+
+            mock_youtube = AsyncMock()
+            mock_youtube.collect.return_value = MagicMock(success=False, posts=[])
+            mock_youtube.close = AsyncMock()
+            mock_youtube_cls.return_value = mock_youtube
+
+            mock_bluesky = AsyncMock()
+            mock_bluesky.collect.return_value = MagicMock(success=False, posts=[])
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
+            mock_db_title = MagicMock()
+            mock_db_title.id = uuid.uuid4()
+            mock_upsert.return_value = mock_db_title
+
+            sentiment = MagicMock()
+            sentiment.to_dict.return_value = {
+                "compound": 0.1,
+                "label": "positive",
+                "model": "vader",
+            }
+
+            def _sentiment_side_effect(texts, *, translate, log_context="runner"):
+                _ = (translate, log_context)
+                return [sentiment] * len(texts), SentimentBatchTranslationStats().to_dict()
+
+            mock_sentiment.side_effect = _sentiment_side_effect
+            mock_insert.return_value = 0
+
+            stats = await runner.collect_once(
+                limit_titles=1,
+                limit_reddit=1,
+                limit_youtube=1,
+                limit_bluesky=1,
+            )
+
+            assert stats["titles"] == 2
+            assert mock_upsert.call_count == 2
+            assert mock_tmdb.get_details.await_args_list == [
+                ((2,), {"media_type": "movie", "suppress_not_found_error": True}),
+                ((2,), {"media_type": "tv", "suppress_not_found_error": False}),
+            ]
+
+    @pytest.mark.asyncio
     async def test_collect_once_continues_when_reddit_raises(self) -> None:
         with (
             patch("sam.scheduler.runner.get_settings") as mock_settings,
@@ -421,6 +671,193 @@ class TestCollectOnce:
             # Reddit error should not abort the title; YouTube path still persists.
             assert stats["titles"] == 1
             assert stats["youtube_mentions_inserted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_collect_once_tracks_language_detection_failures(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.scheduler.runner.get_session") as mock_get_session,
+            patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
+            patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
+            patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
+            patch("sam.scheduler.runner.upsert_title") as mock_upsert,
+            patch("sam.scheduler.runner.insert_mentions", new_callable=AsyncMock, return_value=1),
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
+            patch("sam.scheduler.runner.detect_languages", side_effect=RuntimeError("lang boom")),
+            patch(
+                "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
+                new_callable=AsyncMock,
+                return_value=2,
+            ),
+            patch("sam.scheduler.runner.persist_collection_result"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
+        ):
+            settings = MagicMock()
+            settings.demo_mode = True
+            settings.storage.enable_raw_data_storage = False
+            mock_settings.return_value = settings
+
+            mock_session = AsyncMock()
+            mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_get_session.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_title = MagicMock()
+            mock_title.title = "Test Movie"
+            mock_tmdb = AsyncMock()
+            mock_tmdb.get_trending.return_value = [mock_title]
+            mock_tmdb.close = AsyncMock()
+            mock_tmdb_cls.return_value = mock_tmdb
+
+            post = MagicMock()
+            post.source_id = "r1"
+            post.source_type = "post"
+            post.platform = "reddit"
+            post.content = "A long enough post body to trigger detection"
+            post.created_at = datetime.now(UTC)
+            post.author = "u"
+            post.url = None
+            post.metrics = {}
+
+            reddit_result = MagicMock()
+            reddit_result.success = True
+            reddit_result.posts = [post]
+            reddit_result.collected_at = datetime.now(UTC)
+
+            mock_reddit = AsyncMock()
+            mock_reddit.collect.return_value = reddit_result
+            mock_reddit.close = AsyncMock()
+            mock_reddit_cls.return_value = mock_reddit
+
+            mock_youtube = AsyncMock()
+            mock_youtube.collect.return_value = MagicMock(success=False, posts=[])
+            mock_youtube.close = AsyncMock()
+            mock_youtube_cls.return_value = mock_youtube
+
+            mock_bluesky = AsyncMock()
+            mock_bluesky.collect.return_value = MagicMock(success=False, posts=[])
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
+            mock_db_title = MagicMock()
+            mock_db_title.id = uuid.uuid4()
+            mock_upsert.return_value = mock_db_title
+
+            sentiment = MagicMock()
+            sentiment.to_dict.return_value = {
+                "compound": 0.1,
+                "label": "positive",
+                "model": "vader",
+            }
+
+            def _sentiment_side_effect(texts, *, translate, log_context="runner"):
+                _ = (translate, log_context)
+                return [sentiment] * len(texts), SentimentBatchTranslationStats().to_dict()
+
+            mock_sentiment.side_effect = _sentiment_side_effect
+
+            stats = await runner.collect_once(
+                limit_titles=1,
+                limit_reddit=1,
+                limit_youtube=1,
+                limit_bluesky=1,
+            )
+
+            assert stats["languages_detection_failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_collect_once_tracks_watchlist_fetch_failures(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.scheduler.runner.get_session") as mock_get_session,
+            patch("sam.scheduler.runner.TMDBCollector") as mock_tmdb_cls,
+            patch("sam.scheduler.runner.RedditCollector") as mock_reddit_cls,
+            patch("sam.scheduler.runner.YouTubeCollector") as mock_youtube_cls,
+            patch("sam.scheduler.runner.BlueskyCollector") as mock_bluesky_cls,
+            patch(
+                "sam.scheduler.runner.get_all_watchlist_tmdb_ids", new_callable=AsyncMock
+            ) as mock_watchlists,
+            patch("sam.scheduler.runner.upsert_title") as mock_upsert,
+            patch("sam.scheduler.runner.insert_mentions", new_callable=AsyncMock, return_value=0),
+            patch("sam.scheduler.runner.analyze_texts_for_sentiment_with_stats") as mock_sentiment,
+            patch(
+                "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
+                new_callable=AsyncMock,
+                return_value=2,
+            ),
+            patch("sam.scheduler.runner.persist_collection_result"),
+            patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
+        ):
+            settings = MagicMock()
+            settings.demo_mode = True
+            settings.storage.enable_raw_data_storage = False
+            mock_settings.return_value = settings
+
+            mock_session = AsyncMock()
+            mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_get_session.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            trending_title = TMDBTitle(
+                tmdb_id=1,
+                title="Trending Title",
+                original_title="Trending Title",
+                media_type="movie",
+                release_date=datetime(2025, 1, 1, tzinfo=UTC),
+                overview="",
+                poster_path=None,
+                backdrop_path=None,
+                popularity=1.0,
+                vote_average=7.0,
+                vote_count=10,
+                genres=[],
+                original_language="en",
+                revenue=None,
+                budget=None,
+                raw_data={},
+            )
+
+            mock_tmdb = AsyncMock()
+            mock_tmdb.get_trending.return_value = [trending_title]
+            mock_tmdb.get_details.side_effect = RuntimeError("tmdb transient error")
+            mock_tmdb.close = AsyncMock()
+            mock_tmdb_cls.return_value = mock_tmdb
+
+            mock_watchlists.return_value = {2}
+
+            mock_reddit = AsyncMock()
+            mock_reddit.collect.return_value = MagicMock(success=False, posts=[])
+            mock_reddit.close = AsyncMock()
+            mock_reddit_cls.return_value = mock_reddit
+
+            mock_youtube = AsyncMock()
+            mock_youtube.collect.return_value = MagicMock(success=False, posts=[])
+            mock_youtube.close = AsyncMock()
+            mock_youtube_cls.return_value = mock_youtube
+
+            mock_bluesky = AsyncMock()
+            mock_bluesky.collect.return_value = MagicMock(success=False, posts=[])
+            mock_bluesky.close = AsyncMock()
+            mock_bluesky_cls.return_value = mock_bluesky
+
+            mock_db_title = MagicMock()
+            mock_db_title.id = uuid.uuid4()
+            mock_upsert.return_value = mock_db_title
+
+            def _sentiment_side_effect(texts, *, translate, log_context="runner"):
+                _ = (texts, translate, log_context)
+                return [], SentimentBatchTranslationStats().to_dict()
+
+            mock_sentiment.side_effect = _sentiment_side_effect
+
+            stats = await runner.collect_once(
+                limit_titles=1,
+                limit_reddit=1,
+                limit_youtube=1,
+                limit_bluesky=1,
+            )
+
+            assert stats["watchlist_titles_failed"] == 1
+            assert stats["watchlist_titles_not_found"] == 0
 
 
 class TestYouTubeCommentsParallel:

@@ -17,6 +17,9 @@ from sam.storage.repository import (
     MentionProjection,
     escape_like,
     finish_pipeline_run,
+    get_all_watchlist_tmdb_ids,
+    get_average_benchmark_trajectory,
+    get_benchmark_contributors_count,
     get_latest_mention_collected_at,
     get_latest_metrics_snapshot,
     get_mentions_count,
@@ -219,6 +222,115 @@ class TestInsertMentions:
             collected_at=ts,
         )
         assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_language_map_uses_composite_identity_key(self) -> None:
+        from sam.collectors.base import CollectedPost, post_identity_key
+
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(scalars_all=[uuid4()])
+
+        post = CollectedPost(
+            platform="youtube",
+            source_id="shared-id",
+            source_type="video",
+            content="test",
+            author="author",
+            url="https://youtube.com",
+            created_at=datetime.now(UTC),
+            metrics={},
+        )
+
+        await insert_mentions(
+            session,
+            title_id=uuid4(),
+            platform="youtube",
+            posts=[post],
+            language_by_source_id={
+                post_identity_key("youtube", "video", "shared-id"): "en",
+                "shared-id": "es",
+            },
+        )
+
+        stmt = session.execute.call_args.args[0]
+        assert stmt.compile().params["detected_language_m0"] == "en"
+
+
+class TestWatchlistHelpers:
+    @pytest.mark.asyncio
+    async def test_get_all_watchlist_tmdb_ids_deduplicates_ids(self) -> None:
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(
+            all_rows=[([1396, 438631],), ([438631, 95396],), (None,)]
+        )
+
+        result = await get_all_watchlist_tmdb_ids(session)
+
+        assert result == {1396, 438631, 95396}
+
+    @pytest.mark.asyncio
+    async def test_get_all_watchlist_tmdb_ids_accepts_async_mock_rows(self) -> None:
+        session = _mock_session()
+        result = MagicMock()
+        result.all = AsyncMock(return_value=[([1396],)])
+        session.execute.return_value = result
+
+        ids = await get_all_watchlist_tmdb_ids(session)
+
+        assert ids == {1396}
+
+    @pytest.mark.asyncio
+    async def test_get_all_watchlist_tmdb_ids_ignores_malformed_values(self) -> None:
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(
+            all_rows=[([1396, "bad", -1, 0, 438631],), ({"oops": True},), (None,)]
+        )
+
+        ids = await get_all_watchlist_tmdb_ids(session)
+
+        assert ids == {1396, 438631}
+
+
+class TestBenchmarkHelpers:
+    @pytest.mark.asyncio
+    async def test_get_average_benchmark_trajectory_maps_rows(self) -> None:
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(
+            all_rows=[
+                MagicMock(day=0, avg_attention_index=12.345, sample_count=3),
+                MagicMock(day=1, avg_attention_index=9.0, sample_count=2),
+            ]
+        )
+
+        rows = await get_average_benchmark_trajectory(
+            session,
+            target_title_id=uuid4(),
+            comparison_type="movie",
+            window_hours=24,
+            days=7,
+            comparison_limit=20,
+        )
+
+        assert rows == [
+            {"day": 0, "avg_attention_index": 12.35, "sample_count": 3},
+            {"day": 1, "avg_attention_index": 9.0, "sample_count": 2},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_benchmark_contributors_count_maps_scalar(self) -> None:
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(scalar_one=4)
+
+        count = await get_benchmark_contributors_count(
+            session,
+            target_title_id=uuid4(),
+            comparison_type="movie",
+            window_hours=24,
+            days=7,
+            comparison_limit=20,
+        )
+
+        assert count == 4
 
 
 # ---------------------------------------------------------------------------
