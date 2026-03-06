@@ -41,16 +41,21 @@ from sam.api.metrics import (  # noqa: F401
 )
 from sam.api.middleware import RateLimiter, _path_requires_auth  # noqa: F401
 from sam.api.routes.alerts import router as alerts_router
+from sam.api.routes.benchmark import router as benchmark_router
+from sam.api.routes.box_office import router as box_office_router
 from sam.api.routes.collectors import router as collectors_router
+from sam.api.routes.compare import router as compare_router
 
 # Route modules
 from sam.api.routes.health import router as health_router
+from sam.api.routes.language import router as language_router
 from sam.api.routes.mentions import router as mentions_router
 from sam.api.routes.metrics_routes import router as metrics_router
 from sam.api.routes.pipeline import router as pipeline_router
 from sam.api.routes.sentiment import router as sentiment_router
 from sam.api.routes.titles import router as titles_router
 from sam.api.routes.trending import router as trending_router
+from sam.api.routes.watchlists import router as watchlists_router
 from sam.api.routes.ws import router as ws_router
 
 # ---------------------------------------------------------------------------
@@ -208,3 +213,8 @@ app.include_router(titles_router)
 app.include_router(metrics_router)
 app.include_router(alerts_router)
 app.include_router(ws_router)
+app.include_router(box_office_router)
+app.include_router(language_router)
+app.include_router(compare_router)
+app.include_router(watchlists_router)
+app.include_router(benchmark_router)

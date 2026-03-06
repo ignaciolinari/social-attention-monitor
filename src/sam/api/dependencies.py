@@ -46,6 +46,8 @@ from sam.storage.database import get_session
 from sam.storage.models import Title as TitleModel
 from sam.storage.repository import (
     escape_like,
+    get_average_benchmark_trajectory,
+    get_benchmark_contributors_count,
     get_latest_mention_collected_at,
     get_mentions_count,
     get_mentions_for_title,
@@ -71,6 +73,8 @@ __all__ = [
     "count_alerts",
     "count_unacknowledged_alerts",
     "escape_like",
+    "get_average_benchmark_trajectory",
+    "get_benchmark_contributors_count",
     "get_alert_counts_by_severity",
     "get_metrics_timeseries",
     "get_pipeline_health_stats",
@@ -205,6 +209,8 @@ def title_from_row(row: TitleModel) -> DbTitleResponse:
         media_type=str(row.media_type),
         release_date=row.release_date.isoformat() if row.release_date else None,
         popularity=getattr(row, "popularity", None),
+        revenue=row.revenue,
+        budget=row.budget,
     )
 
 

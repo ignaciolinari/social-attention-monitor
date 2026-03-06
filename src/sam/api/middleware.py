@@ -205,7 +205,7 @@ def _get_rate_limiter() -> RateLimiterBackend:
 
 # Also protect any PUT / POST / DELETE that is not a health-check or
 # an alert acknowledgment (which only changes per-alert state).
-_AUTH_REQUIRED_METHODS = {"PUT", "DELETE"}
+_AUTH_REQUIRED_METHODS = {"POST", "PUT", "DELETE"}
 
 
 def _path_requires_auth(method: str, path: str) -> bool:
@@ -221,7 +221,7 @@ def _path_requires_auth(method: str, path: str) -> bool:
     # Sentiment analyze is expensive — protect against abuse.
     if path == "/api/v1/sentiment/analyze":
         return True
-    # PUT/DELETE on any API path
+    # POST/PUT/DELETE on any API path
     return method in _AUTH_REQUIRED_METHODS and path.startswith("/api/")
 
 
