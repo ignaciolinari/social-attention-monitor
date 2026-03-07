@@ -56,3 +56,15 @@ def render(ctx: PageContext) -> None:
     st.subheader("Attention index over time")
     fig2 = px.line(df, x="snapshot_time", y="attention_index", markers=True)
     st.plotly_chart(fig2, use_container_width=True)
+
+    if "hype_acceleration" in df.columns and df["hype_acceleration"].notna().any():
+        st.subheader("Hype acceleration over time")
+        st.caption("Second derivative of mentions — positive = hype building, negative = declining")
+        fig3 = px.line(df, x="snapshot_time", y="hype_acceleration", markers=True)
+        st.plotly_chart(fig3, use_container_width=True)
+
+    if "sentiment_volatility" in df.columns and df["sentiment_volatility"].notna().any():
+        st.subheader("Sentiment volatility over time")
+        st.caption("Standard deviation of sentiment scores — higher = more polarized discussion")
+        fig4 = px.line(df, x="snapshot_time", y="sentiment_volatility", markers=True)
+        st.plotly_chart(fig4, use_container_width=True)

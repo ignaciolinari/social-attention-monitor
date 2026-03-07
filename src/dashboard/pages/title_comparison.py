@@ -90,17 +90,25 @@ def render(ctx: PageContext) -> None:
                 "Title": title_info.get("title", "?"),
                 "Type": title_info.get("media_type", "?"),
                 "Attention Index": latest.get("attention_index"),
+                "Hype Accel": latest.get("hype_acceleration"),
                 "Mentions": latest.get("mention_count"),
                 "Velocity": latest.get("mention_velocity"),
                 "Avg Sentiment": latest.get("avg_sentiment"),
+                "Sentiment Vol": latest.get("sentiment_volatility"),
+                "Neg Ratio": latest.get("negative_ratio"),
             }
         )
 
     if summary_rows:
-        st.dataframe(
-            pd.DataFrame(summary_rows),
-            use_container_width=True,
-            hide_index=True,
+        summary_df = pd.DataFrame(summary_rows)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        csv_bytes = summary_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "📥 Download comparison as CSV",
+            data=csv_bytes,
+            file_name="title_comparison.csv",
+            mime="text/csv",
+            key="compare_csv",
         )
 
 

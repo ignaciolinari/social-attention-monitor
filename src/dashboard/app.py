@@ -25,6 +25,7 @@ from dashboard.pages import PageContext
 from dashboard.pages import alerts as page_alerts
 from dashboard.pages import alpha_metrics as page_alpha
 from dashboard.pages import box_office as page_box_office
+from dashboard.pages import executive_overview as page_executive
 from dashboard.pages import historical_benchmark as page_benchmark
 from dashboard.pages import language_segmentation as page_language
 from dashboard.pages import pipeline_observability as page_observability
@@ -51,8 +52,9 @@ st_autorefresh(interval=DASHBOARD_REFRESH_MINUTES * 60 * 1000, key="data_refresh
 apply_theme()
 
 
-# Page label -> renderer mapping
+# Page label -> renderer mapping (Executive first = default landing)
 _PAGES = {
+    "📋 Executive Overview": page_executive.render,
     "🔥 Trending Now": page_trending.render,
     "📈 Time Series": page_timeseries.render,
     "🔄 Platform Comparison": page_platform.render,

@@ -33,6 +33,7 @@ def render(ctx: PageContext) -> None:
                 "title": t["title"],
                 "media_type": t["media_type"],
                 "attention_index": m.get("attention_index"),
+                "hype_acceleration": m.get("hype_acceleration"),
                 "mention_count": m.get("mention_count"),
                 "mention_velocity": m.get("mention_velocity"),
                 "avg_sentiment": m.get("avg_sentiment"),
@@ -46,6 +47,13 @@ def render(ctx: PageContext) -> None:
 
     df = pd.DataFrame(rows).sort_values(by="attention_index", ascending=False, na_position="last")
 
+    # Share of voice: % of total mentions each title has
+    total_mentions = df["mention_count"].fillna(0).sum()
+    if total_mentions > 0:
+        df["share_of_voice_pct"] = (df["mention_count"].fillna(0) / total_mentions * 100).round(1)
+    else:
+        df["share_of_voice_pct"] = 0.0
+
     # Hide mention columns for disabled collectors
     drop_cols = ["title_id"]
     platform_cols = {
@@ -56,10 +64,16 @@ def render(ctx: PageContext) -> None:
     for plat, col in platform_cols.items():
         if plat not in ctx.enabled_platforms and col in df.columns:
             drop_cols.append(col)
-    st.dataframe(
-        df.drop(columns=drop_cols, errors="ignore"),
-        use_container_width=True,
-        hide_index=True,
+    display_df = df.drop(columns=drop_cols, errors="ignore")
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "📥 Download as CSV",
+        data=csv_bytes,
+        file_name="trending.csv",
+        mime="text/csv",
+        key="trending_csv",
     )
 
     st.caption(f"Updated: {trending.get('collected_at')}")

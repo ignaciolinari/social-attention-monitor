@@ -42,6 +42,33 @@ def render(ctx: PageContext) -> None:
         _render_all_titles_table(df)
         return
 
+    # ── Correlation metrics ───────────────────────────────────────────────
+    if len(df_revenue) >= 2:
+        ai = df_revenue["attention_index"].astype(float)
+        rev = df_revenue["revenue"].astype(float)
+        pearson = ai.corr(rev)
+        spearman = ai.rank().corr(rev.rank())
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric(
+                "Pearson correlation",
+                f"{pearson:.3f}" if pd.notna(pearson) else "—",
+                help="Linear relationship between Attention Index and revenue",
+            )
+        with c2:
+            st.metric(
+                "Spearman correlation",
+                f"{spearman:.3f}" if pd.notna(spearman) else "—",
+                help="Monotonic relationship (rank-based)",
+            )
+        with c3:
+            n = len(df_revenue)
+            st.metric("Sample size (titles with revenue)", n)
+        st.caption(
+            "Correlation > 0.3 suggests social attention correlates with box office; "
+            "interpret with caution for small samples."
+        )
+
     # ── Scatter: Attention Index vs Revenue ──────────────────────────────
     st.subheader("📈 Attention Index vs. Revenue")
     fig_scatter = px.scatter(

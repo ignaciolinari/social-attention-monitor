@@ -148,11 +148,16 @@ def _render_metric_cards(latest_raw: dict[str, Any]) -> None:
             if isinstance(hhi, (int, float)) and hhi < 0.1
             else ("Moderate" if isinstance(hhi, (int, float)) and hhi < 0.25 else "Concentrated")
         )
+        repeat_ratio = latest_raw.get("repeat_author_ratio")
+        repeat_str = (
+            f" (repeat: {float(repeat_ratio):.2f})"
+            if isinstance(repeat_ratio, (int, float))
+            else ""
+        )
         st.metric(
             "Author Diversity",
-            f"{div_label} ({float(hhi):.3f})" if isinstance(hhi, (int, float)) else "—",
-            help="HHI index. Lower = more diverse author base."
-            " High concentration may indicate echo chambers.",
+            f"{div_label} ({float(hhi):.3f}){repeat_str}" if isinstance(hhi, (int, float)) else "—",
+            help="HHI index. Lower = more diverse. Repeat = fraction of authors posting 2+ times.",
         )
 
 

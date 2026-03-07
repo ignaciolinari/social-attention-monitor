@@ -296,6 +296,8 @@ def _render_sentiment_throughput(runs: list[dict[str, Any]]) -> None:
             "mentions_inserted",
             "spam_filtered",
             "duplicates_removed",
+            "raw_storage_failures",
+            "mentions_capped_titles",
         ):
             val = stats.get(key)
             if isinstance(val, (int, float)):
@@ -356,7 +358,15 @@ def _render_sentiment_throughput(runs: list[dict[str, Any]]) -> None:
 
     # Data quality metrics
     quality_cols = [
-        c for c in ("mentions_inserted", "spam_filtered", "duplicates_removed") if c in df.columns
+        c
+        for c in (
+            "mentions_inserted",
+            "spam_filtered",
+            "duplicates_removed",
+            "raw_storage_failures",
+            "mentions_capped_titles",
+        )
+        if c in df.columns
     ]
     if quality_cols and df[quality_cols].sum().sum() > 0:
         long_q = df.melt(
