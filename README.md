@@ -18,13 +18,15 @@ A near–real-time data pipeline that monitors social engagement and public sent
 
 ### Dashboard Highlights
 
-**Trending Now:** Monitor real-time traction and acceleration of social discussions.
+**Executive Overview:** At-a-glance landing page with top titles, system health, recent alerts, and pipeline metrics.
+
+**Trending Now:** Monitor real-time traction, share of voice, and hype acceleration. Export to CSV.
 <!-- ![Trending Now Snapshot](docs/assets/tab_trending.png) -->
 
 **Sentiment Analysis:** Understand public sentiment using VADER & RoBERTa models.
 <!-- ![Sentiment Analysis Snapshot](docs/assets/tab_sentiment.png) -->
 
-**Live Alerts:** Catch viral hype spikes and sentiment shifts the moment they happen.
+**Live Alerts:** Catch viral hype spikes and sentiment shifts the moment they happen. Includes system health monitoring.
 <!-- ![Live Alerts Snapshot](docs/assets/tab_alerts.png) -->
 
 ## Overview
@@ -48,7 +50,7 @@ The pipeline is designed to operate **fully within official APIs and their terms
 - **Dark/Light Mode**: Toggle between dark and light themes in the dashboard.
 - **Real-Time Alerting**: Statistical anomaly detection for mention spikes and viral breakouts pushed instantly via WebSockets.
 - **Security**: Optional API key authentication for mutation and expensive endpoints, with sliding-window rate limiting.
-- **Observability**: Prometheus-compatible `/metrics` endpoint, pipeline self-health alerts, per-title timing, and structured log correlation IDs.
+- **Observability**: Prometheus-compatible `/metrics` endpoint, pipeline self-health alerts (run every cycle, throttled broadcast), per-title timing, and structured log correlation IDs.
 - **Resilience**: Title quarantine for failing titles, SIGHUP hot-reload, translation timeouts, and graceful collector degradation.
 
 ## Contributing
@@ -149,7 +151,7 @@ social-attention-monitor/
 │   │   └── utils/         # Translation, shared helpers
 │   └── dashboard/         # Streamlit app (pages/, sidebar, api_client)
 ├── docs/                  # Architecture, features, setup, API reference
-├── tests/                 # Unit & integration tests (370+)
+├── tests/                 # Unit & integration tests (400+)
 └── docker-compose.yml     # Container orchestration
 ```
 
@@ -158,8 +160,9 @@ social-attention-monitor/
 The project uses GitHub Actions to enforce quality:
 - code linting (`ruff`)
 - static type checking (`mypy`)
-- tested coverage (`pytest`)
+- tested coverage (`pytest`) with Codecov upload (`fail_ci_if_error: true`)
 - dependency security audits (`pip-audit`)
+- end-to-end smoke test (Postgres + Redis + API + collector seed + benchmark)
 
 ## License
 

@@ -69,10 +69,23 @@ On the first non-demo run, NLP models (RoBERTa, sarcasm, emotions) may be downlo
 
 ### No mentions / empty metrics
 
-- **Demo mode**: In demo mode, data is generated. Check `DEMO_MODE=false` for live data.
+- **Demo mode**: In demo mode, data is generated. Check `SAM_DEMO_MODE=false` for live data.
 - **Collector not running**: Start the collector: `make run-collector`.
 - **API keys**: Ensure at least one of YouTube or Bluesky has valid credentials and is enabled.
 - **Titles**: TMDB must return trending titles first; then collectors search for mentions. Run a few poll cycles.
+
+### One-shot collector says lease is active
+
+If `python -m sam.scheduler.runner --once` or a manual recovery run reports that the collector lease is active:
+
+- A healthy collector process may already be running. Check that first and stop it if your intent is to run manually.
+- If the previous process died and left stale state behind, run:
+
+```bash
+python -m sam.scheduler.runner --once --force-clear-lease --limit-titles 2
+```
+
+- `--force-clear-lease` is intentionally conservative: it clears only stale state and refuses to evict an active lease owned by a live collector.
 
 ## FAQ
 
@@ -87,3 +100,6 @@ Data is stored indefinitely. See [Setup](setup.md#data-retention--privacy) for p
 
 **How do I run the full stack in Docker?**
 `docker compose up -d` starts postgres, redis, api, collector, and dashboard.
+
+**What does "mentions capped" mean in pipeline stats?**
+Metrics snapshots fetch up to 10,000 mentions per title per window. If a title has more, the snapshot is computed from the cap and `mentions_capped_titles` is incremented in pipeline run stats. Check Pipeline Observability for this metric. For very high-volume titles, consider increasing the limit in `metrics_snapshots.py` or splitting by platform.

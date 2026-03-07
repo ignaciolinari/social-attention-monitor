@@ -62,7 +62,7 @@ Data flows from collectors through a sequence of processing modules before stora
 Redis serves three crucial functions:
 1. **API Caching**: Caches intense DB queries (e.g., trending titles, search, and aggregated metrics) with configurable TTLs.
 2. **Distributed Toggles**: Shares feature flags (like `YOUTUBE_ENABLED`) safely across separate processes (e.g., FastAPI vs. the Scheduler).
-3. **Anomaly Alerts Pub/Sub**: Facilitates system-wide distribution of anomaly alerts before they push to connected WebSocket clients.
+3. **Anomaly Alerts Pub/Sub**: Facilitates system-wide distribution of anomaly alerts before they push to connected WebSocket clients. System health alerts are throttled (15 min per type) via Redis keys to avoid spamming clients.
 
 ---
 
@@ -77,5 +77,5 @@ The backend service exposes data to the dashboard and external clients. The API 
 
 ## 5. Presentation Layer (Streamlit)
 The dashboard provides operational observability, structured as modular pages under `dashboard/pages/` with shared helpers in `dashboard/api_client.py`, `dashboard/helpers.py`, and `dashboard/sidebar.py`.
-- **Multipage Navigation**: Sidebar-driven navigation across 14 pages, including newer analytical surfaces such as Compare Titles, Box Office, Language Segmentation, Historical Benchmark, and Watchlists.
+- **Multipage Navigation**: Sidebar-driven navigation across 15 pages, including Executive Overview (landing), Compare Titles, Box Office (with correlation coefficients), Language Segmentation, Historical Benchmark, and Watchlists. CSV export available on Trending and Compare tables.
 - **State Management**: Utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.

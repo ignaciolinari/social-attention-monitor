@@ -86,18 +86,19 @@ SAM continuously monitors the calculated metrics against historical baselines to
 A dedicated `Streamlit` application provides a window into the pipeline's operational state and unlocks powerful data storytelling.
 
 **Analytical Views:**
-- **Trending Now**: High-level overview of tracking counts, pipeline health, and top trending titles ranked by the dynamic **Attention Index**.
-- **Time Series**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity against Average Sentiment over custom time windows.
+- **Executive Overview** *(landing page)*: At-a-glance summary of top titles, system health, recent alerts, and pipeline metrics.
+- **Trending Now**: High-level overview of tracking counts, pipeline health, and top trending titles ranked by the dynamic **Attention Index**. Includes **Share of Voice** (%), **Hype Acceleration**, and CSV export.
+- **Time Series**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity, Attention Index, Hype Acceleration, and Sentiment Volatility over custom time windows.
 - **Sentiment Comparison**: A side-by-side analysis of how different platforms (e.g., Reddit vs. YouTube) compare in their sentiment for a specific title, bringing the **Sentiment Divergence** metric to life.
-- **Alpha Metrics**: Dashboard for advanced analytical scores like Audience Fatigue, Viral Coefficient, and Author Diversity.
-- **Compare Titles**: Side-by-side comparison of 2–5 titles with overlaid line charts for attention index, mention velocity, and sentiment.
-- **Box Office**: Scatter-plot correlation between social attention and commercial performance (revenue/budget from TMDB). Includes ROI analysis.
+- **Alpha Metrics**: Dashboard for advanced analytical scores like Audience Fatigue, Viral Coefficient, Author Diversity (HHI), and Repeat Author Ratio.
+- **Compare Titles**: Side-by-side comparison of 2–5 titles with overlaid line charts for attention index, mention velocity, and sentiment. Summary table includes hype acceleration, sentiment volatility, negative ratio. CSV export available.
+- **Box Office**: Scatter-plot correlation between social attention and commercial performance (revenue/budget from TMDB). Shows Pearson and Spearman correlation coefficients. Includes ROI analysis.
 - **Language Segmentation**: Geographic/linguistic breakdown of mentions with donut charts and per-language sentiment bar charts.
 - **Historical Benchmark**: Compare a title's early day-level trajectory (first N days from release) against the averaged daily trajectory of similar titles.
 - **Watchlists**: Create, edit, and delete persistent user-defined watchlists to track custom sets of TMDB titles.
-- **Anomaly Alerts**: A live feed of triggered anomalies (Spikes, Shifts, Breakouts), allowing operators to trace exactly *when* public opinion turned.
+- **Anomaly Alerts**: A live feed of triggered anomalies (Spikes, Shifts, Breakouts) plus a **System Health** block showing no-ingest, collector failures, quota thresholds, and Redis status. Allows operators to trace exactly *when* public opinion turned.
 - **API Quota**: Visualizations of external API usage (especially YouTube's daily budget) to ensure the system stays within limits.
-- **Pipeline Observability**: Per-run timing breakdown, per-title processing times (`per_title_ms`), collector stats, and translation metrics.
+- **Pipeline Observability**: Per-run timing breakdown, per-title processing times (`per_title_ms`), collector stats, translation metrics, plus `raw_storage_failures` and `mentions_capped_titles` when applicable.
 - **System Config**: UI for dynamically toggling collectors on or off (sends API key automatically when `SAM_API_KEY` is configured).
 - **Dark/Light Mode**: Toggle between dark and light themes via the sidebar settings.
 
@@ -121,7 +122,7 @@ SAM supports optional API key authentication to protect sensitive and expensive 
 SAM is built for operational visibility in production.
 
 - **Prometheus `/metrics` endpoint**: Exposes counters (`collection_cycles_total`, `mentions_inserted_total`, `quota_units_used`) and histograms (`sentiment_analysis_duration_seconds`) in Prometheus text format.
-- **Pipeline Self-Health Alerts**: `AlertManager.check_system_health()` monitors for stalled ingestion, collector failures, quota thresholds, and Redis degradation — exposed at `GET /api/v1/alerts/system-health`.
+- **Pipeline Self-Health Alerts**: `AlertManager.check_system_health()` runs after each collector cycle and monitors for stalled ingestion, collector failures, quota thresholds, and Redis degradation. Results are broadcast via Redis Pub/Sub (throttled to once per 15 min per alert type) and exposed at `GET /api/v1/alerts/system-health`.
 - **Log Correlation IDs**: Runner uses `logger.contextualize(run_id=..., title=...)` so every log line within a collection cycle carries structured context for easy debugging.
 - **Pipeline Run History**: `GET /api/v1/pipeline/runs` returns paginated run history with rich stats (timing, quota, spam, translation, per-title breakdown).
 - **Redis Degraded Warning**: Rate-limited warning logs when Redis becomes unreachable, without blocking the pipeline.

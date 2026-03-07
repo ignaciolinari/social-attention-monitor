@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-07
+
+### Added
+- **Executive Overview**: New dashboard landing page aggregating top titles, system health, recent alerts, and pipeline metrics.
+- **System Health in pipeline**: `check_system_health()` now runs after each collector cycle; issues are broadcast via Redis Pub/Sub (throttled to once per 15 min per alert type).
+- **System Health block on Alerts page**: Dashboard displays system-level issues (no ingest, collector failure, quota, Redis degraded) from `GET /api/v1/alerts/system-health`.
+- **Share of Voice**: Per-title share (% of total mentions) shown on the Trending page.
+- **CSV export**: Download buttons on Trending and Compare Titles pages for table export.
+- **Box Office correlation**: Pearson and Spearman correlation coefficients between attention index and revenue, with sample size and interpretation.
+- **Pipeline observability metrics**: `raw_storage_failures` and `mentions_capped_titles` now surfaced in quality metrics.
+- **Bluesky retry**: Tenacity-based retry with exponential backoff for 429, 500, 502, 503, 504 errors.
+- **Benchmark smoke test**: CI seeds test data and runs positive benchmark test with valid `title_id`.
+- **System health broadcast throttling**: `publish_system_health_throttled()` in cache module; Redis-backed 15-min throttle per alert type.
+
+### Changed
+- **Codecov**: `fail_ci_if_error: true` so CI fails when coverage upload fails.
+- **Smoke test startup**: Replaced fixed `sleep 5` with retry loop (up to 30s) waiting for API readiness.
+- **Pre-commit mypy**: Uses `python -m mypy` instead of hardcoded `.venv/bin/python`.
+- **Metrics snapshots**: `compute_and_upsert_metrics_snapshots_multi` now returns `(count, mentions_capped)`; runner tracks `mentions_capped_titles` in stats.
+- **Attention Index param**: `_calculate_attention_index` parameter renamed from `sentiment_momentum` to `avg_sentiment` for clarity.
+- **Dashboard default page**: Executive Overview is now the default/landing view.
+
+### Fixed
+- **Watchlist delete 404**: Use `get_json_nocache` for watchlists list to prevent stale cache showing already-deleted items and causing 404 on subsequent delete attempts.
+- **Version display**: Bumped to 0.3.1 in `sam.__version__` and `pyproject.toml` so dashboard and API show correct version.
+
+### Dashboard Display
+- **Trending**: Added `hype_acceleration` and `share_of_voice_pct` columns.
+- **Time Series**: Added hype acceleration and sentiment volatility charts.
+- **Compare Titles**: Summary table now includes hype acceleration, sentiment volatility, negative ratio.
+- **Alpha Metrics**: Author Diversity card now shows repeat author ratio when available.
+- **Box Office**: Correlation metrics (Pearson, Spearman) before scatter plot.
+- **Alerts**: System Health block above Recent Alerts.
+
+### Documentation
+- **Snapshot bucketing**: Expanded `_snapshot_bucket` docstring to document 5-min polls vs 30-min bucket coalescing behavior.
+
 ## [0.3.0] - 2026-03-05
 
 ### Added

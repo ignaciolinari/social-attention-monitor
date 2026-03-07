@@ -55,7 +55,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 ### 6. Alerts
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/v1/alerts` | Lists recent alerts (acknowledged and unacknowledged). Filters: `limit`, `offset`, `title_id`, `severity`, `hours`. |
+| `GET` | `/api/v1/alerts` | Lists recent alerts. Filters: `limit`, `offset`, `title_id`, `severity`, `hours`, `unacknowledged_only`. |
 | `GET` | `/api/v1/alerts/counts` | Summary counts of alerts grouped by severity. |
 | `POST`| `/api/v1/alerts/{alert_id}/acknowledge`| Marks a specific alert as acknowledged. |
 | `POST`| `/api/v1/alerts/run-detection`| Manually trigger anomaly detection run. |
@@ -65,7 +65,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 |--------|----------|-------------|
 | `GET` | `/api/v1/pipeline/quota` | Returns detailed usage of platform API limits (e.g., YouTube's Daily Budget). |
 | `GET` | `/api/v1/pipeline/runs` | Paginated pipeline run history. Query: `limit`, `offset`. |
-| `GET` | `/api/v1/alerts/system-health` | System-wide health indicators for alerting. |
+| `GET` | `/api/v1/alerts/system-health` | System-wide health indicators (no ingest, collector failure, quota, Redis). Run automatically each collector cycle; results broadcast via WebSocket (throttled 15 min/type). |
 | `GET` | `/api/v1/metrics/app` | Application metrics in JSON format. |
 | `GET` | `/metrics` | Prometheus-compatible metrics in text format. |
 | `GET` | `/api/v1/ws/status` | Returns WebSocket connection count and subscription stats. |
@@ -74,7 +74,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 
 ## WebSockets
 
-Real-time anomalies and metrics are pushed to connected clients. Alerts are relayed through Redis pub/sub so scheduler-generated alerts are delivered to API WebSocket clients.
+Real-time anomalies and metrics are pushed to connected clients. Alerts are relayed through Redis pub/sub so scheduler-generated alerts (including system health issues) are delivered to API WebSocket clients. System health broadcasts are throttled to once per 15 minutes per alert type to avoid spam.
 
 **Endpoint**: `ws://localhost:8000/ws`
 

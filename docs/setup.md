@@ -106,7 +106,7 @@ SAM is highly configurable. All configurations live in the `.env` file and are l
 By default, SAM runs in demo mode, which uses mock data without requiring any API keys.
 To disable demo mode and use live data:
 ```env
-DEMO_MODE=false
+SAM_DEMO_MODE=false
 ```
 
 ### Platform API Access & Compliance
@@ -242,6 +242,25 @@ DATABASE_DEMO_SYNC_URL=postgresql://...           # Sync URL for migrations
 | `make ci-check` | Lint + format check + mypy + tests |
 | `make lock` | Regenerate requirements lockfiles (uv) |
 | `make audit` | Run pip-audit for vulnerabilities |
+
+### One-Shot Collector Recovery
+For operator-triggered smoke runs or recovery after an abnormal collector exit, you can run a single collection cycle directly:
+
+```bash
+python -m sam.scheduler.runner --once --limit-titles 2
+```
+
+If the previous collector process died and left behind stale lease/run state, use:
+
+```bash
+python -m sam.scheduler.runner --once --force-clear-lease --limit-titles 2
+```
+
+Important behavior:
+- `--force-clear-lease` only works together with `--once`
+- it clears stale collector lease and `PipelineRun(status="running")` state before starting
+- it refuses to evict an active lease from a healthy running collector process
+- use it for recovery, smoke tests, or local diagnostics, not normal steady-state operation
 
 ### Integration Tests
 Integration tests require a real Postgres instance. Use `make test-integration` which:

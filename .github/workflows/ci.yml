@@ -65,7 +65,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   security:
     name: Security Audit
@@ -143,10 +143,20 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://sam:sam@localhost:5432/sam
           REDIS_URL: redis://localhost:6379
-          DEMO_MODE: "true"
+          SAM_DEMO_MODE: "true"
+        run: uvicorn sam.api.main:app --host 0.0.0.0 --port 8000 &
+
+      - name: Wait for API
         run: |
-          uvicorn sam.api.main:app --host 0.0.0.0 --port 8000 &
-          sleep 5
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health >/dev/null 2>&1; then
+              echo "API ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API failed to become ready"
+          exit 1
 
       - name: Health check
         run: |
@@ -192,3 +202,26 @@ jobs:
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/v1/metrics/benchmark)
           if [ "$STATUS" = "422" ]; then echo "Benchmark endpoint loaded (422 as expected)"; else echo "Unexpected status $STATUS"; exit 1; fi
+
+      - name: Seed test data for benchmark
+        env:
+          DATABASE_URL: postgresql+asyncpg://sam:sam@localhost:5432/sam
+          DATABASE_SYNC_URL: postgresql://sam:sam@localhost:5432/sam
+          REDIS_URL: redis://localhost:6379
+          SAM_DEMO_MODE: "true"
+        run: python -m sam.scheduler.runner --once --limit-titles 2
+
+      - name: Benchmark positive test (with valid title_id)
+        run: |
+          TITLE_ID=$(curl -sf http://localhost:8000/api/v1/db/titles | jq -r '.titles[0].id // empty')
+          if [ -n "$TITLE_ID" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8000/api/v1/metrics/benchmark?title_id=$TITLE_ID")
+            if [ "$STATUS" = "200" ]; then
+              echo "Benchmark positive test passed (200)"
+            else
+              echo "Benchmark returned $STATUS for valid title_id (may be 400 if no release_date)"
+              [ "$STATUS" = "400" ] || exit 1
+            fi
+          else
+            echo "No titles available, skipping benchmark positive test"
+          fi

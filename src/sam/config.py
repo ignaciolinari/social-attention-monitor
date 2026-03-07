@@ -185,7 +185,7 @@ class DatabaseSettings(BaseSettings):
     demo_url: str = Field(
         default="",
         validation_alias=AliasChoices("DATABASE_DEMO_URL", "SAM_DEMO_DATABASE_URL"),
-        description="Async database URL to use when DEMO_MODE=true (optional)",
+        description="Async database URL to use when demo mode is enabled (optional)",
     )
     sync_url: str = Field(
         default="postgresql://sam:sam@localhost:5432/sam",
@@ -194,7 +194,7 @@ class DatabaseSettings(BaseSettings):
     demo_sync_url: str = Field(
         default="",
         validation_alias=AliasChoices("DATABASE_DEMO_SYNC_URL", "SAM_DEMO_DATABASE_SYNC_URL"),
-        description="Sync database URL to use when DEMO_MODE=true (optional)",
+        description="Sync database URL to use when demo mode is enabled (optional)",
     )
     echo: bool = Field(default=False, description="Echo SQL queries")
     pool_size: int = Field(default=5, description="Connection pool size")
