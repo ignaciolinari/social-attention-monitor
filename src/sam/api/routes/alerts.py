@@ -28,6 +28,7 @@ async def list_alerts(
     title_id: UUID | None = Query(None, description="Filter by title"),
     severity: str | None = Query(None, description="Filter by severity: info, warning, critical"),
     hours: int = Query(24, ge=1, le=24 * 30, description="Look back period in hours"),
+    unacknowledged_only: bool = Query(False, description="Return only unacknowledged alerts"),
 ) -> AlertsListResponse:
     """Get recent alerts with optional filtering."""
     since = datetime.now(UTC) - timedelta(hours=hours)
@@ -38,6 +39,7 @@ async def list_alerts(
             title_id=title_id,
             severity=severity,
             since=since,
+            unacknowledged_only=unacknowledged_only,
         )
         unack_total = await deps.get_unacknowledged_count(session)
         unack_filtered = await deps.count_unacknowledged_alerts(
@@ -53,6 +55,7 @@ async def list_alerts(
             title_id=title_id,
             severity=severity,
             since=since,
+            unacknowledged_only=unacknowledged_only,
         )
 
     has_more = (offset + len(alerts)) < total_matching

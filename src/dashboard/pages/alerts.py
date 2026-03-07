@@ -38,6 +38,9 @@ def render(ctx: PageContext) -> None:
     except Exception as e:
         st.error(f"Failed to load alert counts: {e}")
 
+    # System health (no ingest, collector failure, quota, Redis)
+    _render_system_health()
+
     st.divider()
 
     # Recent alerts list
@@ -113,6 +116,45 @@ def render(ctx: PageContext) -> None:
 
     # Pipeline health
     _render_pipeline_health(ctx)
+
+
+def _render_system_health() -> None:
+    """Render system-level health check (no ingest, collector failure, quota, Redis)."""
+    st.subheader("🏥 System health")
+    try:
+        health = get_json("/api/v1/alerts/system-health")
+        healthy = health.get("healthy", True)
+        issues = health.get("issues", [])
+
+        if healthy and not issues:
+            st.success("All systems operational")
+            return
+
+        if issues:
+            st.warning(f"**{len(issues)} system issue(s) detected**")
+            sys_icons = {
+                "no_ingest": "📭",
+                "collector_failure": "❌",
+                "quota_threshold": "📊",
+                "redis_degraded": "🔴",
+            }
+            for issue in issues:
+                severity = issue.get("severity", "info")
+                icon = {"critical": "🔴", "warning": "🟡", "info": "🟢"}.get(severity, "⚪")
+                alert_type = issue.get("alert_type", "unknown")
+                type_icon = sys_icons.get(alert_type, "⚠️")
+                with st.expander(
+                    f"{icon} {type_icon} {alert_type.replace('_', ' ').title()}: {issue.get('message', '')[:60]}",
+                    expanded=(severity == "critical"),
+                ):
+                    st.markdown(f"**Message:** {issue.get('message', '')}")
+                    details = issue.get("details", {})
+                    if details:
+                        st.json(details)
+        else:
+            st.success("All systems operational")
+    except Exception as e:
+        st.error(f"Failed to load system health: {e}")
 
 
 def _render_pipeline_health(_ctx: PageContext) -> None:

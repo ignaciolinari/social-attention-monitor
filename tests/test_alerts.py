@@ -1,6 +1,9 @@
 """Tests for the anomaly detection system."""
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from sam.alerts.detector import (
     AlertType,
@@ -9,6 +12,7 @@ from sam.alerts.detector import (
     MetricsWindow,
     Severity,
 )
+from sam.alerts.manager import count_alerts, get_recent_alerts
 
 
 def _make_window(
@@ -257,6 +261,34 @@ class TestSentimentDivergence:
         current = _make_window(sentiment_divergence=None)
         result = detector._detect_sentiment_divergence(current, "t1", "Title", datetime.now(UTC))
         assert result is None
+
+
+class TestAlertQueries:
+    @pytest.mark.asyncio
+    async def test_get_recent_alerts_can_filter_unacknowledged_only(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute.return_value = result
+
+        await get_recent_alerts(session, unacknowledged_only=True)
+
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+        assert "alerts.acknowledged_at IS NULL" in compiled
+
+    @pytest.mark.asyncio
+    async def test_count_alerts_can_filter_unacknowledged_only(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalar_one.return_value = 0
+        session.execute.return_value = result
+
+        await count_alerts(session, unacknowledged_only=True)
+
+        stmt = session.execute.await_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+        assert "alerts.acknowledged_at IS NULL" in compiled
 
     def test_no_divergence_below_threshold(self) -> None:
         detector = AnomalyDetector(min_history_points=3)

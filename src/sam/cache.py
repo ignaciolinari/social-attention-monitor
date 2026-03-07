@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -176,3 +177,37 @@ async def publish_alert_event(alert: dict[str, Any]) -> bool:
     except Exception as exc:
         _warn_redis_error("publish_alert_event", exc)
         return False
+
+
+_SYSTEM_HEALTH_THROTTLE_PREFIX = "sam:system-health:broadcast:"
+_SYSTEM_HEALTH_THROTTLE_SECONDS = 900  # 15 minutes per alert type
+
+
+async def publish_system_health_throttled(alert: dict[str, Any]) -> bool:
+    """Publish system health alert only if not recently broadcast for this type.
+
+    Throttles by alert_type to avoid spamming WebSocket clients every cycle
+    when the same issue persists (e.g. Redis degraded, no ingest).
+    """
+    alert_type = alert.get("alert_type") or alert.get("id", "unknown")
+    if isinstance(alert_type, str) and alert_type.startswith("system-"):
+        alert_type = alert_type.replace("system-", "")
+    key = f"{_SYSTEM_HEALTH_THROTTLE_PREFIX}{alert_type}"
+    r = get_redis()
+    if r is None:
+        return await publish_alert_event(alert)
+    try:
+        acquired = await r.set(key, "1", ex=_SYSTEM_HEALTH_THROTTLE_SECONDS, nx=True)
+        if not acquired:
+            return False  # Recently broadcast, skip
+        published = await publish_alert_event(alert)
+        if published:
+            return True
+        with contextlib.suppress(Exception):
+            await r.delete(key)
+        return False
+    except Exception as exc:
+        _warn_redis_error("publish_system_health_throttled", exc)
+        with contextlib.suppress(Exception):
+            await r.delete(key)
+        return await publish_alert_event(alert)

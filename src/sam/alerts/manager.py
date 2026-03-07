@@ -395,6 +395,7 @@ async def get_recent_alerts(
     title_id: UUID | None = None,
     severity: str | None = None,
     since: datetime | None = None,
+    unacknowledged_only: bool = False,
 ) -> list[Alert]:
     """Get recent alerts with optional filtering."""
     stmt = select(Alert).order_by(Alert.created_at.desc())
@@ -405,6 +406,8 @@ async def get_recent_alerts(
         stmt = stmt.where(Alert.severity == severity)
     if since:
         stmt = stmt.where(Alert.created_at >= since)
+    if unacknowledged_only:
+        stmt = stmt.where(Alert.acknowledged_at.is_(None))
 
     stmt = stmt.offset(offset).limit(limit)
     result = await session.execute(stmt)
@@ -417,6 +420,7 @@ async def count_alerts(
     title_id: UUID | None = None,
     severity: str | None = None,
     since: datetime | None = None,
+    unacknowledged_only: bool = False,
 ) -> int:
     """Count alerts matching optional filters."""
     stmt = select(sa_func.count()).select_from(Alert)
@@ -426,6 +430,8 @@ async def count_alerts(
         stmt = stmt.where(Alert.severity == severity)
     if since:
         stmt = stmt.where(Alert.created_at >= since)
+    if unacknowledged_only:
+        stmt = stmt.where(Alert.acknowledged_at.is_(None))
 
     result = await session.execute(stmt)
     return int(result.scalar_one())
