@@ -12,6 +12,7 @@ from typing import Any
 from sam import __version__
 from sam.config import get_settings
 from sam.logging import setup_logging
+from sam.pipeline.time import floor_time_bucket
 
 
 def main() -> None:
@@ -46,8 +47,14 @@ def main() -> None:
     recompute.add_argument(
         "--bucket-hours",
         type=int,
-        default=1,
-        help="Snapshot bucket size (default: 1 hour)",
+        default=None,
+        help="Deprecated alias for --bucket-minutes",
+    )
+    recompute.add_argument(
+        "--bucket-minutes",
+        type=int,
+        default=30,
+        help="Snapshot bucket size in minutes (default: 30)",
     )
 
     subparsers.add_parser(
@@ -58,8 +65,22 @@ def main() -> None:
         "compare-sentiment",
         help="Compare sentiment analysis results on recent DB mentions",
     )
+    collector_health_cmd = subparsers.add_parser(
+        "collector-health",
+        help="Check collector lease freshness and latest collector run status",
+    )
+    collector_health_cmd.add_argument(
+        "--max-staleness-minutes",
+        type=int,
+        default=None,
+        help="Override the maximum allowed age for the latest collector cycle",
+    )
 
     args = parser.parse_args()
+
+    if args.command == "collector-health":
+        asyncio.run(collector_health(max_staleness_minutes=args.max_staleness_minutes))
+        return
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════╗
@@ -136,13 +157,61 @@ def main() -> None:
                 from_ts=args.from_ts,
                 to_ts=args.to_ts,
                 windows=args.windows,
-                bucket_hours=args.bucket_hours,
+                bucket_minutes=args.bucket_hours * 60 if args.bucket_hours else args.bucket_minutes,
             )
         )
     elif args.command == "benchmark-sentiment":
         benchmark_sentiment()
     elif args.command == "compare-sentiment":
         asyncio.run(compare_sentiment())
+
+
+async def collector_health(*, max_staleness_minutes: int | None = None) -> None:
+    """Exit non-zero when the collector lease/run state is stale."""
+    from sqlalchemy import select
+
+    from sam.scheduler.runner import JOB_NAME, LEASE_NAME
+    from sam.storage.database import get_session
+    from sam.storage.models import Lease, PipelineRun
+
+    settings = get_settings()
+    threshold_minutes = max_staleness_minutes or settings.collector_health_max_staleness_minutes
+    threshold = timedelta(minutes=threshold_minutes)
+    now = datetime.now(UTC)
+
+    async with get_session() as session:
+        lease_result = await session.execute(select(Lease).where(Lease.name == LEASE_NAME).limit(1))
+        lease = lease_result.scalars().first()
+
+        run_result = await session.execute(
+            select(PipelineRun)
+            .where(PipelineRun.job_name == JOB_NAME)
+            .order_by(PipelineRun.started_at.desc())
+            .limit(1)
+        )
+        latest_run = run_result.scalars().first()
+
+    lease_healthy = bool(
+        lease is not None and lease.expires_at is not None and lease.expires_at >= now
+    )
+    recent_run = bool(
+        latest_run is not None
+        and latest_run.started_at is not None
+        and latest_run.started_at >= now - threshold
+        and latest_run.status in {"success", "degraded", "running"}
+    )
+
+    if lease_healthy or recent_run:
+        print("collector healthy")
+        return
+
+    status = latest_run.status if latest_run is not None else "missing"
+    started_at = (
+        latest_run.started_at.isoformat() if latest_run and latest_run.started_at else "never"
+    )
+    raise SystemExit(
+        f"collector unhealthy: latest_run_status={status} latest_run_started_at={started_at}"
+    )
 
 
 async def demo() -> None:
@@ -210,10 +279,16 @@ def _parse_iso8601(ts: str) -> datetime:
     return dt
 
 
-def _floor_to_bucket(dt: datetime, *, bucket_hours: int) -> datetime:
-    # Hour buckets only.
-    hour = (dt.hour // bucket_hours) * bucket_hours
-    return dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+def _floor_to_bucket(
+    dt: datetime,
+    *,
+    bucket_minutes: int | None = None,
+    bucket_hours: int | None = None,
+) -> datetime:
+    effective_bucket_minutes = bucket_minutes
+    if effective_bucket_minutes is None:
+        effective_bucket_minutes = (bucket_hours or 1) * 60
+    return floor_time_bucket(dt, bucket_minutes=effective_bucket_minutes)
 
 
 async def recompute_metrics(
@@ -221,7 +296,8 @@ async def recompute_metrics(
     from_ts: str,
     to_ts: str,
     windows: str,
-    bucket_hours: int,
+    bucket_minutes: int | None = None,
+    bucket_hours: int | None = None,
 ) -> None:
     """Backfill/recompute metrics snapshots for all active titles."""
     setup_logging()
@@ -230,8 +306,12 @@ async def recompute_metrics(
     from sam.storage.database import get_session
     from sam.storage.repository import list_active_titles
 
-    start = _floor_to_bucket(_parse_iso8601(from_ts), bucket_hours=bucket_hours)
-    end = _floor_to_bucket(_parse_iso8601(to_ts), bucket_hours=bucket_hours)
+    effective_bucket_minutes = bucket_minutes
+    if effective_bucket_minutes is None:
+        effective_bucket_minutes = (bucket_hours or 1) * 60
+
+    start = _floor_to_bucket(_parse_iso8601(from_ts), bucket_minutes=effective_bucket_minutes)
+    end = _floor_to_bucket(_parse_iso8601(to_ts), bucket_minutes=effective_bucket_minutes)
     if end < start:
         raise ValueError("--to must be >= --from")
 
@@ -241,7 +321,8 @@ async def recompute_metrics(
 
     print(
         f"Recomputing snapshots for windows={window_hours}, "
-        f"bucket_hours={bucket_hours}, range=[{start.isoformat()} .. {end.isoformat()}]"
+        "bucket_minutes="
+        f"{effective_bucket_minutes}, range=[{start.isoformat()} .. {end.isoformat()}]"
     )
 
     async with get_session() as session:
@@ -268,7 +349,7 @@ async def recompute_metrics(
                     snapshot_time=snapshot_time,
                     window_hours_list=window_hours,
                 )
-                snapshot_time = snapshot_time + timedelta(hours=bucket_hours)
+                snapshot_time = snapshot_time + timedelta(minutes=effective_bucket_minutes)
 
     print(f"✅ Done. Processed {titles_total} titles.")
 

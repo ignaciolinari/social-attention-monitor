@@ -591,31 +591,55 @@ def analyze_sentiment_batch_with_translation(
     Returns:
         Tuple of (sentiment results, typed translation stats).
     """
+    sentiments, translation_stats, _detected_languages = analyze_sentiment_batch_with_metadata(
+        texts,
+        translate=translate,
+        log_context=log_context,
+    )
+    return sentiments, translation_stats
+
+
+def analyze_sentiment_batch_with_metadata(
+    texts: list[str],
+    *,
+    translate: bool,
+    log_context: str = "sentiment",
+) -> tuple[list[SentimentResult], SentimentBatchTranslationStats, list[str | None]]:
+    """Translate/detect language once, then run batch sentiment analysis."""
     prepared = texts
+    detected_languages: list[str | None] = [None for _ in texts]
     translation_stats = SentimentBatchTranslationStats()
 
-    if translate:
-        try:
-            from sam.utils.translation import translate_batch_to_english_with_stats
+    try:
+        from sam.utils.translation import (
+            detect_text_languages_batch,
+            translate_batch_to_english_with_stats,
+        )
 
+        if translate:
             prepared, stats = translate_batch_to_english_with_stats(texts)
+            detected_languages = detect_text_languages_batch(texts)
             translation_stats = SentimentBatchTranslationStats(
                 translate_attempted=stats.attempted_count,
                 translate_count=stats.changed_count,
                 translate_failures=stats.failed_count,
                 translate_skipped_english=stats.skipped_english_count,
             )
-        except Exception as exc:
-            logger.warning(
-                f"[{log_context}] Translation step failed; using original text for sentiment: {exc}"
-            )
-            prepared = texts
+        else:
+            detected_languages = detect_text_languages_batch(texts)
+    except Exception as exc:
+        logger.warning(
+            f"[{log_context}] Translation/language stage failed; using original text for sentiment: {exc}"
+        )
+        prepared = texts
+        detected_languages = [None for _ in texts]
+        if translate:
             translation_stats = SentimentBatchTranslationStats(
                 translate_attempted=len(texts),
                 translate_failures=len(texts),
             )
 
-    return analyze_sentiment_batch(prepared), translation_stats
+    return analyze_sentiment_batch(prepared), translation_stats, detected_languages
 
 
 def get_analyzer() -> SentimentAnalyzer:

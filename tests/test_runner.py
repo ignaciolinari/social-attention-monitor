@@ -36,12 +36,11 @@ def _make_system_anomaly(
 class TestSnapshotBucket:
     """Tests for _snapshot_bucket helper."""
 
-    def test_rounds_up_to_next_hour(self) -> None:
+    def test_floors_to_current_half_hour(self) -> None:
         dt = datetime(2026, 1, 30, 14, 35, 22, 123456, tzinfo=UTC)
         result = runner._snapshot_bucket(dt)
-        # Rounds *up* so mentions collected at 14:35 fall inside the window.
-        assert result.hour == 15
-        assert result.minute == 0
+        assert result.hour == 14
+        assert result.minute == 30
         assert result.second == 0
         assert result.microsecond == 0
 
@@ -53,17 +52,17 @@ class TestSnapshotBucket:
     def test_preserves_date(self) -> None:
         dt = datetime(2026, 6, 15, 23, 59, 59, tzinfo=UTC)
         result = runner._snapshot_bucket(dt)
-        # 23:59 rounds up to next day 00:00.
+        # 23:59 stays in the current day's 23:30 bucket.
         assert result.year == 2026
         assert result.month == 6
-        assert result.day == 16
-        assert result.hour == 0
+        assert result.day == 15
+        assert result.hour == 23
 
     def test_lower_half_rounds_to_30(self) -> None:
-        """Minutes < 30 should round up to :30 of the same hour."""
+        """Minutes < 30 should floor to the top of the same hour."""
         dt = datetime(2026, 3, 10, 14, 12, 45, 999, tzinfo=UTC)
         result = runner._snapshot_bucket(dt)
-        assert result == datetime(2026, 3, 10, 14, 30, 0, 0, tzinfo=UTC)
+        assert result == datetime(2026, 3, 10, 14, 0, 0, 0, tzinfo=UTC)
 
     def test_exact_half_hour_unchanged(self) -> None:
         """Exactly on the :30 boundary should be kept as-is."""

@@ -40,6 +40,7 @@ class AlertManager:
         self,
         detector: AnomalyDetector | None = None,
         dedup_window_minutes: int = 60,
+        freshness_hours: int = 48,
     ):
         """
         Initialize the alert manager.
@@ -50,6 +51,7 @@ class AlertManager:
         """
         self.detector = detector or AnomalyDetector()
         self.dedup_window_minutes = dedup_window_minutes
+        self.freshness_hours = freshness_hours
 
     async def check_title_for_anomalies(
         self,
@@ -88,6 +90,9 @@ class AlertManager:
 
         # Most recent is "current", rest is history
         current_snapshot = snapshots[0]
+        freshness_cutoff = datetime.now(UTC) - timedelta(hours=self.freshness_hours)
+        if current_snapshot.snapshot_time < freshness_cutoff:
+            return []
         history_snapshots = list(reversed(snapshots[1:]))
 
         current = self._snapshot_to_window(current_snapshot)

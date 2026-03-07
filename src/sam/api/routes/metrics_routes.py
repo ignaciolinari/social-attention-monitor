@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import select
 from starlette.responses import Response
 
 from sam.api import dependencies as deps
@@ -20,6 +21,7 @@ from sam.api.schemas import (
     TrendingMetricsResponse,
 )
 from sam.config import get_settings
+from sam.storage.models import PipelineRun
 
 router = APIRouter(tags=["metrics"])
 
@@ -47,23 +49,79 @@ def _snapshot_from_row(m: Any) -> MetricsSnapshotResponse:
     )
 
 
+def _collector_prometheus_text(runs: list[PipelineRun]) -> str:
+    status_counts: dict[tuple[str, str], int] = {}
+    last_started: dict[str, datetime] = {}
+    mentions_by_platform = {"reddit": 0, "youtube": 0, "bluesky": 0}
+    youtube_quota_units = 0
+    youtube_quota_calls = 0
+
+    for run in runs:
+        job_name = run.job_name or "unknown"
+        status = run.status or "unknown"
+        status_counts[(job_name, status)] = status_counts.get((job_name, status), 0) + 1
+        started_at = run.started_at
+        if started_at is not None:
+            current = last_started.get(job_name)
+            if current is None or started_at > current:
+                last_started[job_name] = started_at
+
+        stats = run.stats or {}
+        mentions_by_platform["reddit"] += int(stats.get("reddit_mentions_inserted", 0) or 0)
+        mentions_by_platform["youtube"] += int(stats.get("youtube_mentions_inserted", 0) or 0)
+        mentions_by_platform["youtube"] += int(stats.get("youtube_comments_inserted", 0) or 0)
+        mentions_by_platform["bluesky"] += int(stats.get("bluesky_mentions_inserted", 0) or 0)
+
+        api_quota = stats.get("api_quota") if isinstance(stats, dict) else None
+        if isinstance(api_quota, dict):
+            youtube = api_quota.get("youtube", {})
+            if isinstance(youtube, dict):
+                youtube_quota_units += int(youtube.get("total_units", 0) or 0)
+                youtube_quota_calls += int(youtube.get("total_calls", 0) or 0)
+
+    lines = [
+        "# TYPE sam_pipeline_runs_total counter",
+        "# TYPE sam_collector_mentions_inserted_total counter",
+        "# TYPE sam_youtube_quota_units_total counter",
+        "# TYPE sam_youtube_quota_calls_total counter",
+        "# TYPE sam_pipeline_last_started_timestamp_seconds gauge",
+    ]
+    for (job_name, status), count in sorted(status_counts.items()):
+        lines.append(f'sam_pipeline_runs_total{{job_name="{job_name}",status="{status}"}} {count}')
+    for platform, count in mentions_by_platform.items():
+        lines.append(f'sam_collector_mentions_inserted_total{{platform="{platform}"}} {count}')
+    lines.append(f"sam_youtube_quota_units_total {youtube_quota_units}")
+    lines.append(f"sam_youtube_quota_calls_total {youtube_quota_calls}")
+    for job_name, started_at in sorted(last_started.items()):
+        lines.append(
+            "sam_pipeline_last_started_timestamp_seconds"
+            f'{{job_name="{job_name}"}} {int(started_at.timestamp())}'
+        )
+    return "\n".join(lines)
+
+
 @router.get("/api/v1/metrics/trending", response_model=TrendingMetricsResponse)
 async def metrics_trending(
     window_hours: int = Query(24, ge=1, le=168),
     limit: int = Query(10, ge=1, le=50),
 ) -> TrendingMetricsResponse:
     settings = get_settings()
-    cache_key = f"sam:metrics:trending:{window_hours}:{limit}"
+    now = datetime.now(UTC)
+    cache_key = (
+        f"sam:metrics:trending:{window_hours}:{limit}:{settings.fresh_snapshot_window_hours}"
+    )
     cached = await deps.cache_get_json(cache_key)
     if isinstance(cached, dict) and "items" in cached:
         return TrendingMetricsResponse(**cached)
 
     async with deps.get_session() as session:
         rows = await deps.get_trending_by_attention_index(
-            session, window_hours=window_hours, limit=limit
+            session,
+            window_hours=window_hours,
+            limit=limit,
+            fresh_since=now - timedelta(hours=settings.fresh_snapshot_window_hours),
         )
 
-    now = datetime.now(UTC)
     payload = TrendingMetricsResponse(
         window_hours=window_hours,
         collected_at=now.isoformat(),
@@ -76,6 +134,7 @@ async def metrics_trending(
                     media_type=t.media_type,
                     release_date=t.release_date.isoformat() if t.release_date else None,
                     popularity=t.popularity,
+                    is_active=bool(t.is_active),
                 ),
                 metrics=_snapshot_from_row(m),
             )
@@ -127,7 +186,14 @@ async def metrics_timeseries(
 @router.get("/metrics")
 async def get_metrics() -> Response:
     """Expose application metrics in Prometheus text exposition format."""
-    return Response(content=prometheus_text(), media_type="text/plain; charset=utf-8")
+    async with deps.get_session() as session:
+        result = await session.execute(select(PipelineRun).order_by(PipelineRun.started_at.desc()))
+        runs = list(result.scalars().all())
+
+    local_metrics = prometheus_text().rstrip()
+    collector_metrics = _collector_prometheus_text(runs).rstrip()
+    content = "\n".join(part for part in (local_metrics, collector_metrics) if part) + "\n"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/api/v1/metrics/app")

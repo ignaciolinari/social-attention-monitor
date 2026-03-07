@@ -77,6 +77,21 @@ def _write_jsonl(path: Path, *, header: dict[str, Any], posts: list[CollectedPos
     tmp_path.replace(path)
 
 
+def _delete_old_raw_files(base: Path, *, older_than: datetime) -> int:
+    if not base.exists():
+        return 0
+    cutoff_ts = older_than.timestamp()
+    deleted = 0
+    for path in base.rglob("*.jsonl"):
+        try:
+            if path.stat().st_mtime < cutoff_ts:
+                path.unlink()
+                deleted += 1
+        except FileNotFoundError:
+            continue
+    return deleted
+
+
 async def persist_collection_result(
     result: CollectionResult,
     *,
@@ -131,3 +146,9 @@ async def persist_collection_result(
     except Exception as e:
         logger.warning(f"[raw_storage] failed to write raw data: {e}")
         return None
+
+
+async def delete_raw_data_older_than(raw_data_dir: str, *, older_than: datetime) -> int:
+    """Delete raw collection dumps older than ``older_than``."""
+    base = Path(raw_data_dir)
+    return await asyncio.to_thread(_delete_old_raw_files, base, older_than=older_than)

@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/v1/pipeline", tags=["pipeline"])
 async def pipeline_health() -> PipelineHealthResponse:
     """Pipeline health: newest mention age, per-platform counts, latest run status."""
     settings = get_settings()
-    cache_key = "sam:pipeline:health"
+    cache_key = f"sam:pipeline:health:{int(settings.demo_mode)}"
     cached = await deps.cache_get_json(cache_key)
     if isinstance(cached, dict) and "timestamp" in cached:
         return PipelineHealthResponse(**cached)

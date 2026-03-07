@@ -132,12 +132,13 @@ class ConnectionManager:
             logger.info("[ws] Stopped cleanup task")
 
     async def start_alert_relay_task(self) -> None:
-        """Start Redis alert relay for cross-process WebSocket fanout."""
+        """Start Redis alert/metrics relay for cross-process WebSocket fanout."""
         if self._alert_relay_task is not None:
             return
 
         async def _relay_loop() -> None:
-            channel = cache_utils.alerts_channel()
+            alerts_channel = cache_utils.alerts_channel()
+            metrics_channel = cache_utils.metrics_channel()
             while True:
                 pubsub: Any | None = None
                 try:
@@ -147,8 +148,11 @@ class ConnectionManager:
                         continue
 
                     pubsub = redis.pubsub()
-                    await pubsub.subscribe(channel)
-                    logger.info(f"[ws] Started Redis alert relay on channel '{channel}'")
+                    await pubsub.subscribe(alerts_channel, metrics_channel)
+                    logger.info(
+                        "[ws] Started Redis relay on channels "
+                        f"'{alerts_channel}' and '{metrics_channel}'"
+                    )
 
                     while True:
                         message = await pubsub.get_message(
@@ -168,16 +172,21 @@ class ConnectionManager:
                         if not isinstance(payload, str):
                             continue
 
-                        alert: Any = json.loads(payload)
-                        if not isinstance(alert, dict):
+                        event: Any = json.loads(payload)
+                        if not isinstance(event, dict):
                             continue
+                        channel_name = message.get("channel")
+                        if isinstance(channel_name, (bytes, bytearray)):
+                            channel_name = channel_name.decode("utf-8", errors="ignore")
+                        topic = "alerts" if channel_name == alerts_channel else "metrics"
+                        event_type = "alert" if topic == "alerts" else "metrics_update"
                         await self.broadcast(
                             {
-                                "type": "alert",
-                                "data": alert,
+                                "type": event_type,
+                                "data": event,
                                 "timestamp": datetime.now(UTC).isoformat(),
                             },
-                            topic="alerts",
+                            topic=topic,
                         )
                 except asyncio.CancelledError:
                     raise
@@ -187,7 +196,7 @@ class ConnectionManager:
                 finally:
                     if pubsub is not None:
                         with contextlib.suppress(Exception):
-                            await pubsub.unsubscribe(channel)
+                            await pubsub.unsubscribe(alerts_channel, metrics_channel)
                             await pubsub.aclose()
 
         self._alert_relay_task = asyncio.create_task(_relay_loop())

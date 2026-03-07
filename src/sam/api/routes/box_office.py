@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -25,14 +25,18 @@ async def box_office_correlation(
     performance.
     """
     settings = get_settings()
-    cache_key = f"sam:box-office:{window_hours}:{limit}"
+    now = datetime.now(UTC)
+    cache_key = f"sam:box-office:{window_hours}:{limit}:{settings.fresh_snapshot_window_hours}"
     cached = await deps.cache_get_json(cache_key)
     if isinstance(cached, dict) and "items" in cached:
         return cached
 
     async with deps.get_session() as session:
         rows = await deps.get_trending_by_attention_index(
-            session, window_hours=window_hours, limit=limit
+            session,
+            window_hours=window_hours,
+            limit=limit,
+            fresh_since=now - timedelta(hours=settings.fresh_snapshot_window_hours),
         )
 
     items: list[dict[str, Any]] = []
@@ -53,7 +57,7 @@ async def box_office_correlation(
 
     payload = {
         "window_hours": window_hours,
-        "collected_at": datetime.now(UTC).isoformat(),
+        "collected_at": now.isoformat(),
         "items": items,
     }
     await deps.cache_set_json(cache_key, payload, ttl_seconds=settings.cache_ttl_metrics)

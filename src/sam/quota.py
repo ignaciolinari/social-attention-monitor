@@ -242,7 +242,6 @@ async def aggregate_youtube_quota_from_db(
         result = await db_session.execute(
             select(PipelineRun)
             .where(
-                PipelineRun.status == "success",
                 PipelineRun.started_at >= today_start_utc,
             )
             .order_by(PipelineRun.started_at.desc())

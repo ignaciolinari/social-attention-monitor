@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Lock
 
@@ -51,11 +50,15 @@ class GoogleTranslator:
             raise ValueError(f"Unsupported target language: {target}")
         self.source = source
         self.target = target
+        self._client = httpx.Client(
+            timeout=_TRANSLATE_TIMEOUT_SECONDS,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
 
     def translate(self, text: str) -> str | None:
         if not text:
             return text
-        response = httpx.get(
+        response = self._client.get(
             self._ENDPOINT,
             params={
                 "client": "gtx",
@@ -100,6 +103,13 @@ class TranslationBatchStats:
     changed_count: int = 0
     failed_count: int = 0
     skipped_english_count: int = 0
+
+
+@dataclass(frozen=True)
+class TranslationBatchResult:
+    translated_texts: list[str]
+    detected_languages: list[str | None]
+    stats: TranslationBatchStats
 
 
 def _get_translate_lock(source_lang: str) -> Lock:
@@ -192,6 +202,11 @@ def detect_text_language(text: str) -> str:
     return top_lang if top_prob > 0.5 else "unknown"
 
 
+def detect_text_languages_batch(texts: list[str]) -> list[str | None]:
+    """Detect languages for a batch of texts using the same heuristics."""
+    return [detect_text_language(text) for text in texts]
+
+
 def is_english_text(text: str) -> bool:
     """
     Best-effort language gate for translation.
@@ -244,70 +259,95 @@ def _translate_text_with_status(text: str, source_lang: str = "auto") -> tuple[s
         # can proceed in parallel while serializing calls for the same translator.
         call_lock = _get_translate_lock(source_lang)
 
-        def _do_translate() -> str | None:
-            with call_lock:
-                return translator.translate(truncated)
-
-        future = _translate_executor.submit(_do_translate)
-        result: str | None = future.result(timeout=_TRANSLATE_TIMEOUT_SECONDS)
+        with call_lock:
+            result: str | None = translator.translate(truncated)
 
         if result is None:
             return text, False, False
+        if not isinstance(result, str):
+            return text, False, True
         return result, result != text, False
-    except FuturesTimeoutError:
-        # Cancel the future to prevent result delivery.  Note: the underlying
-        # thread may still hold the per-language lock until the translation call
-        # returns from the provider.  Subsequent calls for the same source
-        # language will block behind it until that completes.
-        future.cancel()
-        logger.warning("Translation timed out after {timeout}s", timeout=_TRANSLATE_TIMEOUT_SECONDS)
-        return text, False, True
     except Exception as exc:
         logger.warning("Translation failed ({error_type})", error_type=type(exc).__name__)
         return text, False, True
 
 
-def translate_batch_to_english_with_stats(
+def translate_batch_to_english_details(
     texts: list[str],
-) -> tuple[list[str], TranslationBatchStats]:
+    *,
+    provider: str | None = None,
+) -> TranslationBatchResult:
     """
     Translate likely non-English texts in a batch.
 
-    Returns translated texts and detailed stats.
+    Returns translated texts, detected languages, and detailed stats.
     """
-    translated_texts: list[str] = []
+    from sam.config import get_settings
+
+    detected_languages = detect_text_languages_batch(texts)
+    translated_texts = list(texts)
     attempted = 0
     changed = 0
     failed = 0
     skipped_english = 0
 
-    for text in texts:
+    eligible: list[tuple[int, str, str]] = []
+    for idx, (text, detected_lang) in enumerate(zip(texts, detected_languages, strict=True)):
         if not text or not text.strip():
-            translated_texts.append(text)
             continue
-
-        detected_lang = detect_text_language(text)
         if detected_lang in ("en", "unknown"):
-            translated_texts.append(text)
             skipped_english += 1
             continue
+        eligible.append((idx, text, detected_lang or "auto"))
 
-        attempted += 1
-        translated, was_changed, was_failed = _translate_text_with_status(
-            text, source_lang=detected_lang
+    provider_name = provider or get_settings().translation_provider
+    if provider_name == "disabled" or not eligible:
+        return TranslationBatchResult(
+            translated_texts=translated_texts,
+            detected_languages=detected_languages,
+            stats=TranslationBatchStats(
+                attempted_count=0,
+                changed_count=0,
+                failed_count=0,
+                skipped_english_count=skipped_english,
+            ),
         )
-        translated_texts.append(translated)
+
+    attempted = len(eligible)
+    future_to_index = {
+        _translate_executor.submit(_translate_text_with_status, text, source_lang): idx
+        for idx, text, source_lang in eligible
+    }
+    for future in as_completed(future_to_index):
+        idx = future_to_index[future]
+        original = texts[idx]
+        try:
+            translated, was_changed, was_failed = future.result()
+        except Exception:
+            translated, was_changed, was_failed = original, False, True
+        translated_texts[idx] = translated
         if was_changed:
             changed += 1
         if was_failed:
             failed += 1
 
-    return translated_texts, TranslationBatchStats(
-        attempted_count=attempted,
-        changed_count=changed,
-        failed_count=failed,
-        skipped_english_count=skipped_english,
+    return TranslationBatchResult(
+        translated_texts=translated_texts,
+        detected_languages=detected_languages,
+        stats=TranslationBatchStats(
+            attempted_count=attempted,
+            changed_count=changed,
+            failed_count=failed,
+            skipped_english_count=skipped_english,
+        ),
     )
+
+
+def translate_batch_to_english_with_stats(
+    texts: list[str],
+) -> tuple[list[str], TranslationBatchStats]:
+    result = translate_batch_to_english_details(texts, provider="google_web")
+    return result.translated_texts, result.stats
 
 
 def translate_batch_to_english(texts: list[str]) -> tuple[list[str], int, int]:

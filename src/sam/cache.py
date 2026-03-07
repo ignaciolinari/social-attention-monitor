@@ -92,8 +92,8 @@ async def cache_set_json(key: str, value: Any, *, ttl_seconds: int) -> None:
 # ---------------------------------------------------------------------------
 
 _COLLECTOR_TOGGLE_PREFIX = "sam:collector:"
-_COLLECTOR_TOGGLE_TTL = 86400  # 24h — stale overrides auto-expire
 _ALERTS_CHANNEL = "sam:alerts"
+_METRICS_CHANNEL = "sam:metrics"
 
 
 async def collector_toggle_set(platform: str, enabled: bool) -> None:
@@ -103,7 +103,7 @@ async def collector_toggle_set(platform: str, enabled: bool) -> None:
         return
     key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
     try:
-        await r.set(key, json.dumps(enabled), ex=_COLLECTOR_TOGGLE_TTL)
+        await r.set(key, json.dumps(enabled))
     except Exception as exc:
         _warn_redis_error("collector_toggle_set", exc)
 
@@ -166,6 +166,11 @@ def alerts_channel() -> str:
     return _ALERTS_CHANNEL
 
 
+def metrics_channel() -> str:
+    """Return the Redis channel used for metrics fanout."""
+    return _METRICS_CHANNEL
+
+
 async def publish_alert_event(alert: dict[str, Any]) -> bool:
     """Publish an alert event for API/websocket relay processes."""
     r = get_redis()
@@ -176,6 +181,19 @@ async def publish_alert_event(alert: dict[str, Any]) -> bool:
         return True
     except Exception as exc:
         _warn_redis_error("publish_alert_event", exc)
+        return False
+
+
+async def publish_metrics_event(payload: dict[str, Any]) -> bool:
+    """Publish a metrics update for API/websocket relay processes."""
+    r = get_redis()
+    if r is None:
+        return False
+    try:
+        await r.publish(_METRICS_CHANNEL, json.dumps(payload))
+        return True
+    except Exception as exc:
+        _warn_redis_error("publish_metrics_event", exc)
         return False
 
 

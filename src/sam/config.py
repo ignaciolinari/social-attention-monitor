@@ -334,6 +334,16 @@ class Settings(BaseSettings):
         default=30,
         description="Minutes after which mentions data is considered stale",
     )
+    title_retirement_days: int = Field(
+        default=7,
+        validation_alias=AliasChoices("SAM_TITLE_RETIREMENT_DAYS"),
+        description="Deactivate titles that have not reappeared in the tracked set after this many days",
+    )
+    fresh_snapshot_window_hours: int = Field(
+        default=48,
+        validation_alias=AliasChoices("SAM_FRESH_SNAPSHOT_WINDOW_HOURS"),
+        description="Maximum age of a snapshot that is considered current for alerts and trending views",
+    )
     sentiment_model: Literal["vader", "roberta", "both"] = Field(
         default="vader",
         validation_alias=AliasChoices("SENTIMENT_MODEL", "SAM_SENTIMENT_MODEL"),
@@ -360,6 +370,11 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("SAM_ENABLE_YOUTUBE_COMMENTS"),
         description="Collect YouTube video comments for richer sentiment data",
+    )
+    collector_title_concurrency: int = Field(
+        default=1,
+        validation_alias=AliasChoices("SAM_COLLECTOR_TITLE_CONCURRENCY"),
+        description="Maximum number of titles the collector processes concurrently",
     )
     youtube_comments_per_video: int = Field(
         default=30,
@@ -390,6 +405,34 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("SAM_ENABLE_ASPECT_SENTIMENT"),
         description="Run aspect-based sentiment on long-form content",
+    )
+    translation_provider: Literal["disabled", "google_web"] = Field(
+        default="disabled",
+        validation_alias=AliasChoices("SAM_TRANSLATION_PROVIDER"),
+        description=(
+            "Provider used for live translation before sentiment analysis. "
+            "'disabled' keeps translation out of the ingestion hot path."
+        ),
+    )
+    retention_mentions_days: int = Field(
+        default=90,
+        validation_alias=AliasChoices("SAM_RETENTION_MENTIONS_DAYS"),
+        description="Delete mentions older than this many days during retention cleanup",
+    )
+    retention_pipeline_runs_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("SAM_RETENTION_PIPELINE_RUNS_DAYS"),
+        description="Delete pipeline run history older than this many days during retention cleanup",
+    )
+    retention_raw_data_days: int = Field(
+        default=7,
+        validation_alias=AliasChoices("SAM_RETENTION_RAW_DATA_DAYS"),
+        description="Delete raw collection dumps older than this many days during retention cleanup",
+    )
+    collector_health_max_staleness_minutes: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SAM_COLLECTOR_HEALTH_MAX_STALENESS_MINUTES"),
+        description="Maximum age of a collector-cycle run before the collector healthcheck fails",
     )
 
     @field_validator("youtube_comments_per_video")

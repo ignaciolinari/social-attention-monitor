@@ -20,14 +20,14 @@ import signal
 import uuid
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from sam.alerts import AlertManager
-from sam.cache import publish_alert_event, publish_system_health_throttled
+from sam.cache import publish_alert_event, publish_metrics_event, publish_system_health_throttled
 from sam.collectors.base import CollectedPost, post_identity_key
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
@@ -36,23 +36,32 @@ from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
 from sam.pipeline.enrichment import (
-    analyze_texts_for_sentiment_with_stats,
+    analyze_texts_for_sentiment_with_stats_and_languages as analyze_texts_for_sentiment_with_stats,
+)
+from sam.pipeline.enrichment import (
     build_enriched_sentiment_map,
     detect_languages,
     merge_numeric_stats,
+    translate_before_sentiment_enabled,
 )
 from sam.pipeline.metrics_snapshots import (
     compute_and_upsert_metrics_snapshots_multi,
 )
-from sam.pipeline.raw_storage import persist_collection_result
+from sam.pipeline.raw_storage import delete_raw_data_older_than, persist_collection_result
+from sam.pipeline.time import DEFAULT_SNAPSHOT_BUCKET_MINUTES, floor_time_bucket
+from sam.processors.matching import build_search_query, match_title_text
 from sam.processors.spam_detector import detect_duplicate_content, filter_spam
 from sam.quota import YOUTUBE_COMMENT_THREADS_COST, get_quota_tracker, seed_quota_from_db
 from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
 from sam.storage.repository import (
     acquire_lease,
     clear_stale_one_shot_state,
+    deactivate_titles_not_seen_since,
+    delete_mentions_older_than,
+    delete_pipeline_runs_older_than,
     finish_pipeline_run,
     get_all_watchlist_tmdb_ids,
+    get_title_by_id,
     insert_mentions,
     release_lease,
     renew_lease,
@@ -153,29 +162,47 @@ async def _is_title_quarantined(title: str) -> bool:
 
 
 JOB_NAME = "collector-cycle"
+REFRESH_JOB_NAME = "collector-refresh"
+
+
+def _tmdb_title_from_db_row(row: Any) -> TMDBTitle:
+    """Rebuild a minimal ``TMDBTitle`` from a persisted DB row."""
+    return TMDBTitle(
+        tmdb_id=int(row.tmdb_id),
+        title=str(row.title),
+        original_title=str(row.original_title or row.title),
+        media_type=str(row.media_type),
+        release_date=row.release_date,
+        overview=str(row.overview or ""),
+        poster_path=row.poster_path,
+        backdrop_path=(row.extra_data or {}).get("backdrop_path")
+        if isinstance(row.extra_data, dict)
+        else None,
+        popularity=float(row.popularity or 0.0),
+        vote_average=float(row.vote_average or 0.0),
+        vote_count=int((row.extra_data or {}).get("vote_count", 0) or 0)
+        if isinstance(row.extra_data, dict)
+        else 0,
+        genres=list(row.genres or []),
+        original_language=str((row.extra_data or {}).get("original_language", "en"))
+        if isinstance(row.extra_data, dict)
+        else "en",
+        revenue=row.revenue,
+        budget=row.budget,
+        raw_data=dict(row.extra_data or {}),
+    )
 
 
 def _snapshot_bucket(dt: datetime) -> datetime:
-    """Round *up* to the next 30-minute boundary for metrics snapshot bucketing.
+    """Floor to the shared snapshot bucket boundary.
 
-    With a 5-minute collection interval, multiple cycles (e.g. 14:05, 14:10, 14:15)
-    can produce snapshots that coalesce into the same 30-minute bucket (14:30).
-    This is intentional: snapshots are time-windowed metrics (1h, 24h) and
-    bucketing reduces fragmentation while keeping hourly granularity.
-
-    Examples:
-        - 14:12 → 14:30
-        - 14:37 → 15:00
-        - 14:30 (already on boundary) → 14:30
+    Buckets are aligned in UTC and shared with CLI backfills so live collection
+    and recompute jobs produce the same snapshot timestamps.
     """
-    if dt.second == 0 and dt.microsecond == 0 and dt.minute % 30 == 0:
-        return dt
-    if dt.minute < 30:
-        return dt.replace(minute=30, second=0, microsecond=0)
-    return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return floor_time_bucket(dt, bucket_minutes=DEFAULT_SNAPSHOT_BUCKET_MINUTES)
 
 
-def _derive_run_status(stats: dict[str, int | float]) -> str:
+def _derive_run_status(stats: dict[str, Any]) -> str:
     """Derive overall run status from per-title outcomes."""
     titles_failed = int(stats.get("titles_failed", 0) or 0)
     titles_succeeded = int(stats.get("titles_succeeded", 0) or 0)
@@ -193,6 +220,64 @@ def _normalized_collected_at(value: Any) -> datetime:
             return value.replace(tzinfo=UTC)
         return value
     return datetime.now(UTC)
+
+
+def _filter_title_matches(
+    posts: list[CollectedPost], *, title: TMDBTitle
+) -> tuple[list[CollectedPost], int]:
+    """Drop posts that do not confidently match the expected title."""
+    kept: list[CollectedPost] = []
+    filtered = 0
+    for post in posts:
+        if (
+            match_title_text(
+                post.content,
+                title=title.title,
+                original_title=title.original_title,
+            )
+            is None
+        ):
+            filtered += 1
+            continue
+        kept.append(post)
+    return kept, filtered
+
+
+def _coerce_int_setting(value: Any, default: int) -> int:
+    """Return an integer setting value even when tests pass loose mocks."""
+    return value if isinstance(value, int) else default
+
+
+async def _run_retention_cleanup(*, session: Any, settings: Any) -> dict[str, int]:
+    """Delete old pipeline artifacts according to retention settings."""
+    deleted_mentions = 0
+    deleted_runs = 0
+    deleted_raw_files = 0
+    mention_days = _coerce_int_setting(getattr(settings, "retention_mentions_days", 0), 0)
+    run_days = _coerce_int_setting(getattr(settings, "retention_pipeline_runs_days", 0), 0)
+    raw_days = _coerce_int_setting(getattr(settings, "retention_raw_data_days", 0), 0)
+
+    if mention_days > 0:
+        deleted_mentions = await delete_mentions_older_than(
+            session,
+            older_than=datetime.now(UTC) - timedelta(days=mention_days),
+        )
+    if run_days > 0:
+        deleted_runs = await delete_pipeline_runs_older_than(
+            session,
+            older_than=datetime.now(UTC) - timedelta(days=run_days),
+        )
+    if settings.storage.enable_raw_data_storage and raw_days > 0:
+        deleted_raw_files = await delete_raw_data_older_than(
+            settings.storage.raw_data_dir,
+            older_than=datetime.now(UTC) - timedelta(days=raw_days),
+        )
+
+    return {
+        "retention_deleted_mentions": deleted_mentions,
+        "retention_deleted_runs": deleted_runs,
+        "retention_deleted_raw_files": deleted_raw_files,
+    }
 
 
 def _system_health_payload(anomaly: Any) -> dict[str, Any]:
@@ -256,12 +341,16 @@ async def collect_once(
     limit_youtube: int,
     limit_bluesky: int,
     run_id: uuid.UUID | None = None,
+    titles_override: list[TMDBTitle] | None = None,
+    platform_filter: set[str] | None = None,
+    allow_title_parallelism: bool = True,
+    record_cycle_metrics: bool = True,
     # Allow callers to pass pre-built collectors so they can be reused.
     tmdb: TMDBCollector | None = None,
     reddit: RedditCollector | None = None,
     youtube: YouTubeCollector | None = None,
     bluesky: BlueskyCollector | None = None,
-) -> dict[str, int | float]:
+) -> dict[str, Any]:
     """Run one collection cycle across all trending titles.
 
     Each title is processed inside its own DB session/transaction so that
@@ -273,12 +362,14 @@ async def collect_once(
     # (the per-title loop uses contextualize() which adds title= on top).
     run_log = logger.bind(run_id=str(run_id) if run_id else None)
     run_log.info(f"[runner] Starting one-shot collection (demo_mode={settings.demo_mode})")
-    translate_before_sentiment = settings.translate_before_sentiment
+    translate_before_sentiment = translate_before_sentiment_enabled(settings)
     enable_youtube_comments = settings.enable_youtube_comments
     enable_spam_filter = settings.enable_spam_filter
     comments_per_video = settings.youtube_comments_per_video
 
     from sam.cache import collector_toggle_get
+
+    allowed_platforms = {p.strip().lower() for p in (platform_filter or set()) if p.strip()}
 
     if not settings.demo_mode and not settings.tmdb.is_configured:
         raise RuntimeError("TMDB not configured. Set TMDB_API_KEY or TMDB_ACCESS_TOKEN in .env")
@@ -296,7 +387,7 @@ async def collect_once(
 
     quota = get_quota_tracker()
 
-    stats: dict[str, int | float] = {
+    stats: dict[str, Any] = {
         "titles": 0,
         "titles_succeeded": 0,
         "titles_failed": 0,
@@ -313,78 +404,107 @@ async def collect_once(
         "sentiment_ms_total": 0.0,
         "spam_filtered": 0,
         "duplicates_removed": 0,
+        "matching_filtered": 0,
         "raw_storage_failures": 0,
         "mentions_capped_titles": 0,
+        "mentions_capped_title_names": [],
         "languages_detection_failures": 0,
         "watchlist_titles_not_found": 0,
         "watchlist_titles_failed": 0,
+        "titles_deactivated": 0,
+        "retention_deleted_mentions": 0,
+        "retention_deleted_runs": 0,
+        "retention_deleted_raw_files": 0,
     }
     per_title_ms: dict[str, float] = {}
-
-    # Track YouTube video IDs already seen during *this* cycle to avoid
-    # burning quota on the same video discovered via different title queries.
-    seen_yt_video_ids: set[str] = set()
 
     # Circuit breaker: skip a platform for remaining titles after
     # MAX_PLATFORM_FAILURES consecutive failures (C1).
     _MAX_PLATFORM_FAILURES = 2
     platform_failures: dict[str, int] = {"reddit": 0, "youtube": 0, "bluesky": 0}
+    used_parallel_path = False
 
     try:
-        titles = await tmdb.get_trending(media_type="all", time_window="week", limit=limit_titles)
-        run_log.info(f"[runner] Trending titles: {len(titles)}")
-        stats["titles"] = len(titles)
+        if titles_override is not None:
+            titles = list(titles_override)
+            run_log.info(f"[runner] Using explicit title override ({len(titles)} title(s))")
+            stats["titles"] = len(titles)
+        else:
+            titles = await tmdb.get_trending(
+                media_type="all", time_window="week", limit=limit_titles
+            )
+            run_log.info(f"[runner] Trending titles: {len(titles)}")
+            stats["titles"] = len(titles)
 
-        # Enrich movies with revenue/budget from TMDB detail API.
-        if not settings.demo_mode and titles:
+            # Enrich movies with revenue/budget from TMDB detail API.
+            if not settings.demo_mode and titles:
+                try:
+                    await tmdb.enrich_titles_with_details(titles)
+                except Exception as exc:
+                    run_log.warning(f"[runner] TMDB enrichment failed: {exc}")
+
+            # Phase 0b: Fetch watchlist titles not already in the trending set.
+            trending_tmdb_ids = {t.tmdb_id for t in titles}
             try:
-                await tmdb.enrich_titles_with_details(titles)
-            except Exception as exc:
-                run_log.warning(f"[runner] TMDB enrichment failed: {exc}")
-
-        # Phase 0b: Fetch watchlist titles not already in the trending set.
-        trending_tmdb_ids = {t.tmdb_id for t in titles}
-        try:
-            async with get_session() as wl_session:
-                watchlist_ids = await get_all_watchlist_tmdb_ids(wl_session)
-            extra_ids = watchlist_ids - trending_tmdb_ids
-            if extra_ids:
-                run_log.info(f"[runner] Fetching {len(extra_ids)} watchlist-only titles from TMDB")
-
-                async def _fetch_watchlist_title(tmdb_id: int) -> TMDBTitle | None:
-                    """Try movie first, then tv."""
-                    for attempt, mtype in enumerate(("movie", "tv")):
-                        result = await tmdb.get_details(
-                            tmdb_id,
-                            media_type=mtype,
-                            suppress_not_found_error=attempt == 0,
-                        )
-                        if result is not None:
-                            return result
-                    return None
-
-                detail_results = await asyncio.gather(
-                    *[_fetch_watchlist_title(tid) for tid in extra_ids],
-                    return_exceptions=True,
-                )
-                watchlist_titles = [r for r in detail_results if isinstance(r, TMDBTitle)]
-                failed_count = sum(1 for r in detail_results if isinstance(r, Exception))
-                not_found_count = sum(1 for r in detail_results if r is None)
-                stats["watchlist_titles_failed"] = (
-                    int(stats["watchlist_titles_failed"]) + failed_count
-                )
-                stats["watchlist_titles_not_found"] = (
-                    int(stats["watchlist_titles_not_found"]) + not_found_count
-                )
-                if watchlist_titles:
+                async with get_session() as wl_session:
+                    watchlist_ids = await get_all_watchlist_tmdb_ids(wl_session)
+                extra_ids = watchlist_ids - trending_tmdb_ids
+                if extra_ids:
                     run_log.info(
-                        f"[runner] Added {len(watchlist_titles)} watchlist titles "
-                        f"({not_found_count} not found, {failed_count} failed)"
+                        f"[runner] Fetching {len(extra_ids)} watchlist-only titles from TMDB"
                     )
-                    titles.extend(watchlist_titles)
-                    stats["titles"] = len(titles)
-        except Exception as exc:
-            run_log.warning(f"[runner] Watchlist title fetch failed: {exc}")
+
+                    async def _fetch_watchlist_title(tmdb_id: int) -> TMDBTitle | None:
+                        """Try movie first, then tv."""
+                        for attempt, mtype in enumerate(("movie", "tv")):
+                            result = await tmdb.get_details(
+                                tmdb_id,
+                                media_type=mtype,
+                                suppress_not_found_error=attempt == 0,
+                            )
+                            if result is not None:
+                                return result
+                        return None
+
+                    detail_results = await asyncio.gather(
+                        *[_fetch_watchlist_title(tid) for tid in extra_ids],
+                        return_exceptions=True,
+                    )
+                    watchlist_titles = [r for r in detail_results if isinstance(r, TMDBTitle)]
+                    failed_count = sum(1 for r in detail_results if isinstance(r, Exception))
+                    not_found_count = sum(1 for r in detail_results if r is None)
+                    stats["watchlist_titles_failed"] = (
+                        int(stats["watchlist_titles_failed"]) + failed_count
+                    )
+                    stats["watchlist_titles_not_found"] = (
+                        int(stats["watchlist_titles_not_found"]) + not_found_count
+                    )
+                    if watchlist_titles:
+                        run_log.info(
+                            f"[runner] Added {len(watchlist_titles)} watchlist titles "
+                            f"({not_found_count} not found, {failed_count} failed)"
+                        )
+                        titles.extend(watchlist_titles)
+                        stats["titles"] = len(titles)
+            except Exception as exc:
+                run_log.warning(f"[runner] Watchlist title fetch failed: {exc}")
+
+            title_retirement_days = _coerce_int_setting(
+                getattr(settings, "title_retirement_days", 0),
+                0,
+            )
+            if title_retirement_days > 0:
+                try:
+                    stale_before = datetime.now(UTC) - timedelta(days=title_retirement_days)
+                    tracked_tmdb_ids = {title.tmdb_id for title in titles}
+                    async with get_session() as lifecycle_session:
+                        stats["titles_deactivated"] = await deactivate_titles_not_seen_since(
+                            lifecycle_session,
+                            keep_tmdb_ids=tracked_tmdb_ids,
+                            stale_before=stale_before,
+                        )
+                except Exception as exc:
+                    run_log.warning(f"[runner] Title retirement sweep failed: {exc}")
 
         # Read runtime toggle states once per cycle (not per title) to
         # avoid redundant Redis reads.
@@ -396,26 +516,81 @@ async def collect_once(
         yt_enabled = yt_runtime if yt_runtime is not None else settings.youtube.enabled
         bsky_enabled = bsky_runtime if bsky_runtime is not None else settings.bluesky.enabled
 
-        for t in titles:
-            title_start = perf_counter()
-            # Dead-letter: skip titles that have failed repeatedly.
-            if await _is_title_quarantined(t.title):
-                logger.warning(
-                    f"[runner] Skipping quarantined title '{t.title}' "
-                    f"(>{_TITLE_FAILURE_THRESHOLD} consecutive failures)"
-                )
-                continue
-            # Bind log context for this title (structured log correlation).
-            with logger.contextualize(run_id=str(run_id) if run_id else None, title=t.title):
-                try:
-                    # A1: Each title gets its own DB session/transaction.
-                    async with get_session() as session:
+        title_parallelism = _coerce_int_setting(
+            getattr(settings, "collector_title_concurrency", 1),
+            1,
+        )
+        if allow_title_parallelism and title_parallelism > 1 and len(titles) > 1:
+            sem = asyncio.Semaphore(title_parallelism)
+
+            async def _run_parallel_title(title: TMDBTitle) -> dict[str, Any]:
+                async with sem:
+                    return await collect_once(
+                        limit_titles=1,
+                        limit_reddit=limit_reddit,
+                        limit_youtube=limit_youtube,
+                        limit_bluesky=limit_bluesky,
+                        run_id=run_id,
+                        titles_override=[title],
+                        platform_filter=platform_filter,
+                        allow_title_parallelism=False,
+                        record_cycle_metrics=False,
+                    )
+
+            child_results = await asyncio.gather(*[_run_parallel_title(title) for title in titles])
+            capped_titles: list[str] = []
+            for child_stats in child_results:
+                child_per_title = child_stats.get("per_title_ms", {})
+                if isinstance(child_per_title, dict):
+                    per_title_ms.update(
+                        {
+                            str(title): float(ms)
+                            for title, ms in child_per_title.items()
+                            if isinstance(ms, (int, float))
+                        }
+                    )
+                child_capped_titles = child_stats.get("mentions_capped_title_names", [])
+                if isinstance(child_capped_titles, list):
+                    capped_titles.extend(str(title) for title in child_capped_titles)
+                for key, value in child_stats.items():
+                    if key in {"titles", "per_title_ms", "mentions_capped_title_names"}:
+                        continue
+                    if isinstance(value, (int, float)) and isinstance(stats.get(key), (int, float)):
+                        stats[key] = float(stats.get(key, 0)) + float(value)
+            stats["mentions_capped_title_names"] = capped_titles
+            stats["titles"] = len(titles)
+            used_parallel_path = True
+
+        if not used_parallel_path:
+            for t in titles:
+                title_start = perf_counter()
+                # Dead-letter: skip titles that have failed repeatedly.
+                if await _is_title_quarantined(t.title):
+                    logger.warning(
+                        f"[runner] Skipping quarantined title '{t.title}' "
+                        f"(>{_TITLE_FAILURE_THRESHOLD} consecutive failures)"
+                    )
+                    continue
+                # Bind log context for this title (structured log correlation).
+                with logger.contextualize(run_id=str(run_id) if run_id else None, title=t.title):
+                    session_cm: Any | None = None
+                    session_exited = False
+                    try:
+                        # A1: Each title gets its own DB session/transaction.
+                        session_cm = get_session()
+                        session = await session_cm.__aenter__()
                         db_title = await upsert_title(session, t)
 
                         # -- Phase 1: Collect from all platforms -----------------
                         # We gather posts first, then run sentiment in a single
                         # batch across platforms (B3 optimisation).
                         all_posts: list[CollectedPost] = []
+                        youtube_query = build_search_query(
+                            t.title,
+                            original_title=t.original_title,
+                            media_type=t.media_type,
+                            release_date=t.release_date,
+                        )
                         # (platform, stats_key, posts, collected_at)
                         platform_batches: list[tuple[str, str, list[CollectedPost], datetime]] = []
 
@@ -423,6 +598,7 @@ async def collect_once(
                         reddit_eligible = (
                             (settings.reddit.has_credentials or settings.demo_mode)
                             and reddit_enabled
+                            and (not allowed_platforms or "reddit" in allowed_platforms)
                             and platform_failures["reddit"] < _MAX_PLATFORM_FAILURES
                         )
                         if reddit_eligible:
@@ -439,10 +615,22 @@ async def collect_once(
                             if reddit_result is None:
                                 pass
                             elif reddit_result.success and reddit_result.posts:
+                                matched_reddit, filtered_reddit = (
+                                    (reddit_result.posts, 0)
+                                    if settings.demo_mode
+                                    else _filter_title_matches(
+                                        reddit_result.posts,
+                                        title=t,
+                                    )
+                                )
+                                if filtered_reddit:
+                                    stats["matching_filtered"] = (
+                                        int(stats.get("matching_filtered", 0)) + filtered_reddit
+                                    )
                                 # A4: Deduplicate posts by source_id (crossposts).
                                 seen_ids: set[str] = set()
                                 deduped: list[CollectedPost] = []
-                                for p in reddit_result.posts:
+                                for p in matched_reddit:
                                     if p.source_id not in seen_ids:
                                         seen_ids.add(p.source_id)
                                         deduped.append(p)
@@ -476,6 +664,7 @@ async def collect_once(
                         yt_eligible = (
                             (settings.youtube.has_credentials or settings.demo_mode)
                             and yt_enabled
+                            and (not allowed_platforms or "youtube" in allowed_platforms)
                             and platform_failures["youtube"] < _MAX_PLATFORM_FAILURES
                         )
                         yt_result = None
@@ -493,9 +682,8 @@ async def collect_once(
                             else:
                                 try:
                                     yt_result = await youtube.collect(
-                                        query=t.title,
+                                        query=youtube_query or t.title,
                                         limit=limit_youtube,
-                                        exclude_source_ids=seen_yt_video_ids,
                                     )
                                 except Exception as exc:
                                     platform_failures["youtube"] += 1
@@ -505,7 +693,18 @@ async def collect_once(
                                     yt_result = None
 
                         if yt_result and yt_result.success and yt_result.posts:
-                            seen_yt_video_ids.update(p.source_id for p in yt_result.posts)
+                            matched_youtube, filtered_youtube = (
+                                (yt_result.posts, 0)
+                                if settings.demo_mode
+                                else _filter_title_matches(
+                                    yt_result.posts,
+                                    title=t,
+                                )
+                            )
+                            if filtered_youtube:
+                                stats["matching_filtered"] = (
+                                    int(stats.get("matching_filtered", 0)) + filtered_youtube
+                                )
 
                             if settings.storage.enable_raw_data_storage:
                                 ok = await persist_collection_result(
@@ -513,7 +712,7 @@ async def collect_once(
                                     raw_data_dir=settings.storage.raw_data_dir,
                                     title=t.title,
                                     title_id=db_title.id,
-                                    query=t.title,
+                                    query=youtube_query or t.title,
                                     run_id=run_id,
                                 )
                                 if not ok:
@@ -523,22 +722,22 @@ async def collect_once(
                                 (
                                     "youtube",
                                     "youtube_mentions_inserted",
-                                    yt_result.posts,
+                                    matched_youtube,
                                     _normalized_collected_at(yt_result.collected_at),
                                 )
                             )
-                            all_posts.extend(yt_result.posts)
+                            all_posts.extend(matched_youtube)
                             platform_failures["youtube"] = 0
 
                             # B2: Collect YouTube comments in parallel.
-                            if enable_youtube_comments:
+                            if enable_youtube_comments and matched_youtube:
                                 (
                                     all_comments,
                                     spam_total,
                                     comment_failures,
                                 ) = await _collect_youtube_comments_parallel(
                                     youtube=youtube,
-                                    posts=yt_result.posts,
+                                    posts=matched_youtube,
                                     limit=comments_per_video,
                                     enable_spam_filter=enable_spam_filter,
                                     quota=quota,
@@ -567,12 +766,14 @@ async def collect_once(
                         bsky_eligible = (
                             (settings.bluesky.has_credentials or settings.demo_mode)
                             and bsky_enabled
+                            and (not allowed_platforms or "bluesky" in allowed_platforms)
                             and platform_failures["bluesky"] < _MAX_PLATFORM_FAILURES
                         )
                         if bsky_eligible:
                             try:
                                 bluesky_result = await bluesky.collect(
-                                    query=t.title, limit=limit_bluesky
+                                    query=youtube_query or t.title,
+                                    limit=limit_bluesky,
                                 )
                             except Exception as exc:
                                 platform_failures["bluesky"] += 1
@@ -584,10 +785,22 @@ async def collect_once(
                             if bluesky_result is None:
                                 pass
                             elif bluesky_result.success and bluesky_result.posts:
+                                matched_bluesky, filtered_bluesky = (
+                                    (bluesky_result.posts, 0)
+                                    if settings.demo_mode
+                                    else _filter_title_matches(
+                                        bluesky_result.posts,
+                                        title=t,
+                                    )
+                                )
+                                if filtered_bluesky:
+                                    stats["matching_filtered"] = (
+                                        int(stats.get("matching_filtered", 0)) + filtered_bluesky
+                                    )
                                 # Deduplicate posts by source_id (reposts).
                                 bsky_seen: set[str] = set()
                                 bsky_deduped: list[CollectedPost] = []
-                                for p in bluesky_result.posts:
+                                for p in matched_bluesky:
                                     if p.source_id not in bsky_seen:
                                         bsky_seen.add(p.source_id)
                                         bsky_deduped.append(p)
@@ -598,7 +811,7 @@ async def collect_once(
                                         raw_data_dir=settings.storage.raw_data_dir,
                                         title=t.title,
                                         title_id=db_title.id,
-                                        query=t.title,
+                                        query=youtube_query or t.title,
                                         run_id=run_id,
                                     )
                                     if not ok:
@@ -659,43 +872,47 @@ async def collect_once(
                         language_map: dict[str, str | None] = {}
                         if all_posts:
                             with Timer("sentiment_analysis_seconds"):
-                                sentiments, analysis_stats = await asyncio.to_thread(
+                                sentiment_result = await asyncio.to_thread(
                                     analyze_texts_for_sentiment_with_stats,
                                     [p.content for p in all_posts],
                                     translate=translate_before_sentiment,
                                     log_context="runner",
                                 )
+                            if len(sentiment_result) == 3:
+                                sentiments, analysis_stats, detected_languages = sentiment_result
+                            else:
+                                sentiments, analysis_stats = sentiment_result
+                                try:
+                                    detected_languages = await asyncio.to_thread(
+                                        detect_languages,
+                                        [p.content for p in all_posts],
+                                    )
+                                except Exception as exc:
+                                    detected_languages = [None for _ in all_posts]
+                                    stats["languages_detection_failures"] = (
+                                        int(stats["languages_detection_failures"]) + 1
+                                    )
+                                    logger.warning(f"[runner] Language detection failed: {exc}")
                             merge_numeric_stats(stats, analysis_stats)
                             full_sentiment_map = await build_enriched_sentiment_map(
                                 all_posts,
                                 sentiments,
                                 settings,
                             )
-
-                            # -- Phase 2b: Language detection --------------------
-                            try:
-                                detected = await asyncio.to_thread(
-                                    detect_languages,
-                                    [p.content for p in all_posts],
+                            for post, lang in zip(all_posts, detected_languages, strict=True):
+                                key = post_identity_key(
+                                    post.platform,
+                                    post.source_type,
+                                    post.source_id,
                                 )
-                                for post, lang in zip(all_posts, detected, strict=True):
-                                    key = post_identity_key(
-                                        post.platform,
-                                        post.source_type,
-                                        post.source_id,
-                                    )
-                                    language_map[key] = lang
-                                langs_found = sum(1 for v in detected if v is not None)
-                                stats["languages_detected"] = (
-                                    int(stats.get("languages_detected", 0)) + langs_found
-                                )
-                            except Exception as exc:
-                                stats["languages_detection_failures"] = (
-                                    int(stats["languages_detection_failures"]) + 1
-                                )
-                                logger.warning(f"[runner] Language detection failed: {exc}")
+                                language_map[key] = lang
+                            langs_found = sum(1 for v in detected_languages if v is not None)
+                            stats["languages_detected"] = (
+                                int(stats.get("languages_detected", 0)) + langs_found
+                            )
 
                         # -- Phase 3: Persist mentions per platform batch --------
+                        title_inserted_total = 0
                         for plat, stats_key, posts, collected_at in platform_batches:
                             inserted = await insert_mentions(
                                 session,
@@ -707,6 +924,7 @@ async def collect_once(
                                 collected_at=collected_at,
                             )
                             stats[stats_key] += inserted
+                            title_inserted_total += inserted
                             counter_inc("mentions_inserted_total", inserted, {"platform": plat})
                             if inserted:
                                 logger.info(f"[runner] {t.title} {stats_key}: {inserted}")
@@ -731,29 +949,51 @@ async def collect_once(
                             stats["mentions_capped_titles"] = (
                                 int(stats.get("mentions_capped_titles", 0)) + 1
                             )
+                            capped_titles = stats.setdefault("mentions_capped_title_names", [])
+                            if isinstance(capped_titles, list):
+                                capped_titles.append(t.title)
+                        with contextlib.suppress(Exception):
+                            await publish_metrics_event(
+                                {
+                                    "title_id": str(db_title.id),
+                                    "title": t.title,
+                                    "snapshot_time": title_snapshot_time.isoformat(),
+                                    "window_hours": [1, 24],
+                                    "mentions_inserted": title_inserted_total,
+                                    "snapshots_upserted": snapshots_upserted,
+                                    "mentions_capped": bool(mentions_capped),
+                                }
+                            )
+                        if session_cm is not None:
+                            await session_cm.__aexit__(None, None, None)
+                            session_exited = True
 
-                except Exception as exc:
-                    logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
-                    await _record_title_failure(t.title)
-                    stats["titles_failed"] += 1
-                    # Continue with the next title instead of aborting the entire run.
-                    continue
-                else:
-                    # Title processed successfully — reset failure counter.
-                    await _clear_title_failures(t.title)
-                    stats["titles_succeeded"] += 1
-                finally:
-                    # D1: Per-title timing for observability.
-                    title_elapsed = perf_counter() - title_start
-                    per_title_ms[t.title] = round(title_elapsed * 1000, 1)
-                    logger.info(f"[runner] {t.title}: completed in {title_elapsed:.1f}s")
+                    except Exception as exc:
+                        if session_cm is not None and not session_exited:
+                            with contextlib.suppress(Exception):
+                                await session_cm.__aexit__(type(exc), exc, exc.__traceback__)
+                        logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
+                        await _record_title_failure(t.title)
+                        stats["titles_failed"] += 1
+                        # Continue with the next title instead of aborting the entire run.
+                        continue
+                    else:
+                        # Title processed successfully — reset failure counter.
+                        await _clear_title_failures(t.title)
+                        stats["titles_succeeded"] += 1
+                    finally:
+                        # D1: Per-title timing for observability.
+                        title_elapsed = perf_counter() - title_start
+                        per_title_ms[t.title] = round(title_elapsed * 1000, 1)
+                        logger.info(f"[runner] {t.title}: completed in {title_elapsed:.1f}s")
 
-        # C1: Log circuit breaker activations.
-        for plat, failures in platform_failures.items():
-            if failures >= _MAX_PLATFORM_FAILURES:
-                run_log.warning(
-                    f"[runner] Circuit breaker tripped for {plat} ({failures} consecutive failures)"
-                )
+        if not used_parallel_path:
+            # C1: Log circuit breaker activations.
+            for plat, failures in platform_failures.items():
+                if failures >= _MAX_PLATFORM_FAILURES:
+                    run_log.warning(
+                        f"[runner] Circuit breaker tripped for {plat} ({failures} consecutive failures)"
+                    )
 
     finally:
         # Only close collectors we created ourselves.
@@ -771,22 +1011,23 @@ async def collect_once(
                 await collector.close()
 
     yt_quota = quota.get_usage("youtube")
-    run_log.info(
-        f"[runner] YouTube API quota: {yt_quota.get('total_units', 0)} units used today "
-        f"({yt_quota.get('total_calls', 0)} calls)"
-    )
-    if stats["youtube_skipped_quota"]:
-        run_log.warning(
-            f"[runner] Skipped YouTube for {stats['youtube_skipped_quota']} title(s) "
-            "due to quota budget"
+    if record_cycle_metrics:
+        run_log.info(
+            f"[runner] YouTube API quota: {yt_quota.get('total_units', 0)} units used today "
+            f"({yt_quota.get('total_calls', 0)} calls)"
         )
-    counter_inc("collection_cycles_total")
-    raw_units = yt_quota.get("total_units", 0) or 0
-    units_val = float(raw_units) if isinstance(raw_units, (int, float)) else 0.0
-    counter_inc("quota_units_used", units_val, {"platform": "youtube"})
+        if stats["youtube_skipped_quota"]:
+            run_log.warning(
+                f"[runner] Skipped YouTube for {stats['youtube_skipped_quota']} title(s) "
+                "due to quota budget"
+            )
+        counter_inc("collection_cycles_total")
+        raw_units = yt_quota.get("total_units", 0) or 0
+        units_val = float(raw_units) if isinstance(raw_units, (int, float)) else 0.0
+        counter_inc("quota_units_used", units_val, {"platform": "youtube"})
     # Merge per_title_ms into final stats for persistence.
-    final_stats: dict[str, object] = {**stats, "per_title_ms": per_title_ms}
-    return final_stats  # type: ignore[return-value]
+    final_stats: dict[str, Any] = {**stats, "per_title_ms": per_title_ms}
+    return final_stats
 
 
 async def _collect_youtube_comments_parallel(
@@ -858,6 +1099,9 @@ async def _collection_job(
     limit_reddit: int,
     limit_youtube: int,
     limit_bluesky: int,
+    job_name: str = JOB_NAME,
+    titles_override: list[TMDBTitle] | None = None,
+    platform_filter: set[str] | None = None,
     tmdb: TMDBCollector | None = None,
     reddit: RedditCollector | None = None,
     youtube: YouTubeCollector | None = None,
@@ -887,7 +1131,7 @@ async def _collection_job(
 
         run = await start_pipeline_run(
             session,
-            job_name=JOB_NAME,
+            job_name=job_name,
             owner_id=owner_id,
             started_at=started,
             stats={
@@ -896,6 +1140,8 @@ async def _collection_job(
                 "limit_reddit": limit_reddit,
                 "limit_youtube": limit_youtube,
                 "limit_bluesky": limit_bluesky,
+                "platform_filter": sorted(platform_filter) if platform_filter else [],
+                "titles_override_count": len(titles_override or []),
             },
         )
         run_id = run.id
@@ -925,6 +1171,8 @@ async def _collection_job(
             limit_youtube=limit_youtube,
             limit_bluesky=limit_bluesky,
             run_id=run_id,
+            titles_override=titles_override,
+            platform_filter=platform_filter,
             tmdb=tmdb,
             reddit=reddit,
             youtube=youtube,
@@ -940,7 +1188,7 @@ async def _collection_job(
         system_health_issues: list[dict[str, Any]] = []
         async with get_session() as session:
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
-            manager = AlertManager()
+            manager = AlertManager(freshness_hours=get_settings().fresh_snapshot_window_hours)
             try:
                 detected, created_alerts = await manager.run_detection_cycle(
                     session, window_hours=1, history_points=24
@@ -984,6 +1232,22 @@ async def _collection_job(
                     },
                 },
             }
+            quota_youtube = cast(dict[str, Any], quota_stats["youtube"])
+            retention_stats: dict[str, int] = {}
+            if job_name == JOB_NAME:
+                try:
+                    retention_stats = await _run_retention_cleanup(
+                        session=session,
+                        settings=get_settings(),
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(f"[runner] Retention cleanup failed: {cleanup_exc}")
+            total_mentions_inserted = (
+                int(stats.get("reddit_mentions_inserted", 0) or 0)
+                + int(stats.get("youtube_mentions_inserted", 0) or 0)
+                + int(stats.get("youtube_comments_inserted", 0) or 0)
+                + int(stats.get("bluesky_mentions_inserted", 0) or 0)
+            )
             await finish_pipeline_run(
                 session,
                 run_id=run_id,
@@ -992,10 +1256,14 @@ async def _collection_job(
                 stats={
                     **run_stats,
                     **stats,
+                    **retention_stats,
                     **alert_stats,
                     "system_health_issues": 0,
                     "elapsed_seconds": int(elapsed),
+                    "mentions_inserted": total_mentions_inserted,
                     "api_quota": quota_stats,
+                    "youtube_quota_units": int(quota_youtube.get("total_units", 0) or 0),
+                    "youtube_quota_calls": int(quota_youtube.get("total_calls", 0) or 0),
                 },
             )
 
@@ -1031,7 +1299,9 @@ async def _collection_job(
                 await finish_pipeline_run(session, run_id=run_id, status="failed", error=str(e))
 
                 try:
-                    manager = AlertManager()
+                    manager = AlertManager(
+                        freshness_hours=get_settings().fresh_snapshot_window_hours
+                    )
                     sys_anomalies = await manager.check_system_health(session)
                     system_health_issues = [_system_health_payload(a) for a in sys_anomalies]
                     if system_health_issues:
@@ -1147,6 +1417,33 @@ async def _force_clear_one_shot_state() -> tuple[int, int]:
             f"released {released} lease(s), failed {failed_runs} running run(s)"
         )
     return released, failed_runs
+
+
+async def run_refresh_for_title(*, title_id: uuid.UUID, platform: str) -> None:
+    """Run the scheduler ingestion path for one DB title/platform pair."""
+    normalized_platform = platform.strip().lower()
+    if normalized_platform not in {"reddit", "youtube", "bluesky"}:
+        raise ValueError(f"Unsupported refresh platform: {platform}")
+
+    async with get_session() as session:
+        row = await get_title_by_id(session, title_id)
+        if row is None:
+            logger.warning(f"[runner] refresh requested for unknown title_id={title_id}")
+            return
+        title = _tmdb_title_from_db_row(row)
+
+    settings = get_settings()
+    await _collection_job(
+        owner_id=uuid.uuid4(),
+        interval_minutes=settings.collector.polling_interval_minutes,
+        limit_titles=1,
+        limit_reddit=settings.collector.max_posts_per_subreddit,
+        limit_youtube=20,
+        limit_bluesky=50,
+        job_name=REFRESH_JOB_NAME,
+        titles_override=[title],
+        platform_filter={normalized_platform},
+    )
 
 
 def main() -> None:

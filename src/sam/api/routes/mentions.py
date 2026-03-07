@@ -63,19 +63,19 @@ async def _get_mentions_for_platform(
             detail="Title not found in DB for paginated results",
         )
 
-    mentions, sentiment_by_source_id, posts, collected_at = await deps.collect_mentions_live(
+    mentions, _sentiment_by_source_id, _posts, collected_at = await deps.collect_mentions_live(
         platform=platform,
         title=title,
         limit=limit,
     )
 
-    if db_result is not None:
-        await deps.persist_mentions(
+    if db_result is not None and db_result.title_id and offset == 0:
+        background_tasks.add_task(
+            deps.refresh_mentions_background,
+            title=title,
             title_id=db_result.title_id,
             platform=platform,
-            posts=posts,
-            sentiment_by_source_id=sentiment_by_source_id,
-            collected_at=collected_at,
+            limit=limit,
         )
 
     return MentionsResponse(

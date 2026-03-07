@@ -17,6 +17,7 @@ from loguru import logger
 from sam.collectors.base import CollectedPost, collected_post_key
 from sam.processors.sentiment import (
     SentimentResult,
+    analyze_sentiment_batch_with_metadata,
     analyze_sentiment_batch_with_translation,
 )
 
@@ -32,7 +33,9 @@ def translate_before_sentiment_enabled(settings: Any | None = None) -> bool:
 
         settings = get_settings()
     value = getattr(settings, "translate_before_sentiment", False)
-    return value if isinstance(value, bool) else False
+    provider = getattr(settings, "translation_provider", "google_web")
+    enabled = value if isinstance(value, bool) else False
+    return enabled and provider != "disabled"
 
 
 # ---------------------------------------------------------------------------
@@ -50,21 +53,13 @@ def detect_languages(texts: list[str]) -> list[str | None]:
 
     Designed to be called from ``asyncio.to_thread`` (CPU-bound).
     """
-    from langdetect import DetectorFactory, detect
+    from sam.utils.translation import detect_text_languages_batch
 
-    # Make langdetect deterministic across runs.
-    DetectorFactory.seed = 0
-
-    results: list[str | None] = []
-    for text in texts:
-        if len(text) < _LANG_MIN_CHARS:
-            results.append(None)
-            continue
-        try:
-            results.append(detect(text))
-        except Exception:
-            results.append(None)
-    return results
+    results = detect_text_languages_batch(texts)
+    return [
+        lang if lang not in {"unknown", ""} and len(text) >= _LANG_MIN_CHARS else None
+        for text, lang in zip(texts, results, strict=True)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +106,25 @@ def analyze_texts_for_sentiment_with_stats(
     result_stats = cast(dict[str, int | float], translation_stats.to_dict())
     result_stats["sentiment_ms_total"] = stage_ms_total
     return sentiments, result_stats
+
+
+def analyze_texts_for_sentiment_with_stats_and_languages(
+    texts: list[str],
+    *,
+    translate: bool,
+    log_context: str = "enrichment",
+) -> tuple[list[SentimentResult], dict[str, int | float], list[str | None]]:
+    """Translate/analyze sentiment and also return detected languages."""
+    stage_start = perf_counter()
+    sentiments, translation_stats, detected_languages = analyze_sentiment_batch_with_metadata(
+        texts,
+        translate=translate,
+        log_context=log_context,
+    )
+    stage_ms_total = round((perf_counter() - stage_start) * 1000, 2)
+    result_stats = cast(dict[str, int | float], translation_stats.to_dict())
+    result_stats["sentiment_ms_total"] = stage_ms_total
+    return sentiments, result_stats, detected_languages
 
 
 def merge_numeric_stats(target: dict[str, int | float], update: dict[str, int | float]) -> None:

@@ -176,6 +176,7 @@ class DbTitleResponse(BaseModel):
     popularity: float | None
     revenue: int | None = None
     budget: int | None = None
+    is_active: bool = True
 
 
 class TitlesResponse(BaseModel):

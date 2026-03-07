@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -125,8 +124,7 @@ async def close_collectors() -> None:
 # Runtime overrides for collector enabled state.
 # Keys: "reddit", "youtube", "bluesky".  Values override the env-var defaults.
 # In-memory cache is updated on toggle; Redis is used for cross-process sharing.
-_COLLECTOR_OVERRIDE_TTL_SECONDS = 86_400
-collector_enabled_overrides: dict[str, tuple[bool, float]] = {}
+collector_enabled_overrides: dict[str, bool] = {}
 
 # Short-lived refresh dedupe lock so repeated stale-page views do not spawn
 # overlapping background refresh tasks for the same (title, platform) pair.
@@ -154,7 +152,7 @@ def api_keys_configured(platform: str) -> bool:
 
 
 async def is_collector_enabled(platform: str) -> bool:
-    """Check if a collector is enabled (Redis > fresh in-memory > env default)."""
+    """Check if a collector is enabled (Redis > in-memory > env default)."""
     from sam.cache import collector_toggle_get
 
     redis_val = await collector_toggle_get(platform)
@@ -163,21 +161,15 @@ async def is_collector_enabled(platform: str) -> bool:
 
     override = collector_enabled_overrides.get(platform)
     if override is not None:
-        enabled, expires_at = override
-        if time.monotonic() < expires_at:
-            return enabled
-        collector_enabled_overrides.pop(platform, None)
+        return override
 
     s = get_settings()
     return getattr(getattr(s, platform, None), "enabled", False)
 
 
 def set_collector_override(platform: str, enabled: bool) -> None:
-    """Set a local fallback override (bounded TTL) for collector state."""
-    collector_enabled_overrides[platform] = (
-        enabled,
-        time.monotonic() + _COLLECTOR_OVERRIDE_TTL_SECONDS,
-    )
+    """Set a local fallback override for collector state."""
+    collector_enabled_overrides[platform] = enabled
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +414,7 @@ async def refresh_mentions_background(
     platform: str,
     limit: int,
 ) -> None:
+    del title, limit
     if not await _acquire_refresh_lock(title_id=title_id, platform=platform):
         logger.debug(
             f"[api] {platform} background refresh already in-flight for title_id={title_id}"
@@ -429,21 +422,9 @@ async def refresh_mentions_background(
         return
 
     try:
-        _mentions, sentiment_by_source_id, posts, collected_at = await collect_mentions_live(
-            platform=platform,
-            title=title,
-            limit=limit,
-        )
-        if not posts:
-            return
+        from sam.scheduler.runner import run_refresh_for_title
 
-        await persist_mentions(
-            title_id=title_id,
-            platform=platform,
-            posts=posts,
-            sentiment_by_source_id=sentiment_by_source_id,
-            collected_at=collected_at,
-        )
+        await run_refresh_for_title(title_id=title_id, platform=platform)
     except HTTPException as exc:
         logger.warning(f"[api] {platform} background refresh skipped: {exc.detail}")
     except Exception as exc:

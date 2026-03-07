@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from loguru import logger
 
@@ -42,9 +43,16 @@ TITLE_ALIASES: dict[str, str] = {
     "sev": "Severance",
 }
 
+_STOPWORD_TITLES = {"it", "you", "us", "her", "them", "life", "dark", "victory"}
+
+
+def _coerce_text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
 
 def normalize_title(text: str) -> str:
     """Normalize a title-ish string for fuzzy matching."""
+    text = _coerce_text(text)
     text = text.casefold()
     text = _SEASON_RE.sub(r" s\2", text)
     text = _NON_ALNUM_RE.sub(" ", text)
@@ -61,6 +69,86 @@ class MatchResult:
 
     candidate: str
     score: float  # 0.0 .. 1.0
+
+
+def build_title_candidates(title: str, original_title: str | None = None) -> list[str]:
+    """Return a deduplicated list of candidate title strings."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in (_coerce_text(title), _coerce_text(original_title)):
+        if not raw:
+            continue
+        normalized = normalize_title(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(raw)
+    return candidates
+
+
+def title_match_threshold(title: str, *, original_title: str | None = None) -> float:
+    """Return a stricter threshold for shorter or ambiguous titles."""
+    candidates = build_title_candidates(title, original_title)
+    lengths = [len(normalize_title(candidate).split()) for candidate in candidates]
+    shortest = min(lengths, default=1)
+    primary = normalize_title(_coerce_text(title))
+    if primary in _STOPWORD_TITLES:
+        return 0.96
+    if shortest <= 1:
+        return 0.92
+    if shortest == 2:
+        return 0.82
+    return 0.72
+
+
+def build_search_query(
+    title: str,
+    *,
+    original_title: str | None = None,
+    media_type: str | None = None,
+    release_date: datetime | None = None,
+) -> str:
+    """Build a search query that carries more context than the raw title."""
+    primary = _coerce_text(title).strip()
+    if not primary:
+        return ""
+
+    parts = [f'"{primary}"']
+    if media_type == "movie":
+        parts.append("movie")
+    elif media_type == "tv":
+        parts.append("series")
+
+    if isinstance(release_date, datetime):
+        parts.append(str(release_date.year))
+
+    normalized_primary = normalize_title(primary)
+    safe_original_title = _coerce_text(original_title)
+    normalized_original = normalize_title(safe_original_title)
+    if normalized_original and normalized_original not in normalized_primary:
+        parts.append(f'"{safe_original_title}"')
+
+    return " ".join(parts)
+
+
+def match_title_text(
+    text: str,
+    *,
+    title: str,
+    original_title: str | None = None,
+    min_score: float | None = None,
+) -> MatchResult | None:
+    """Match text against a title/original-title pair."""
+    threshold = (
+        min_score
+        if min_score is not None
+        else title_match_threshold(_coerce_text(title), original_title=_coerce_text(original_title))
+    )
+    return match_best(
+        text,
+        candidates=build_title_candidates(_coerce_text(title), _coerce_text(original_title)),
+        min_score=threshold,
+    )
 
 
 def _alias_matches(normalized_text: str, alias: str) -> bool:

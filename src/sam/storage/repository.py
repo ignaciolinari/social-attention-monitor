@@ -12,7 +12,7 @@ from inspect import isawaitable
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import Integer, and_, cast, func, or_, select, text, update
+from sqlalchemy import Integer, and_, cast, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -186,15 +186,53 @@ async def list_titles(
     query: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_inactive: bool = False,
 ) -> list[Title]:
     """List titles from the DB (optionally filtered by substring match)."""
-    stmt = select(Title).where(Title.is_active.is_(True))
+    stmt = select(Title)
+    if not include_inactive:
+        stmt = stmt.where(Title.is_active.is_(True))
     if query:
         pattern = f"%{escape_like(query)}%"
         stmt = stmt.where(Title.title.ilike(pattern, escape="\\"))
     stmt = stmt.order_by(Title.popularity.desc().nullslast()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def deactivate_titles_not_seen_since(
+    session: AsyncSession,
+    *,
+    keep_tmdb_ids: set[int],
+    stale_before: datetime,
+) -> int:
+    """Deactivate titles that have fallen out of the tracked set."""
+    filters = [Title.is_active.is_(True), Title.updated_at < stale_before]
+    if keep_tmdb_ids:
+        filters.append(~Title.tmdb_id.in_(keep_tmdb_ids))
+
+    stmt = (
+        update(Title)
+        .where(*filters)
+        .values(is_active=False)
+        .execution_options(synchronize_session=False)
+    )
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def delete_mentions_older_than(session: AsyncSession, *, older_than: datetime) -> int:
+    """Delete mentions older than the given cutoff."""
+    stmt = delete(Mention).where(Mention.collected_at < older_than)
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def delete_pipeline_runs_older_than(session: AsyncSession, *, older_than: datetime) -> int:
+    """Delete historical pipeline runs older than the given cutoff."""
+    stmt = delete(PipelineRun).where(PipelineRun.started_at < older_than)
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def get_mentions_for_title(
@@ -541,6 +579,7 @@ async def get_trending_by_attention_index(
     *,
     window_hours: int,
     limit: int = 10,
+    fresh_since: datetime | None = None,
 ) -> list[tuple[Title, MetricsSnapshot]]:
     """
     Return titles ordered by latest Attention Index for the given window size.
@@ -566,11 +605,14 @@ async def get_trending_by_attention_index(
                 MetricsSnapshot.window_hours == window_hours,
             ),
         )
+        .where(Title.is_active.is_(True))
         .order_by(
             MetricsSnapshot.attention_index.desc().nullslast(), Title.popularity.desc().nullslast()
         )
         .limit(limit)
     )
+    if fresh_since is not None:
+        stmt = stmt.where(MetricsSnapshot.snapshot_time >= fresh_since)
 
     result = await session.execute(stmt)
     rows = result.all()
