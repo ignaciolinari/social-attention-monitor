@@ -28,19 +28,17 @@ def render_sidebar(
 
     with st.sidebar:
         st.header("🎯 Navigation")
+        if st.session_state.get("selected_page") not in page_options:
+            st.session_state["selected_page"] = page_options[0]
         page: str = st.radio(
             "Select View",
             page_options,
+            key="selected_page",
             label_visibility="collapsed",
         )  # type: ignore[assignment]
 
         st.divider()
         st.header("⚙️ Settings")
-        st.toggle(
-            "☀️ Light Mode",
-            value=st.session_state.get("theme_light", False),
-            key="theme_light",
-        )
         time_range = st.selectbox("Time range", ["Last 24 hours", "Last 7 days", "Last 30 days"])
         window_hours: int = st.selectbox("Metrics window", [1, 24], index=1)  # type: ignore[assignment]
 

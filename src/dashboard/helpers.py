@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import streamlit as st
 
@@ -32,6 +33,16 @@ DASHBOARD_REFRESH_MINUTES = 5
 
 # ── YouTube quota defaults ────────────────────────────────────────────────
 DEFAULT_YOUTUBE_DAILY_BUDGET = 10_000
+TITLE_MEDIA_TYPE_OPTIONS = {
+    "All types": "all",
+    "Movies": "movie",
+    "TV": "tv",
+}
+TITLE_STATUS_OPTIONS = {
+    "Active only": "active",
+    "All statuses": "all",
+    "Inactive only": "inactive",
+}
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,8 @@ class TitleOption:
     media_type: str
     release_year: str
     tmdb_id: int | None
+    is_active: bool = True
+    is_trending: bool = False
 
 
 # ── Pure utility helpers ───────────────────────────────────────────────────
@@ -103,7 +116,7 @@ def build_title_options(items: list[dict[str, Any]]) -> list[TitleOption]:
     """Build stable select options that remain unique across duplicate names."""
     options: list[TitleOption] = []
     for item in items:
-        title = item.get("title")
+        title: Any = item.get("title") if isinstance(item.get("title"), dict) else item
         if not isinstance(title, dict):
             continue
         title_id_raw = title.get("id")
@@ -119,6 +132,8 @@ def build_title_options(items: list[dict[str, Any]]) -> list[TitleOption]:
         )
         tmdb_id_raw = title.get("tmdb_id")
         tmdb_id = int(tmdb_id_raw) if isinstance(tmdb_id_raw, int) else None
+        is_active_raw = title.get("is_active")
+        is_trending_raw = title.get("is_trending")
         options.append(
             TitleOption(
                 id=title_id_raw,
@@ -126,6 +141,8 @@ def build_title_options(items: list[dict[str, Any]]) -> list[TitleOption]:
                 media_type=str(media_type_raw) if media_type_raw is not None else "unknown",
                 release_year=release_year,
                 tmdb_id=tmdb_id,
+                is_active=is_active_raw is not False,
+                is_trending=bool(is_trending_raw),
             )
         )
     return options
@@ -133,8 +150,333 @@ def build_title_options(items: list[dict[str, Any]]) -> list[TitleOption]:
 
 def title_option_label(option: TitleOption) -> str:
     """Format a :class:`TitleOption` as a human-readable dropdown label."""
+    trending_prefix = "🔥 " if option.is_trending else ""
     tmdb_text = f"TMDB {option.tmdb_id}" if option.tmdb_id is not None else option.id[:8]
-    return f"{option.name} ({option.media_type}, {option.release_year}) · {tmdb_text}"
+    status_text = "" if option.is_active else " · inactive"
+    return f"{trending_prefix}{option.name} ({option.media_type}, {option.release_year}) · {tmdb_text}{status_text}"
+
+
+def get_trending_title_options(
+    *,
+    window_hours: int,
+    limit: int = 50,
+) -> list[TitleOption]:
+    """Return current trending titles as :class:`TitleOption` entries."""
+    trending = get_trending_metrics(window_hours=window_hours, limit=min(limit, 50))
+    options = build_title_options(trending.get("items", [])) if trending else []
+    return [replace(option, is_trending=True) for option in options]
+
+
+def get_db_titles(
+    *,
+    query: str | None = None,
+    include_inactive: bool = False,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any] | None:
+    """Load titles directly from the DB listing endpoint."""
+    from dashboard.api_client import get_json
+
+    params: dict[str, Any] = {
+        "include_inactive": include_inactive,
+        "limit": limit,
+        "offset": offset,
+    }
+    normalized_query = (query or "").strip()
+    if normalized_query:
+        params["q"] = normalized_query
+    try:
+        return get_json("/api/v1/db/titles", params=params)
+    except Exception as e:
+        st.error(f"Failed to load DB titles: {e}")
+        return None
+
+
+def _merge_title_options(*option_groups: list[TitleOption]) -> list[TitleOption]:
+    """Merge title option groups while preserving first-seen ordering."""
+    merged: dict[str, TitleOption] = {}
+    for group in option_groups:
+        for option in group:
+            merged.setdefault(option.id, option)
+    return list(merged.values())
+
+
+def _mark_trending_titles(
+    options: list[TitleOption],
+    *,
+    trending_ids: set[str],
+) -> list[TitleOption]:
+    """Copy title options and mark currently trending entries."""
+    return [
+        replace(option, is_trending=option.is_trending or option.id in trending_ids)
+        for option in options
+    ]
+
+
+def _matches_title_option(
+    option: TitleOption,
+    *,
+    query: str,
+    media_type_filter: str,
+    status_filter: str,
+    trending_only: bool,
+) -> bool:
+    """Return whether an option matches the current picker filters."""
+    normalized_query = query.strip().lower()
+    if normalized_query and normalized_query not in option.name.lower():
+        return False
+    if media_type_filter != "all" and option.media_type != media_type_filter:
+        return False
+    if status_filter == "active" and not option.is_active:
+        return False
+    if status_filter == "inactive" and option.is_active:
+        return False
+    return not (trending_only and not option.is_trending)
+
+
+def load_dashboard_title_options(
+    *,
+    window_hours: int,
+    query: str | None = None,
+    status_filter: str = "active",
+    media_type_filter: str = "all",
+    trending_only: bool = False,
+    limit: int = 200,
+) -> list[TitleOption]:
+    """Return title options for dashboard pickers.
+
+    Without a search term, the list prioritizes the current trending titles and then
+    appends more DB-backed titles so pages are no longer restricted to the trending set.
+    """
+    normalized_query = (query or "").strip()
+    trending_options = get_trending_title_options(window_hours=window_hours, limit=50)
+    trending_ids = {option.id for option in trending_options}
+    db_result = get_db_titles(
+        query=normalized_query or None,
+        include_inactive=status_filter != "active",
+        limit=limit,
+    )
+    db_options = (
+        _mark_trending_titles(
+            build_title_options(db_result.get("titles", [])), trending_ids=trending_ids
+        )
+        if db_result
+        else []
+    )
+    combined = _merge_title_options(trending_options, db_options)
+    return [
+        option
+        for option in combined
+        if _matches_title_option(
+            option,
+            query=normalized_query,
+            media_type_filter=media_type_filter,
+            status_filter=status_filter,
+            trending_only=trending_only,
+        )
+    ]
+
+
+def render_title_picker(
+    *,
+    label: str,
+    key_prefix: str,
+    window_hours: int,
+    st_module: Any | None = None,
+    format_func: Callable[[TitleOption], str] = title_option_label,
+    fallback_options_loader: Callable[[], list[TitleOption]] | None = None,
+) -> TitleOption | None:
+    """Render a single-title picker backed by the DB title list."""
+    ui = st if st_module is None else st_module
+    if not hasattr(ui, "text_input") or not hasattr(ui, "checkbox"):
+        if fallback_options_loader is None:
+            if hasattr(ui, "info"):
+                ui.info("No titles available yet. Populate the DB first.")
+            return None
+        options = fallback_options_loader()
+        if not options:
+            if hasattr(ui, "info"):
+                ui.info("No titles available yet. Populate the DB first.")
+            return None
+        return cast(
+            TitleOption,
+            ui.selectbox(
+                label,
+                options,
+                format_func=format_func,
+                key=f"{key_prefix}_title_select",
+            ),
+        )
+
+    search_col, media_col, status_col, trending_col = ui.columns([3, 1, 1, 1])
+    with search_col:
+        query = ui.text_input(
+            "Find title in DB",
+            key=f"{key_prefix}_title_query",
+            placeholder="Search any title stored in the database",
+        )
+    with media_col:
+        media_type_filter_label = ui.selectbox(
+            "Type",
+            list(TITLE_MEDIA_TYPE_OPTIONS.keys()),
+            key=f"{key_prefix}_media_type_filter",
+        )
+    with status_col:
+        status_filter_label = ui.selectbox(
+            "Status",
+            list(TITLE_STATUS_OPTIONS.keys()),
+            key=f"{key_prefix}_status_filter",
+        )
+    with trending_col:
+        trending_only = ui.checkbox(
+            "Trending only",
+            value=False,
+            key=f"{key_prefix}_trending_only",
+            help="Limit the picker to titles currently in the trending set.",
+        )
+
+    options = load_dashboard_title_options(
+        window_hours=window_hours,
+        query=query,
+        status_filter=TITLE_STATUS_OPTIONS[status_filter_label],
+        media_type_filter=TITLE_MEDIA_TYPE_OPTIONS[media_type_filter_label],
+        trending_only=trending_only,
+    )
+    if not options:
+        if query.strip():
+            ui.info(f"No DB titles matched `{query.strip()}`.")
+        else:
+            ui.info("No titles available yet. Populate the DB first.")
+        return None
+
+    if query.strip():
+        ui.caption(
+            f"Showing {len(options)} matching title(s). `🔥` marks currently trending titles."
+        )
+    else:
+        ui.caption(
+            "Showing current trending titles first, plus more titles from the database. `🔥` marks trending titles."
+        )
+
+    session_state = getattr(ui, "session_state", None)
+    if session_state is not None:
+        pending_key = f"{key_prefix}_pending_title_id"
+        pending_title_id = session_state.pop(pending_key, None)
+        if isinstance(pending_title_id, str):
+            for option in options:
+                if option.id == pending_title_id:
+                    session_state[f"{key_prefix}_title_select"] = option
+                    break
+
+    return cast(
+        TitleOption,
+        ui.selectbox(
+            label,
+            options,
+            format_func=format_func,
+            key=f"{key_prefix}_title_select",
+        ),
+    )
+
+
+def render_title_multiselect(
+    *,
+    label: str,
+    key_prefix: str,
+    window_hours: int,
+    default_count: int = 2,
+    max_selections: int = 5,
+    st_module: Any | None = None,
+    format_func: Callable[[TitleOption], str] = title_option_label,
+    fallback_options_loader: Callable[[], list[TitleOption]] | None = None,
+) -> list[TitleOption]:
+    """Render a multi-title picker backed by the DB title list."""
+    ui = st if st_module is None else st_module
+    if not hasattr(ui, "text_input") or not hasattr(ui, "checkbox"):
+        if fallback_options_loader is None:
+            if hasattr(ui, "info"):
+                ui.info("No titles available yet. Populate the DB first.")
+            return []
+        options = fallback_options_loader()
+        if not options:
+            if hasattr(ui, "info"):
+                ui.info("No titles available yet. Populate the DB first.")
+            return []
+        default_options = options[: min(default_count, len(options))]
+        return cast(
+            list[TitleOption],
+            ui.multiselect(
+                label,
+                options,
+                default=default_options,
+                format_func=format_func,
+                max_selections=max_selections,
+                key=f"{key_prefix}_titles_select",
+            ),
+        )
+
+    search_col, media_col, status_col, trending_col = ui.columns([3, 1, 1, 1])
+    with search_col:
+        query = ui.text_input(
+            "Find titles in DB",
+            key=f"{key_prefix}_titles_query",
+            placeholder="Search any titles stored in the database",
+        )
+    with media_col:
+        media_type_filter_label = ui.selectbox(
+            "Type",
+            list(TITLE_MEDIA_TYPE_OPTIONS.keys()),
+            key=f"{key_prefix}_titles_media_type_filter",
+        )
+    with status_col:
+        status_filter_label = ui.selectbox(
+            "Status",
+            list(TITLE_STATUS_OPTIONS.keys()),
+            key=f"{key_prefix}_titles_status_filter",
+        )
+    with trending_col:
+        trending_only = ui.checkbox(
+            "Trending only",
+            value=False,
+            key=f"{key_prefix}_titles_trending_only",
+            help="Limit the picker to titles currently in the trending set.",
+        )
+
+    options = load_dashboard_title_options(
+        window_hours=window_hours,
+        query=query,
+        status_filter=TITLE_STATUS_OPTIONS[status_filter_label],
+        media_type_filter=TITLE_MEDIA_TYPE_OPTIONS[media_type_filter_label],
+        trending_only=trending_only,
+    )
+    if not options:
+        if query.strip():
+            ui.info(f"No DB titles matched `{query.strip()}`.")
+        else:
+            ui.info("No titles available yet. Populate the DB first.")
+        return []
+
+    if query.strip():
+        ui.caption(
+            f"Showing {len(options)} matching title(s). `🔥` marks currently trending titles."
+        )
+    else:
+        ui.caption(
+            "Showing current trending titles first, plus more titles from the database. `🔥` marks trending titles."
+        )
+
+    default_options = options[: min(default_count, len(options))]
+    return cast(
+        list[TitleOption],
+        ui.multiselect(
+            label,
+            options,
+            default=default_options,
+            format_func=format_func,
+            max_selections=max_selections,
+            key=f"{key_prefix}_titles_select",
+        ),
+    )
 
 
 def sentiment_comparison_cache_key(

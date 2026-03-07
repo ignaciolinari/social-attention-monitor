@@ -11,6 +11,7 @@ from dashboard.helpers import (
     PLATFORM_COLORS,
     build_title_options,
     get_trending_metrics,
+    render_title_picker,
     title_option_label,
 )
 from dashboard.pages import PageContext
@@ -19,21 +20,18 @@ from dashboard.pages import PageContext
 def render(ctx: PageContext) -> None:
     """Render the Platform Comparison page."""
     st.header("🔄 Platform Comparison")
-    trending = get_trending_metrics(window_hours=ctx.window_hours, limit=20)
-    if not trending or not trending.get("items"):
-        st.info("No titles available yet. Populate the DB first.")
-        return
-
-    title_options = build_title_options(trending.get("items", []))
-    if not title_options:
-        st.info("No title options available yet.")
-        return
-    selected_title = st.selectbox(
-        "Select title",
-        title_options,
+    selected_title = render_title_picker(
+        label="Select title",
+        key_prefix="platform",
+        window_hours=ctx.window_hours,
+        st_module=st,
         format_func=title_option_label,
-        key="platform_title",
+        fallback_options_loader=lambda: build_title_options(
+            (get_trending_metrics(window_hours=ctx.window_hours, limit=20) or {}).get("items", [])
+        ),
     )
+    if selected_title is None:
+        return
     selected_id = selected_title.id
 
     try:

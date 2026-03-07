@@ -34,11 +34,11 @@ from dashboard.pages import quota as page_quota
 from dashboard.pages import sentiment as page_sentiment
 from dashboard.pages import sentiment_comparison as page_sentiment_cmp
 from dashboard.pages import timeseries as page_timeseries
+from dashboard.pages import title_catalog as page_title_catalog
 from dashboard.pages import title_comparison as page_compare
 from dashboard.pages import trending as page_trending
 from dashboard.pages import watchlists as page_watchlists
 from dashboard.sidebar import render_sidebar
-from dashboard.theme import apply_theme
 
 st.set_page_config(
     page_title="SAM - Social Attention Monitor",
@@ -48,8 +48,6 @@ st.set_page_config(
 )
 
 st_autorefresh(interval=DASHBOARD_REFRESH_MINUTES * 60 * 1000, key="data_refresh")
-
-apply_theme()
 
 
 # Page label -> renderer mapping (Executive first = default landing)
@@ -66,6 +64,7 @@ _PAGES = {
     "🌍 Language": page_language.render,
     "📜 Benchmark": page_benchmark.render,
     "📌 Watchlists": page_watchlists.render,
+    "🗂️ Title Catalog": page_title_catalog.render,
     "🚨 Alerts": page_alerts.render,
     "📡 API Quota": page_quota.render,
     "🔧 Pipeline Observability": page_observability.render,

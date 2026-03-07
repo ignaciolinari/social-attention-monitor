@@ -10,7 +10,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard.api_client import get_json
-from dashboard.helpers import build_title_options, get_trending_metrics, title_option_label
+from dashboard.helpers import (
+    build_title_options,
+    get_trending_metrics,
+    render_title_picker,
+    title_option_label,
+)
 from dashboard.pages import PageContext
 
 
@@ -60,33 +65,28 @@ def render(ctx: PageContext) -> None:
     """Render the Historical Benchmark page."""
     st.header("📜 Historical Benchmark")
     st.markdown("*Compare a title's early trajectory against similar past releases*")
-
-    trending = get_trending_metrics(window_hours=ctx.window_hours, limit=20)
-    if not trending or not trending.get("items"):
-        st.info("No titles available yet. Populate the DB first.")
+    selected_title = render_title_picker(
+        label="Select title",
+        key_prefix="benchmark",
+        window_hours=ctx.window_hours,
+        st_module=st,
+        format_func=title_option_label,
+        fallback_options_loader=lambda: build_title_options(
+            (get_trending_metrics(window_hours=ctx.window_hours, limit=20) or {}).get("items", [])
+        ),
+    )
+    if selected_title is None:
         return
 
-    title_options = build_title_options(trending.get("items", []))
-    if not title_options:
-        st.info("No title options available yet.")
-        return
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        selected_title = st.selectbox(
-            "Select title",
-            title_options,
-            format_func=title_option_label,
-            key="bench_title",
-        )
-    with col2:
         comp_type = st.selectbox(
             "Comparison type",
             ["movie", "tv"],
             index=0 if selected_title.media_type == "movie" else 1,
             key="bench_type",
         )
-    with col3:
+    with col2:
         days = st.slider("Days from release", 1, 30, 7, key="bench_days")
 
     try:

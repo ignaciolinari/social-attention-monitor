@@ -227,6 +227,12 @@ def _render_quota_burn(runs: list[dict[str, Any]], _ctx: PageContext) -> None:
         if not isinstance(stats, dict):
             continue
         yt_units = stats.get("youtube_quota_units") or stats.get("quota_units_used")
+        if not isinstance(yt_units, (int, float)):
+            api_quota = stats.get("api_quota")
+            if isinstance(api_quota, dict):
+                youtube = api_quota.get("youtube", {})
+                if isinstance(youtube, dict):
+                    yt_units = youtube.get("total_units")
         if isinstance(yt_units, (int, float)) and r.get("started_at"):
             quota_rows.append({"started_at": r["started_at"], "units": int(yt_units)})
 
@@ -296,8 +302,11 @@ def _render_sentiment_throughput(runs: list[dict[str, Any]]) -> None:
             "mentions_inserted",
             "spam_filtered",
             "duplicates_removed",
+            "matching_filtered",
+            "languages_detected",
             "raw_storage_failures",
             "mentions_capped_titles",
+            "titles_deactivated",
         ):
             val = stats.get(key)
             if isinstance(val, (int, float)):
@@ -363,8 +372,11 @@ def _render_sentiment_throughput(runs: list[dict[str, Any]]) -> None:
             "mentions_inserted",
             "spam_filtered",
             "duplicates_removed",
+            "matching_filtered",
+            "languages_detected",
             "raw_storage_failures",
             "mentions_capped_titles",
+            "titles_deactivated",
         )
         if c in df.columns
     ]
@@ -386,6 +398,21 @@ def _render_sentiment_throughput(runs: list[dict[str, Any]]) -> None:
             title="Data quality metrics per run",
         )
         st.plotly_chart(fig3, use_container_width=True)
+
+    latest_with_caps = next(
+        (
+            r
+            for r in runs
+            if isinstance(r.get("stats"), dict)
+            and isinstance(r["stats"].get("mentions_capped_title_names"), list)
+            and r["stats"]["mentions_capped_title_names"]
+        ),
+        None,
+    )
+    if latest_with_caps is not None:
+        capped_titles = latest_with_caps["stats"]["mentions_capped_title_names"]
+        st.caption("Titles that hit the snapshot mention cap in the latest affected run:")
+        st.write(", ".join(str(title) for title in capped_titles))
 
 
 def _render_error_log(runs: list[dict[str, Any]]) -> None:

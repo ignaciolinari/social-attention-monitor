@@ -9,7 +9,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard.api_client import get_json
-from dashboard.helpers import build_title_options, get_trending_metrics, title_option_label
+from dashboard.helpers import (
+    build_title_options,
+    get_trending_metrics,
+    render_title_multiselect,
+    title_option_label,
+)
 from dashboard.pages import PageContext
 
 
@@ -18,23 +23,17 @@ def render(ctx: PageContext) -> None:
     st.header("🔎 Compare Titles")
     st.markdown("*Side-by-side analysis of attention, velocity, and sentiment across titles*")
 
-    trending = get_trending_metrics(window_hours=ctx.window_hours, limit=20)
-    if not trending or not trending.get("items"):
-        st.info("No titles available yet. Populate the DB first.")
-        return
-
-    title_options = build_title_options(trending.get("items", []))
-    if len(title_options) < 2:
-        st.info("At least 2 titles are needed for comparison.")
-        return
-
-    selected = st.multiselect(
-        "Select titles to compare (2-5)",
-        title_options,
-        default=title_options[:2],
-        format_func=title_option_label,
+    selected = render_title_multiselect(
+        label="Select titles to compare (2-5)",
+        key_prefix="compare",
+        window_hours=ctx.window_hours,
+        default_count=2,
         max_selections=5,
-        key="compare_titles",
+        st_module=st,
+        format_func=title_option_label,
+        fallback_options_loader=lambda: build_title_options(
+            (get_trending_metrics(window_hours=ctx.window_hours, limit=20) or {}).get("items", [])
+        ),
     )
 
     if len(selected) < 2:

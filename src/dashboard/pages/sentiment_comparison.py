@@ -18,6 +18,7 @@ from dashboard.helpers import (
     get_cached_analyzer,
     get_trending_metrics,
     prune_sentiment_comparison_cache,
+    render_title_picker,
     sentiment_comparison_cache_key,
     title_option_label,
 )
@@ -33,22 +34,18 @@ def render(ctx: PageContext) -> None:  # noqa: C901 — unavoidable UI complexit
         "Compare the baseline VADER model against the Transformer-based RoBERTa model "
         "on real social media mentions."
     )
-
-    trending = get_trending_metrics(window_hours=ctx.window_hours, limit=20)
-    if not trending or not trending.get("items"):
-        st.info("No titles available yet. Populate the DB first.")
-        return
-
-    title_options = build_title_options(trending.get("items", []))
-    if not title_options:
-        st.info("No title options available yet.")
-        return
-    selected_title = st.selectbox(
-        "Select title",
-        title_options,
+    selected_title = render_title_picker(
+        label="Select title",
+        key_prefix="sentiment_comparison",
+        window_hours=ctx.window_hours,
+        st_module=st,
         format_func=title_option_label,
-        key="comparison_title",
+        fallback_options_loader=lambda: build_title_options(
+            (get_trending_metrics(window_hours=ctx.window_hours, limit=20) or {}).get("items", [])
+        ),
     )
+    if selected_title is None:
+        return
 
     if not ctx.enabled_platforms:
         st.warning("All collectors are disabled. Please enable at least one collector platform.")
