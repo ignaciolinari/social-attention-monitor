@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from dashboard.api_client import delete_json, get_json, post_json, put_json
+from dashboard.api_client import delete_json, get_json_nocache, post_json, put_json
 from dashboard.pages import PageContext
 
 
@@ -51,7 +51,7 @@ def render(_ctx: PageContext) -> None:
 
     # ── List existing watchlists ─────────────────────────────────────────
     try:
-        data = get_json("/api/v1/watchlists", params={"limit": 50})
+        data = get_json_nocache("/api/v1/watchlists", params={"limit": 50})
     except Exception as e:
         st.error(f"Failed to load watchlists: {e}")
         return

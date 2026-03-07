@@ -50,17 +50,18 @@ async def compute_and_upsert_metrics_snapshots_multi(
     title_id: uuid.UUID,
     snapshot_time: datetime,
     window_hours_list: list[int],
-) -> int:
+) -> tuple[int, bool]:
     """Compute and upsert metrics for *multiple* window sizes.
 
     Fetches mentions once (for the largest window) and filters in-memory
     for smaller windows, halving DB load compared to calling the single-
     window function repeatedly.
 
-    Returns the number of snapshots upserted.
+    Returns (snapshots_upserted, mentions_capped) where mentions_capped is True
+    if the mention fetch hit the 10k limit (metrics may be truncated).
     """
     if not window_hours_list:
-        return 0
+        return (0, False)
     normalized_windows = sorted({int(w) for w in window_hours_list})
     if any(w <= 0 for w in normalized_windows):
         raise ValueError("window_hours_list must contain only positive integers")
@@ -182,7 +183,7 @@ async def compute_and_upsert_metrics_snapshots_multi(
         )
         count += 1
 
-    return count
+    return (count, mentions_capped)
 
 
 # ---------------------------------------------------------------------------

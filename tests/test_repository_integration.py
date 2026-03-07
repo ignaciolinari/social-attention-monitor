@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -12,7 +13,8 @@ from sam.collectors.base import CollectedPost
 from sam.collectors.tmdb import TMDBTitle
 from sam.pipeline.metrics_snapshots import compute_and_upsert_metrics_snapshot
 from sam.processors.metrics import MetricsCalculator
-from sam.storage.models import Base
+from sam.scheduler import runner
+from sam.storage.models import Base, Lease, PipelineRun
 from sam.storage.repository import (
     get_latest_metrics_snapshot,
     get_mentions_count,
@@ -470,4 +472,154 @@ async def test_get_mentions_in_window_respects_limit() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_force_clear_one_shot_state_only_clears_stale_rows(monkeypatch) -> None:
+    """Real DB coverage for one-shot recovery: active leases are protected, stale state is cleared."""
+    db_url = os.getenv("SAM_TEST_DATABASE_URL")
+    if not db_url:
+        pytest.skip("SAM_TEST_DATABASE_URL not set")
+
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except InvalidCatalogNameError:
+        await engine.dispose()
+        pytest.skip("Test database not available")
+
+    Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    lease_name = f"sam:test-collector-cycle:{uuid4().hex}"
+    job_name = f"collector-cycle-test-{uuid4().hex}"
+
+    @asynccontextmanager
+    async def session_override():
+        async with Session() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr(runner, "get_session", session_override)
+    monkeypatch.setattr(runner, "LEASE_NAME", lease_name)
+    monkeypatch.setattr(runner, "JOB_NAME", job_name)
+
+    async with Session() as session:
+        active_owner = uuid4()
+        session.add(
+            Lease(
+                name=lease_name,
+                owner_id=active_owner,
+                acquired_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        session.add(
+            PipelineRun(
+                job_name=job_name,
+                owner_id=active_owner,
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                stats=None,
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(RuntimeError, match="active collector lease"):
+        await runner._force_clear_one_shot_state()
+
+    async with Session() as session:
+        active_lease = await session.get(Lease, lease_name)
+        active_runs = [
+            row
+            for row in (
+                await session.execute(
+                    PipelineRun.__table__.select().where(PipelineRun.job_name == job_name)
+                )
+            )
+            .mappings()
+            .all()
+            if row["status"] == "running"
+        ]
+        assert active_lease is not None
+        assert len(active_runs) == 1
+
+        await session.execute(PipelineRun.__table__.delete())
+        await session.execute(Lease.__table__.delete())
+        await session.commit()
+
+    async with Session() as session:
+        stale_owner = uuid4()
+        fresh_owner = uuid4()
+        session.add(
+            Lease(
+                name=lease_name,
+                owner_id=stale_owner,
+                acquired_at=datetime.now(UTC) - timedelta(minutes=20),
+                expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                updated_at=datetime.now(UTC) - timedelta(minutes=20),
+            )
+        )
+        session.add(
+            PipelineRun(
+                job_name=job_name,
+                owner_id=stale_owner,
+                status="running",
+                started_at=datetime.now(UTC) - timedelta(minutes=20),
+                finished_at=None,
+                error=None,
+                stats=None,
+            )
+        )
+        session.add(
+            PipelineRun(
+                job_name=job_name,
+                owner_id=fresh_owner,
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                stats=None,
+            )
+        )
+        await session.commit()
+
+    released, failed_runs = await runner._force_clear_one_shot_state()
+
+    assert released == 1
+    assert failed_runs == 1
+
+    async with Session() as session:
+        assert await session.get(Lease, lease_name) is None
+        run_rows = (
+            (
+                await session.execute(
+                    PipelineRun.__table__.select().where(PipelineRun.job_name == job_name)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(run_rows) == 2
+        stale_rows = [row for row in run_rows if row["owner_id"] == stale_owner]
+        fresh_rows = [row for row in run_rows if row["owner_id"] == fresh_owner]
+        assert len(stale_rows) == 1
+        assert stale_rows[0]["status"] == "failed"
+        assert stale_rows[0]["error"] == "stale run cleared by one-shot recovery"
+        assert len(fresh_rows) == 1
+        assert fresh_rows[0]["status"] == "running"
+
+        await session.execute(
+            PipelineRun.__table__.delete().where(PipelineRun.job_name == job_name)
+        )
+        await session.execute(Lease.__table__.delete().where(Lease.name == lease_name))
+        await session.commit()
+
     await engine.dispose()

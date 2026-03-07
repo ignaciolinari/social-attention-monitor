@@ -396,7 +396,7 @@ class MetricsCalculator:
         mentions: int,
         velocity: float,
         unique_users: int,
-        sentiment_momentum: float,
+        avg_sentiment: float,
         previous: "EngagementMetrics | None" = None,
     ) -> float:
         """
@@ -422,7 +422,7 @@ class MetricsCalculator:
             normalized_velocity = min(100, velocity * 10)
             normalized_users = min(100, unique_users / 5)
 
-        normalized_sentiment = (sentiment_momentum + 1) * 50  # -1 to 1 -> 0 to 100
+        normalized_sentiment = (avg_sentiment + 1) * 50  # -1 to 1 -> 0 to 100
 
         attention_index = (
             normalized_mentions * 0.25

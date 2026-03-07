@@ -37,7 +37,7 @@ def get_engine() -> AsyncEngine:
                 db_url = settings.database.effective_url(demo_mode=settings.demo_mode)
                 if settings.demo_mode and db_url == settings.database.url:
                     logger.warning(
-                        "[db] DEMO_MODE=true but DATABASE_DEMO_URL not set; "
+                        "[db] demo mode is enabled but DATABASE_DEMO_URL is not set; "
                         "demo data will be written into the primary database"
                     )
                 _engine = create_async_engine(
@@ -117,24 +117,29 @@ async def cleanup_stale_state() -> None:
     """
     from datetime import UTC, datetime, timedelta
 
-    from sqlalchemy import delete, update
+    from sqlalchemy import delete, func, select, update
 
     from sam.storage.models import Lease, PipelineRun
 
     async with get_session() as session:
+        result = await session.execute(select(func.now()))
+        db_now = result.scalar_one_or_none()
+        if not isinstance(db_now, datetime):
+            db_now = datetime.now(UTC)
+
         # Expire any lease whose TTL has passed.
-        result = await session.execute(delete(Lease).where(Lease.expires_at < datetime.now(UTC)))
+        result = await session.execute(delete(Lease).where(Lease.expires_at < db_now))
         expired = getattr(result, "rowcount", 0) or 0
 
         # Mark any "running" pipeline runs older than 10 minutes as failed.
-        stale_cutoff = datetime.now(UTC) - timedelta(minutes=10)
+        stale_cutoff = db_now - timedelta(minutes=10)
         result = await session.execute(
             update(PipelineRun)
             .where(PipelineRun.status == "running", PipelineRun.started_at < stale_cutoff)
             .values(
                 status="failed",
                 error="process terminated abnormally (stale run cleaned up)",
-                finished_at=datetime.now(UTC),
+                finished_at=db_now,
             )
         )
         orphans = getattr(result, "rowcount", 0) or 0

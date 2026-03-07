@@ -8,11 +8,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sam.alerts import AlertType, DetectedAnomaly, Severity
 from sam.collectors.base import CommentCollectionResult
 from sam.collectors.tmdb import TMDBTitle
 from sam.pipeline import enrichment
 from sam.processors.sentiment import SentimentBatchTranslationStats
 from sam.scheduler import runner
+
+
+def _make_system_anomaly(
+    *,
+    alert_type: AlertType = AlertType.COLLECTOR_FAILURE,
+    severity: Severity = Severity.WARNING,
+    message: str = "Collector failed",
+) -> DetectedAnomaly:
+    return DetectedAnomaly(
+        alert_type=alert_type,
+        severity=severity,
+        message=message,
+        details={"source": "test"},
+        detected_at=datetime.now(UTC),
+        title_id="00000000-0000-0000-0000-000000000000",
+        title_name="[system]",
+    )
 
 
 class TestSnapshotBucket:
@@ -72,23 +90,20 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
-            # Configure settings
             settings = MagicMock()
             settings.demo_mode = True
             settings.storage.enable_raw_data_storage = False
             mock_settings.return_value = settings
 
-            # Mock get_session async context manager
             mock_session = AsyncMock()
             mock_get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_get_session.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            # Mock TMDB
             mock_tmdb = AsyncMock()
             mock_title = MagicMock()
             mock_title.title = "Test Movie"
@@ -96,7 +111,6 @@ class TestCollectOnce:
             mock_tmdb.close = AsyncMock()
             mock_tmdb_cls.return_value = mock_tmdb
 
-            # Mock Reddit
             mock_reddit = AsyncMock()
             mock_reddit.is_configured = True
             mock_post = MagicMock()
@@ -109,7 +123,6 @@ class TestCollectOnce:
             mock_reddit.close = AsyncMock()
             mock_reddit_cls.return_value = mock_reddit
 
-            # Mock YouTube
             mock_youtube = AsyncMock()
             mock_video = MagicMock()
             mock_video.source_id = "xyz789"
@@ -121,7 +134,6 @@ class TestCollectOnce:
             mock_youtube.close = AsyncMock()
             mock_youtube_cls.return_value = mock_youtube
 
-            # Mock Bluesky
             mock_bluesky = AsyncMock()
             mock_bsky_post = MagicMock()
             mock_bsky_post.source_id = "bsky456"
@@ -133,14 +145,10 @@ class TestCollectOnce:
             mock_bluesky.close = AsyncMock()
             mock_bluesky_cls.return_value = mock_bluesky
 
-            # Mock DB title
             mock_db_title = MagicMock()
             mock_db_title.id = uuid.uuid4()
             mock_upsert.return_value = mock_db_title
 
-            # Mock sentiment -- return one result per post.
-            # analyze_texts_for_sentiment_with_stats is called separately for
-            # each platform batch.
             mock_sentiment_result = MagicMock()
             mock_sentiment_result.compound = 0.5
             mock_sentiment_result.positive = 0.7
@@ -149,7 +157,6 @@ class TestCollectOnce:
             mock_sentiment_result.label = "positive"
             mock_sentiment_result.model = "vader"
 
-            # Side effect: each call returns one result per input text + stats.
             def _fake_batch_sentiment(texts, *, translate, log_context="runner"):
                 _ = (translate, log_context)
                 return [mock_sentiment_result] * len(
@@ -157,11 +164,8 @@ class TestCollectOnce:
                 ), SentimentBatchTranslationStats().to_dict()
 
             mock_sentiment.side_effect = _fake_batch_sentiment
-
-            # Mock insert returns count
             mock_insert.return_value = 1
 
-            # Run
             stats = await runner.collect_once(
                 limit_titles=1,
                 limit_reddit=5,
@@ -173,7 +177,7 @@ class TestCollectOnce:
             assert stats["reddit_mentions_inserted"] == 1
             assert stats["youtube_mentions_inserted"] == 1
             assert stats["bluesky_mentions_inserted"] == 1
-            assert stats["metrics_snapshots_upserted"] == 2  # 1-hour and 24-hour
+            assert stats["metrics_snapshots_upserted"] == 2
 
     @pytest.mark.asyncio
     async def test_collect_once_handles_empty_results(self) -> None:
@@ -188,7 +192,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
@@ -248,7 +252,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result") as mock_persist,
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -349,7 +353,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -474,7 +478,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -595,7 +599,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -688,7 +692,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -783,7 +787,7 @@ class TestCollectOnce:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -1121,6 +1125,99 @@ class TestEnrichmentHelpers:
             # Should still release lease
             mock_release.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_finalizes_run_before_system_health_check(self) -> None:
+        call_order: list[str] = []
+
+        with (
+            patch("sam.scheduler.runner.get_session") as mock_session_ctx,
+            patch("sam.scheduler.runner.acquire_lease") as mock_acquire,
+            patch("sam.scheduler.runner.start_pipeline_run") as mock_start,
+            patch("sam.scheduler.runner.collect_once") as mock_collect,
+            patch("sam.scheduler.runner.AlertManager") as mock_alert_manager,
+            patch("sam.scheduler.runner.finish_pipeline_run") as mock_finish,
+            patch("sam.scheduler.runner.release_lease") as mock_release,
+        ):
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+
+            mock_acquire.return_value = True
+
+            mock_run = MagicMock()
+            mock_run.id = uuid.uuid4()
+            mock_run.stats = {}
+            mock_start.return_value = mock_run
+
+            mock_collect.return_value = {"titles_succeeded": 1, "titles_failed": 0}
+
+            manager = mock_alert_manager.return_value
+            manager.run_detection_cycle = AsyncMock(return_value=(0, []))
+
+            async def _finish(*_args, **_kwargs):
+                call_order.append("finish")
+
+            async def _check_system_health(_session):
+                call_order.append("check")
+                return [_make_system_anomaly()]
+
+            mock_finish.side_effect = _finish
+            manager.check_system_health = AsyncMock(side_effect=_check_system_health)
+
+            await runner._collection_job(
+                owner_id=uuid.uuid4(),
+                interval_minutes=5,
+                limit_titles=10,
+                limit_reddit=10,
+                limit_youtube=10,
+                limit_bluesky=10,
+            )
+
+            assert call_order == ["finish", "check", "finish"]
+            mock_release.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_publishes_system_health_for_failed_run(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_session") as mock_session_ctx,
+            patch("sam.scheduler.runner.acquire_lease") as mock_acquire,
+            patch("sam.scheduler.runner.start_pipeline_run") as mock_start,
+            patch("sam.scheduler.runner.collect_once") as mock_collect,
+            patch("sam.scheduler.runner.AlertManager") as mock_alert_manager,
+            patch("sam.scheduler.runner.finish_pipeline_run") as mock_finish,
+            patch("sam.scheduler.runner.release_lease") as mock_release,
+            patch(
+                "sam.scheduler.runner.publish_system_health_throttled",
+                new_callable=AsyncMock,
+            ) as mock_publish_system,
+        ):
+            mock_session = AsyncMock()
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+
+            mock_acquire.return_value = True
+
+            mock_run = MagicMock()
+            mock_run.id = uuid.uuid4()
+            mock_run.stats = {}
+            mock_start.return_value = mock_run
+
+            mock_collect.side_effect = RuntimeError("Network error")
+
+            manager = mock_alert_manager.return_value
+            manager.check_system_health = AsyncMock(return_value=[_make_system_anomaly()])
+
+            await runner._collection_job(
+                owner_id=uuid.uuid4(),
+                interval_minutes=5,
+                limit_titles=10,
+                limit_reddit=10,
+                limit_youtube=10,
+                limit_bluesky=10,
+            )
+
+            assert mock_finish.await_count == 2
+            mock_release.assert_called_once()
+            mock_publish_system.assert_awaited_once()
+
 
 class TestMain:
     """Tests for main() entry point."""
@@ -1176,6 +1273,84 @@ class TestMain:
             mock_run_forever.assert_not_awaited()
             mock_job.assert_awaited_once()
             mock_close_db.assert_awaited_once()
+
+    def test_main_force_clear_lease_for_once(self) -> None:
+        with (
+            patch("sam.scheduler.runner.setup_logging"),
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.scheduler.runner.init_db", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.cleanup_stale_state", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.seed_quota_from_db", new_callable=AsyncMock),
+            patch(
+                "sam.scheduler.runner._force_clear_one_shot_state",
+                new_callable=AsyncMock,
+            ) as mock_force,
+            patch("sam.scheduler.runner._collection_job", new_callable=AsyncMock) as mock_job,
+            patch("sam.scheduler.runner.run_forever", new_callable=AsyncMock),
+            patch("sam.scheduler.runner.close_db", new_callable=AsyncMock),
+            patch("sam.cache.close_redis", new_callable=AsyncMock),
+            patch("sam.config.install_sighup_handler"),
+            patch("sys.argv", ["sam-collector", "--once", "--force-clear-lease"]),
+        ):
+            settings = MagicMock()
+            settings.collector.polling_interval_minutes = 5
+            settings.collector.max_posts_per_subreddit = 10
+            mock_settings.return_value = settings
+
+            runner.main()
+
+            mock_force.assert_awaited_once()
+            mock_job.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_force_clear_one_shot_state_refuses_active_lease(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_session") as mock_session_ctx,
+            patch(
+                "sam.scheduler.runner.clear_stale_one_shot_state",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("refusing to clear active collector lease"),
+            ) as mock_clear,
+        ):
+            mock_session_ctx.return_value.__aenter__.return_value = AsyncMock()
+
+            with pytest.raises(RuntimeError, match="active collector lease"):
+                await runner._force_clear_one_shot_state()
+
+            mock_clear.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_force_clear_one_shot_state_clears_expired_lease(self) -> None:
+        with (
+            patch("sam.scheduler.runner.get_session") as mock_session_ctx,
+            patch(
+                "sam.scheduler.runner.clear_stale_one_shot_state",
+                new_callable=AsyncMock,
+                return_value=(1, 2),
+            ) as mock_clear,
+        ):
+            mock_session_ctx.return_value.__aenter__.return_value = AsyncMock()
+
+            released, failed_runs = await runner._force_clear_one_shot_state()
+
+            assert released == 1
+            assert failed_runs == 2
+            mock_clear.assert_awaited_once()
+
+    def test_main_force_clear_lease_requires_once(self) -> None:
+        with (
+            patch("sam.scheduler.runner.setup_logging"),
+            patch("sam.scheduler.runner.get_settings") as mock_settings,
+            patch("sam.config.install_sighup_handler"),
+            patch("sys.argv", ["sam-collector", "--force-clear-lease"]),
+        ):
+            settings = MagicMock()
+            settings.collector.polling_interval_minutes = 5
+            settings.collector.max_posts_per_subreddit = 10
+            mock_settings.return_value = settings
+
+            with pytest.raises(SystemExit):
+                runner.main()
 
     def test_main_custom_limits(self) -> None:
         with (
@@ -1257,7 +1432,7 @@ class TestRedditDeduplication:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -1352,7 +1527,7 @@ class TestBlueskyDeduplication:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
@@ -1448,8 +1623,17 @@ class TestCircuitBreaker:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=0,
+                return_value=(0, False),
             ),
+            patch(
+                "sam.scheduler.runner._is_title_quarantined",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "sam.scheduler.runner._record_title_failure", new_callable=AsyncMock, return_value=0
+            ),
+            patch("sam.scheduler.runner._clear_title_failures", new_callable=AsyncMock),
             patch("sam.scheduler.runner.persist_collection_result"),
             patch("sam.cache.collector_toggle_get", new_callable=AsyncMock, return_value=None),
         ):
@@ -1524,7 +1708,7 @@ class TestRawStorageFailureTracking:
             patch(
                 "sam.scheduler.runner.compute_and_upsert_metrics_snapshots_multi",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=(2, False),
             ),
             patch(
                 "sam.scheduler.runner.persist_collection_result",

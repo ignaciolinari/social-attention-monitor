@@ -15,13 +15,17 @@ import pytest
 
 from sam.storage.repository import (
     MentionProjection,
+    clear_stale_one_shot_state,
     escape_like,
+    fail_running_pipeline_runs,
     finish_pipeline_run,
+    force_release_lease,
     get_all_watchlist_tmdb_ids,
     get_average_benchmark_trajectory,
     get_benchmark_contributors_count,
     get_latest_mention_collected_at,
     get_latest_metrics_snapshot,
+    get_lease,
     get_mentions_count,
     get_mentions_for_title,
     get_mentions_in_window,
@@ -688,3 +692,111 @@ class TestPipelineRun:
         )
         assert fake_run.status == "failed"
         assert fake_run.error == "oops"
+
+    @pytest.mark.asyncio
+    async def test_force_release_lease_returns_rowcount(self) -> None:
+        session = _mock_session()
+        result = _mock_execute_result()
+        result.rowcount = 1
+        session.execute.return_value = result
+
+        released = await force_release_lease(session, name="collector-cycle-lease")
+
+        assert released == 1
+
+    @pytest.mark.asyncio
+    async def test_get_lease_returns_scalar_one_or_none(self) -> None:
+        session = _mock_session()
+        lease = MagicMock()
+        session.execute.return_value = _mock_execute_result(scalar_one_or_none=lease)
+
+        current = await get_lease(session, name="collector-cycle-lease")
+
+        assert current is lease
+
+    @pytest.mark.asyncio
+    async def test_fail_running_pipeline_runs_returns_rowcount(self) -> None:
+        session = _mock_session()
+        result = _mock_execute_result()
+        result.rowcount = 2
+        session.execute.return_value = result
+
+        failed = await fail_running_pipeline_runs(
+            session,
+            job_name="collector-cycle",
+            error="stale run cleared by one-shot recovery",
+        )
+
+        assert failed == 2
+
+    @pytest.mark.asyncio
+    async def test_clear_stale_one_shot_state_refuses_active_lease(self) -> None:
+        session = _mock_session()
+        db_now = datetime.now(UTC)
+        lease = MagicMock()
+        lease.expires_at = db_now + timedelta(minutes=5)
+        session.execute.side_effect = [
+            _mock_execute_result(scalar_one=db_now),
+            _mock_execute_result(scalar_one_or_none=lease),
+        ]
+
+        with pytest.raises(RuntimeError, match="active collector lease"):
+            await clear_stale_one_shot_state(
+                session,
+                lease_name="collector-cycle-lease",
+                job_name="collector-cycle",
+                error="stale run cleared by one-shot recovery",
+            )
+
+    @pytest.mark.asyncio
+    async def test_clear_stale_one_shot_state_clears_stale_owner_runs(self) -> None:
+        session = _mock_session()
+        db_now = datetime.now(UTC)
+        stale_owner = uuid4()
+        lease = MagicMock()
+        lease.expires_at = db_now - timedelta(minutes=1)
+        lease.owner_id = stale_owner
+        delete_result = _mock_execute_result()
+        delete_result.rowcount = 1
+        fail_result = _mock_execute_result()
+        fail_result.rowcount = 2
+        session.execute.side_effect = [
+            _mock_execute_result(scalar_one=db_now),
+            _mock_execute_result(scalar_one_or_none=lease),
+            delete_result,
+            fail_result,
+        ]
+
+        released, failed_runs = await clear_stale_one_shot_state(
+            session,
+            lease_name="collector-cycle-lease",
+            job_name="collector-cycle",
+            error="stale run cleared by one-shot recovery",
+        )
+
+        assert released == 1
+        assert failed_runs == 2
+
+    @pytest.mark.asyncio
+    async def test_clear_stale_one_shot_state_without_lease_only_fails_old_runs(self) -> None:
+        session = _mock_session()
+        db_now = datetime.now(UTC)
+        no_lease_result = MagicMock()
+        no_lease_result.scalar_one_or_none.return_value = None
+        fail_result = _mock_execute_result()
+        fail_result.rowcount = 1
+        session.execute.side_effect = [
+            _mock_execute_result(scalar_one=db_now),
+            no_lease_result,
+            fail_result,
+        ]
+
+        released, failed_runs = await clear_stale_one_shot_state(
+            session,
+            lease_name="collector-cycle-lease",
+            job_name="collector-cycle",
+            error="stale run cleared by one-shot recovery",
+        )
+
+        assert released == 0
+        assert failed_runs == 1

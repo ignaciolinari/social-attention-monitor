@@ -27,7 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from sam.alerts import AlertManager
-from sam.cache import publish_alert_event
+from sam.cache import publish_alert_event, publish_system_health_throttled
 from sam.collectors.base import CollectedPost, post_identity_key
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
@@ -50,6 +50,7 @@ from sam.quota import YOUTUBE_COMMENT_THREADS_COST, get_quota_tracker, seed_quot
 from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
 from sam.storage.repository import (
     acquire_lease,
+    clear_stale_one_shot_state,
     finish_pipeline_run,
     get_all_watchlist_tmdb_ids,
     insert_mentions,
@@ -155,12 +156,17 @@ JOB_NAME = "collector-cycle"
 
 
 def _snapshot_bucket(dt: datetime) -> datetime:
-    """Round *up* to the next 30-minute boundary so that each collection cycle
-    gets its own snapshot bucket.
+    """Round *up* to the next 30-minute boundary for metrics snapshot bucketing.
 
-    E.g. if now is 14:12, snapshot_time becomes 14:30.
-    If now is 14:37, snapshot_time becomes 15:00.
-    If the current time is already on a 30-minute boundary, keep it as-is.
+    With a 5-minute collection interval, multiple cycles (e.g. 14:05, 14:10, 14:15)
+    can produce snapshots that coalesce into the same 30-minute bucket (14:30).
+    This is intentional: snapshots are time-windowed metrics (1h, 24h) and
+    bucketing reduces fragmentation while keeping hourly granularity.
+
+    Examples:
+        - 14:12 → 14:30
+        - 14:37 → 15:00
+        - 14:30 (already on boundary) → 14:30
     """
     if dt.second == 0 and dt.microsecond == 0 and dt.minute % 30 == 0:
         return dt
@@ -187,6 +193,21 @@ def _normalized_collected_at(value: Any) -> datetime:
             return value.replace(tzinfo=UTC)
         return value
     return datetime.now(UTC)
+
+
+def _system_health_payload(anomaly: Any) -> dict[str, Any]:
+    """Serialize a system health anomaly for websocket broadcast."""
+    return {
+        "id": f"system-{anomaly.alert_type.value}",
+        "title_id": anomaly.title_id,
+        "alert_type": anomaly.alert_type.value,
+        "severity": anomaly.severity.value,
+        "message": anomaly.message,
+        "details": anomaly.details,
+        "created_at": anomaly.detected_at.isoformat(),
+        "acknowledged_at": None,
+        "is_system": True,
+    }
 
 
 async def _lease_heartbeat(
@@ -293,6 +314,7 @@ async def collect_once(
         "spam_filtered": 0,
         "duplicates_removed": 0,
         "raw_storage_failures": 0,
+        "mentions_capped_titles": 0,
         "languages_detection_failures": 0,
         "watchlist_titles_not_found": 0,
         "watchlist_titles_failed": 0,
@@ -695,13 +717,20 @@ async def collect_once(
                             default=datetime.now(UTC),
                         )
                         title_snapshot_time = _snapshot_bucket(latest_collected_at)
-                        snapshots_upserted = await compute_and_upsert_metrics_snapshots_multi(
+                        (
+                            snapshots_upserted,
+                            mentions_capped,
+                        ) = await compute_and_upsert_metrics_snapshots_multi(
                             session,
                             title_id=db_title.id,
                             snapshot_time=title_snapshot_time,
                             window_hours_list=[1, 24],
                         )
                         stats["metrics_snapshots_upserted"] += snapshots_upserted
+                        if mentions_capped:
+                            stats["mentions_capped_titles"] = (
+                                int(stats.get("mentions_capped_titles", 0)) + 1
+                            )
 
                 except Exception as exc:
                     logger.exception(f"[runner] Failed to process title '{t.title}': {exc}")
@@ -906,12 +935,13 @@ async def _collection_job(
         run_status = _derive_run_status(stats)
         run_error = "all titles failed during collection cycle" if run_status == "failed" else None
 
-        # --- Session 2: finalize (alerts, finish run, release lease) ---
+        # --- Session 2: finalize (alerts, finish run, system health, release lease) ---
         created_alerts: list[dict[str, Any]] = []
+        system_health_issues: list[dict[str, Any]] = []
         async with get_session() as session:
             alert_stats = {"alerts_detected": 0, "alerts_created": 0}
+            manager = AlertManager()
             try:
-                manager = AlertManager()
                 detected, created_alerts = await manager.run_detection_cycle(
                     session, window_hours=1, history_points=24
                 )
@@ -963,20 +993,62 @@ async def _collection_job(
                     **run_stats,
                     **stats,
                     **alert_stats,
+                    "system_health_issues": 0,
                     "elapsed_seconds": int(elapsed),
                     "api_quota": quota_stats,
                 },
             )
+
+            # System-level health checks depend on the latest collector run status,
+            # so evaluate them only after the current run has been finalized.
+            try:
+                sys_anomalies = await manager.check_system_health(session)
+                system_health_issues = [_system_health_payload(a) for a in sys_anomalies]
+                if system_health_issues:
+                    logger.info(f"[alerts] System health: {len(system_health_issues)} issue(s)")
+                    await finish_pipeline_run(
+                        session,
+                        run_id=run_id,
+                        status=run_status,
+                        error=run_error,
+                        stats={"system_health_issues": len(system_health_issues)},
+                    )
+            except Exception as sh_exc:
+                logger.warning(f"[alerts] System health check failed: {sh_exc}")
+
             await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
         for alert in created_alerts:
             with contextlib.suppress(Exception):
                 await publish_alert_event(alert)
+        for issue in system_health_issues:
+            with contextlib.suppress(Exception):
+                await publish_system_health_throttled(issue)
     except Exception as e:
         logger.exception(f"[runner] collection cycle failed: {e}")
         if run_id is not None:
+            system_health_issues = []
             async with get_session() as session:
                 await finish_pipeline_run(session, run_id=run_id, status="failed", error=str(e))
+
+                try:
+                    manager = AlertManager()
+                    sys_anomalies = await manager.check_system_health(session)
+                    system_health_issues = [_system_health_payload(a) for a in sys_anomalies]
+                    if system_health_issues:
+                        await finish_pipeline_run(
+                            session,
+                            run_id=run_id,
+                            status="failed",
+                            error=str(e),
+                            stats={"system_health_issues": len(system_health_issues)},
+                        )
+                except Exception as sh_exc:
+                    logger.warning(f"[alerts] System health check failed: {sh_exc}")
+
                 await release_lease(session, name=LEASE_NAME, owner_id=owner_id)
+            for issue in system_health_issues:
+                with contextlib.suppress(Exception):
+                    await publish_system_health_throttled(issue)
     finally:
         heartbeat_stop.set()
         with contextlib.suppress(Exception):
@@ -1055,6 +1127,28 @@ async def run_forever(
                 await collector.close()
 
 
+async def _force_clear_one_shot_state() -> tuple[int, int]:
+    """Clear stale collector state for operator-invoked one-shot runs.
+
+    Refuses to evict an active lease so a manual one-shot run cannot overlap a
+    healthy long-running collector process.
+    """
+    async with get_session() as session:
+        released, failed_runs = await clear_stale_one_shot_state(
+            session,
+            lease_name=LEASE_NAME,
+            job_name=JOB_NAME,
+            error="stale run cleared by one-shot recovery",
+        )
+
+    if released or failed_runs:
+        logger.warning(
+            f"[runner] Force-cleared state for one-shot run: "
+            f"released {released} lease(s), failed {failed_runs} running run(s)"
+        )
+    return released, failed_runs
+
+
 def main() -> None:
     setup_logging()
     from sam.config import install_sighup_handler
@@ -1064,6 +1158,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog="sam-collector", description="SAM collector runner")
     parser.add_argument("--once", action="store_true", help="Run a single collection cycle")
+    parser.add_argument(
+        "--force-clear-lease",
+        action="store_true",
+        help="With --once, clear stale collector lease/run state before starting",
+    )
     parser.add_argument("--init-db", action="store_true", help="Create tables if missing")
     parser.add_argument(
         "--interval-minutes", type=int, default=settings.collector.polling_interval_minutes
@@ -1075,6 +1174,9 @@ def main() -> None:
     parser.add_argument("--limit-youtube", type=int, default=20)
     parser.add_argument("--limit-bluesky", type=int, default=50)
     args = parser.parse_args()
+
+    if args.force_clear_lease and not args.once:
+        parser.error("--force-clear-lease requires --once")
 
     async def _run() -> None:
         if args.init_db:
@@ -1089,6 +1191,9 @@ def main() -> None:
 
         try:
             if args.once:
+                if args.force_clear_lease:
+                    await _force_clear_one_shot_state()
+
                 # Route one-shot runs through the same job path so we also:
                 # - acquire/release the lease
                 # - record a PipelineRun (started/finished/error)

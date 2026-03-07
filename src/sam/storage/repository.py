@@ -721,6 +721,120 @@ async def release_lease(
     return int(rowcount) > 0
 
 
+async def get_lease(
+    session: AsyncSession,
+    *,
+    name: str,
+) -> Lease | None:
+    """Return the current lease row for a job, if present."""
+    stmt = select(Lease).where(Lease.name == name)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def force_release_lease(
+    session: AsyncSession,
+    *,
+    name: str,
+) -> int:
+    """Release a lease regardless of owner.
+
+    Intended for explicit operator-initiated recovery paths such as one-shot
+    runs after an abnormal process termination.
+    """
+    stmt = text("DELETE FROM leases WHERE name = :name")
+    result = await session.execute(stmt, {"name": name})
+    rowcount = getattr(result, "rowcount", 0) or 0
+    return int(rowcount)
+
+
+async def clear_stale_one_shot_state(
+    session: AsyncSession,
+    *,
+    lease_name: str,
+    job_name: str,
+    error: str,
+    stale_run_grace: timedelta = timedelta(minutes=10),
+) -> tuple[int, int]:
+    """Atomically clear stale one-shot collector state.
+
+    Uses database time for stale checks and locks the lease row before deciding
+    whether recovery is allowed. If a stale lease exists, only runs owned by
+    that stale lease holder are failed. If no lease exists, only clearly stale
+    runs older than ``stale_run_grace`` are failed.
+    """
+    db_now_result = await session.execute(select(func.now()))
+    db_now = db_now_result.scalar_one_or_none()
+    if not isinstance(db_now, datetime):
+        db_now = datetime.now(UTC)
+
+    lease_result = await session.execute(
+        select(Lease).where(Lease.name == lease_name).with_for_update()
+    )
+    lease = lease_result.scalar_one_or_none()
+
+    stale_owner_id: uuid.UUID | None = None
+    released = 0
+    if lease is not None:
+        if lease.expires_at >= db_now:
+            raise RuntimeError(
+                "refusing to clear active collector lease; stop the running collector "
+                "or wait for the lease to expire"
+            )
+        stale_owner_id = lease.owner_id
+        delete_result = await session.execute(
+            text(
+                "DELETE FROM leases "
+                "WHERE name = :name AND owner_id = :owner_id AND expires_at < :db_now"
+            ),
+            {
+                "name": lease_name,
+                "owner_id": stale_owner_id,
+                "db_now": db_now,
+            },
+        )
+        released = int(getattr(delete_result, "rowcount", 0) or 0)
+
+    stale_run_cutoff = db_now - stale_run_grace
+    fail_stmt = update(PipelineRun).where(
+        PipelineRun.job_name == job_name,
+        PipelineRun.status == "running",
+    )
+    if stale_owner_id is not None:
+        fail_stmt = fail_stmt.where(PipelineRun.owner_id == stale_owner_id)
+    else:
+        fail_stmt = fail_stmt.where(PipelineRun.started_at < stale_run_cutoff)
+
+    fail_result = await session.execute(
+        fail_stmt.values(
+            status="failed",
+            error=error,
+            finished_at=db_now,
+        )
+    )
+    failed_runs = int(getattr(fail_result, "rowcount", 0) or 0)
+    return released, failed_runs
+
+
+async def fail_running_pipeline_runs(
+    session: AsyncSession,
+    *,
+    job_name: str,
+    error: str,
+    finished_at: datetime | None = None,
+) -> int:
+    """Mark currently running pipeline runs for a job as failed."""
+    finished_at = finished_at or datetime.now(UTC)
+    stmt = (
+        update(PipelineRun)
+        .where(PipelineRun.job_name == job_name, PipelineRun.status == "running")
+        .values(status="failed", error=error, finished_at=finished_at)
+    )
+    result = await session.execute(stmt)
+    rowcount = getattr(result, "rowcount", 0) or 0
+    return int(rowcount)
+
+
 async def start_pipeline_run(
     session: AsyncSession,
     *,

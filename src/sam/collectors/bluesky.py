@@ -10,9 +10,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from sam.collectors.base import BaseCollector, CollectedPost, CollectionResult
 from sam.config import get_settings
+
+
+def _should_retry(exc: BaseException) -> bool:
+    """Retry on rate limits and transient server errors."""
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if status in {429, 500, 502, 503, 504}:
+        return True
+    return "429" in str(exc)
 
 
 class BlueskyCollector(BaseCollector):
@@ -121,62 +132,53 @@ class BlueskyCollector(BaseCollector):
                 success=True,
             )
 
-        return await self._collect_with_retries(query, limit)
+        try:
+            return await self._collect_with_retries(query, limit)
+        except Exception as e:
+            logger.error(f"[bluesky] Collection failed after retries: {e}")
+            return CollectionResult(
+                platform=self.platform_name,
+                posts=[],
+                collected_at=datetime.now(UTC),
+                success=False,
+                error=str(e),
+            )
 
-    async def _collect_with_retries(
-        self,
-        query: str,
-        limit: int,
-        max_attempts: int = 3,
-    ) -> CollectionResult:
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        retry=retry_if_exception(_should_retry),
+    )
+    async def _collect_with_retries(self, query: str, limit: int) -> CollectionResult:
         """
         Run sync atproto collection with retry/backoff on errors.
 
+        Uses tenacity for 429, 500, 502, 503, 504 with exponential backoff.
         The atproto Client is synchronous, so we offload to a thread.
         """
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                # Offload sync atproto call to thread to avoid blocking event loop
-                posts = await asyncio.to_thread(self._search_posts, query, limit)
-                result = CollectionResult(
-                    platform=self.platform_name,
-                    posts=posts,
-                    collected_at=datetime.now(UTC),
-                    success=True,
-                )
-                self._log_collection(result)
-                return result
-
-            except Exception as e:
-                # Prefer checking for HTTP 429 status code when available;
-                # fall back to looking for "429" in the message string.
-                is_rate_limit = False
-                status = getattr(e, "status_code", None) or getattr(
-                    getattr(e, "response", None), "status_code", None
-                )
-                if status == 429 or "429" in str(e):
-                    is_rate_limit = True
-
-                if is_rate_limit and attempt < max_attempts:
-                    # Exponential backoff with jitter
-                    sleep_s = min(60.0, (2 ** (attempt - 1)) * 2.0) + random.uniform(0.0, 1.0)
-                    logger.warning(
-                        f"[bluesky] Rate limited (attempt {attempt}/{max_attempts}); "
-                        f"sleeping {sleep_s:.1f}s"
-                    )
-                    await asyncio.sleep(sleep_s)
-                    continue
-
-                logger.error(f"[bluesky] Collection failed: {e}")
-                return CollectionResult(
-                    platform=self.platform_name,
-                    posts=[],
-                    collected_at=datetime.now(UTC),
-                    success=False,
-                    error=str(e),
-                )
+        try:
+            posts = await asyncio.to_thread(self._search_posts, query, limit)
+            result = CollectionResult(
+                platform=self.platform_name,
+                posts=posts,
+                collected_at=datetime.now(UTC),
+                success=True,
+            )
+            self._log_collection(result)
+            return result
+        except Exception as e:
+            if _should_retry(e):
+                logger.warning(f"[bluesky] Transient error (will retry): {e}")
+                raise
+            logger.error(f"[bluesky] Collection failed: {e}")
+            return CollectionResult(
+                platform=self.platform_name,
+                posts=[],
+                collected_at=datetime.now(UTC),
+                success=False,
+                error=str(e),
+            )
 
     def _search_posts(self, query: str, limit: int) -> list[CollectedPost]:
         """Search for posts matching query.

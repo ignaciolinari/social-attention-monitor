@@ -452,7 +452,7 @@ class TestComputeAndUpsertMetricsSnapshotsMulti:
             mock_settings.enable_keyword_extraction = False
             mock_get_settings.return_value = mock_settings
 
-            count = await compute_and_upsert_metrics_snapshots_multi(
+            count, mentions_capped = await compute_and_upsert_metrics_snapshots_multi(
                 AsyncMock(),
                 title_id=uuid.uuid4(),
                 snapshot_time=datetime(2026, 1, 30, 1, 0, 0, tzinfo=UTC),
@@ -460,6 +460,7 @@ class TestComputeAndUpsertMetricsSnapshotsMulti:
             )
 
             assert count == 2
+            assert mentions_capped is False
             assert mock_upsert.call_count == 2
 
     @pytest.mark.asyncio

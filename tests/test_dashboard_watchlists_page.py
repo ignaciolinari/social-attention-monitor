@@ -74,7 +74,7 @@ class TestWatchlistsPage:
         monkeypatch.setattr(watchlists_page, "st", fake_st)
         monkeypatch.setattr(
             watchlists_page,
-            "get_json",
+            "get_json_nocache",
             lambda *_args, **_kwargs: {"watchlists": [], "total_count": 0},
         )
         monkeypatch.setattr(
@@ -107,7 +107,7 @@ class TestWatchlistsPage:
         monkeypatch.setattr(watchlists_page, "st", fake_st)
         monkeypatch.setattr(
             watchlists_page,
-            "get_json",
+            "get_json_nocache",
             lambda *_args, **_kwargs: {
                 "watchlists": [
                     {

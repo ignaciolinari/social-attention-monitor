@@ -292,7 +292,7 @@ class TestCollectWithRetries:
         mock_client.app.bsky.feed.search_posts.side_effect = [err, response]
 
         with patch("sam.collectors.bluesky.asyncio.sleep"):
-            result = await collector._collect_with_retries("test", limit=5, max_attempts=3)
+            result = await collector._collect_with_retries("test", limit=5)
 
         assert result.success is True
 
@@ -303,13 +303,11 @@ class TestCollectWithRetries:
         collector._client = mock_client
 
         err = Exception("HTTP 429 Too Many Requests")
-        mock_client.app.bsky.feed.search_posts.side_effect = err
+        # Tenacity retries 3 times by default; fail all 3, then reraise
+        mock_client.app.bsky.feed.search_posts.side_effect = [err, err, err]
 
-        with patch("sam.collectors.bluesky.asyncio.sleep"):
-            result = await collector._collect_with_retries("test", limit=5, max_attempts=2)
-
-        assert result.success is False
-        assert "429" in (result.error or "")
+        with patch("sam.collectors.bluesky.asyncio.sleep"), pytest.raises(Exception, match="429"):
+            await collector._collect_with_retries("test", limit=5)
 
     @pytest.mark.asyncio
     async def test_non_429_error_fails_immediately(self) -> None:
@@ -320,7 +318,27 @@ class TestCollectWithRetries:
         err = Exception("Network timeout")
         mock_client.app.bsky.feed.search_posts.side_effect = err
 
-        result = await collector._collect_with_retries("test", limit=5, max_attempts=3)
+        result = await collector._collect_with_retries("test", limit=5)
         assert result.success is False
         # Should fail immediately without retrying (not a rate limit)
         assert mock_client.app.bsky.feed.search_posts.call_count == 1
+
+
+class TestCollect:
+    """Tests for the public BlueskyCollector.collect contract."""
+
+    @pytest.mark.asyncio
+    async def test_collect_returns_failed_result_after_retry_exhaustion(self) -> None:
+        collector = BlueskyCollector(demo_mode=False)
+        mock_client = MagicMock()
+        collector._client = mock_client
+
+        err = Exception("HTTP 429 Too Many Requests")
+        mock_client.app.bsky.feed.search_posts.side_effect = [err, err, err]
+
+        with patch("sam.collectors.bluesky.asyncio.sleep"):
+            result = await collector.collect(query="test", limit=5)
+
+        assert result.success is False
+        assert "429" in (result.error or "")
+        assert mock_client.app.bsky.feed.search_posts.call_count == 3
