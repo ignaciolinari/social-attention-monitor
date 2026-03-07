@@ -26,7 +26,7 @@ The core pipeline follows an Extract-Transform-Load (ETL) approach, enriched wit
 The collector architecture is built around the `BaseCollector` interface, ensuring a consistent contract for fetching posts and comments.
 
 - **Execution**: Managed by `APScheduler` in `runner.py`.
-- **Concurrency**: Collectors run in parallel via `asyncio.gather`.
+- **Concurrency**: Each title flows through one authoritative ingestion path. Bounded cross-title concurrency is configurable, and expensive sub-steps like YouTube comment expansion are parallelized separately.
 - **Target Polling**: Polls external platform APIs at defined intervals (default: 5 minutes) for a dynamic list of tracked titles.
 
 *(See [Features Documentation](features.md) for details on supported platforms.)*
@@ -41,7 +41,7 @@ Data flows from collectors through a sequence of processing modules before stora
 3. **Sentiment Analysis**:
    - Primary: VADER (fast, rules-based).
    - Secondary: RoBERTa (transformer-based, deep contextual understanding).
-   - Translation: Non-English text can optionally be translated to English via SAM's built-in translation client before sentiment scoring.
+   - Translation: Non-English text can optionally be translated to English before sentiment scoring, but the translation path is provider-gated and disabled by default for the hot ingestion path.
 4. **Advanced NLP (Optional)**:
    - Sarcasm Detection
    - Emotion Classification (Joy, Anger, Sadness, etc.)
@@ -62,7 +62,7 @@ Data flows from collectors through a sequence of processing modules before stora
 Redis serves three crucial functions:
 1. **API Caching**: Caches intense DB queries (e.g., trending titles, search, and aggregated metrics) with configurable TTLs.
 2. **Distributed Toggles**: Shares feature flags (like `YOUTUBE_ENABLED`) safely across separate processes (e.g., FastAPI vs. the Scheduler).
-3. **Anomaly Alerts Pub/Sub**: Facilitates system-wide distribution of anomaly alerts before they push to connected WebSocket clients. System health alerts are throttled (15 min per type) via Redis keys to avoid spamming clients.
+3. **Event Fanout Pub/Sub**: Facilitates system-wide distribution of anomaly alerts and metrics updates before they push to connected WebSocket clients. System health alerts are throttled (15 min per type) via Redis keys to avoid spamming clients.
 
 ---
 
@@ -71,7 +71,7 @@ The backend service exposes data to the dashboard and external clients. The API 
 - **REST Endpoints**: Serves metrics, configuration states, platform quotas, mentions, and system health via route modules (`health`, `pipeline`, `collectors`, `mentions`, `metrics_routes`, `box_office`, `language`, `compare`, `benchmark`, `watchlists`, `alerts`, `sentiment`, `titles`, `trending`, `ws`).
 - **Middleware** (`api/middleware.py`): API key authentication for mutation endpoints (`POST`/`PUT`/`DELETE` under `/api/*`) and selected expensive/probe endpoints, plus sliding-window rate limiting (in-memory with Redis upgrade path).
 - **Prometheus Metrics**: `/metrics` endpoint for operational monitoring.
-- **WebSockets (`/ws`)**: Pushes real-time alerting anomalies instantly to active clients.
+- **WebSockets (`/ws`)**: Pushes real-time alerting anomalies and metrics updates to active clients.
 
 ---
 

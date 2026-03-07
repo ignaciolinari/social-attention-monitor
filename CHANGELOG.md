@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] - 2026-03-07
+## [0.3.2] - 2026-03-07
+
+### Added
+- **Title Catalog page**: New dashboard tab for browsing the full DB-backed title list, with search, filter controls, trending badges, CSV export, and quick jumps into analysis tabs.
+
+### Changed
+- **Dashboard title pickers**: Title-driven analytics tabs now search beyond the current trending subset by using DB-backed selectors with media-type, status, and trending-only filters.
+- **Trending badges**: Currently trending titles are now marked with `🔥` inside the broader DB-backed selectors and catalog results for easier scanning.
+- **Dashboard theming**: Removed the custom sidebar light/dark toggle so the dashboard now follows Streamlit's native theme and user settings.
+
+### Documentation
+- **Dashboard docs**: Updated the README and feature guide to describe the expanded title browsing flow, the new Title Catalog page, the new selector filters, and the native-theme behavior.
+
+## [0.3.1] - 2026-03-06
 
 ### Added
 - **Executive Overview**: New dashboard landing page aggregating top titles, system health, recent alerts, and pipeline metrics.
@@ -20,7 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **System health broadcast throttling**: `publish_system_health_throttled()` in cache module; Redis-backed 15-min throttle per alert type.
 
 ### Changed
-- **Codecov**: `fail_ci_if_error: true` so CI fails when coverage upload fails.
 - **Smoke test startup**: Replaced fixed `sleep 5` with retry loop (up to 30s) waiting for API readiness.
 - **Pre-commit mypy**: Uses `python -m mypy` instead of hardcoded `.venv/bin/python`.
 - **Metrics snapshots**: `compute_and_upsert_metrics_snapshots_multi` now returns `(count, mentions_capped)`; runner tracks `mentions_capped_titles` in stats.

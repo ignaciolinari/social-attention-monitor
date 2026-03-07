@@ -96,7 +96,7 @@ Yes. Reddit defaults to disabled. YouTube and Bluesky are sufficient for the pip
 The architecture supports it. A Twitter collector would need to be implemented; Twitter's API now requires paid access.
 
 **Is data retention configurable?**
-Data is stored indefinitely. See [Setup](setup.md#data-retention--privacy) for privacy notes. Retention policies can be added (e.g. periodic cleanup jobs).
+Yes. See [Setup](setup.md#4-data-retention--privacy) for the retention environment variables and defaults. Mentions, raw dumps, and pipeline-run history can all be cleaned up automatically during collector cycles.
 
 **How do I run the full stack in Docker?**
 `docker compose up -d` starts postgres, redis, api, collector, and dashboard.

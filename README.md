@@ -23,6 +23,8 @@ A near–real-time data pipeline that monitors social engagement and public sent
 **Trending Now:** Monitor real-time traction, share of voice, and hype acceleration. Export to CSV.
 <!-- ![Trending Now Snapshot](docs/assets/tab_trending.png) -->
 
+**Title Catalog:** Browse the full DB-backed title list, filter it, and jump directly into analysis tabs from the catalog.
+
 **Sentiment Analysis:** Understand public sentiment using VADER & RoBERTa models.
 <!-- ![Sentiment Analysis Snapshot](docs/assets/tab_sentiment.png) -->
 
@@ -40,17 +42,18 @@ The pipeline is designed to operate **fully within official APIs and their terms
 ## Key Features
 
 - **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky with per-platform circuit breakers.
-- **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), aspect-based sentiment, emotion classification, sarcasm detection, content deduplication, and auto-translation.
+- **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), aspect-based sentiment, emotion classification, sarcasm detection, content deduplication, and optional provider-gated translation.
 - **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration", plus alpha metrics (Audience Fatigue, Viral Coefficient, Sentiment Divergence).
 - **Box Office Correlation**: Automatic revenue/budget data from TMDB, scatter-plot analysis of social attention vs. commercial performance.
 - **Language Segmentation**: Automatic language detection on mentions with per-language sentiment breakdowns.
 - **Comparative Title Analytics**: Side-by-side comparison of up to 5 titles with overlaid attention, velocity, and sentiment charts.
+- **Expanded Title Browsing**: Title-driven dashboard tabs can search beyond the trending subset, filter by type/status/trending, and a dedicated Title Catalog page exposes the full DB title list.
 - **User-Defined Watchlists**: Create, edit, and delete persistent watchlists to track custom sets of titles beyond TMDB trending.
 - **Historical Benchmarking**: Compare a title's early day-level trajectory against averaged daily peer performance.
-- **Dark/Light Mode**: Toggle between dark and light themes in the dashboard.
+- **Native Dashboard Theming**: The dashboard now follows Streamlit's built-in theme and user settings instead of overriding colors in-app.
 - **Real-Time Alerting**: Statistical anomaly detection for mention spikes and viral breakouts pushed instantly via WebSockets.
 - **Security**: Optional API key authentication for mutation and expensive endpoints, with sliding-window rate limiting.
-- **Observability**: Prometheus-compatible `/metrics` endpoint, pipeline self-health alerts (run every cycle, throttled broadcast), per-title timing, and structured log correlation IDs.
+- **Observability**: Prometheus-compatible `/metrics` endpoint with persisted collector totals, pipeline self-health alerts (run every cycle, throttled broadcast), per-title timing, and structured log correlation IDs.
 - **Resilience**: Title quarantine for failing titles, SIGHUP hot-reload, translation timeouts, and graceful collector degradation.
 
 ## Contributing
@@ -160,7 +163,7 @@ social-attention-monitor/
 The project uses GitHub Actions to enforce quality:
 - code linting (`ruff`)
 - static type checking (`mypy`)
-- tested coverage (`pytest`) with Codecov upload (`fail_ci_if_error: true`)
+- tested coverage (`pytest`)
 - dependency security audits (`pip-audit`)
 - end-to-end smoke test (Postgres + Redis + API + collector seed + benchmark)
 

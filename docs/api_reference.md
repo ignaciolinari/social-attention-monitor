@@ -28,7 +28,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 |--------|----------|-------------|
 | `GET` | `/api/v1/trending` | Fetches trending movies/TV shows from TMDB. Query: `?media_type=all|movie|tv`, `?limit=20`. |
 | `GET` | `/api/v1/search` | Search TMDB for titles. Query: `?query=<query>`. |
-| `GET` | `/api/v1/db/titles` | Lists titles tracked in the SAM database. |
+| `GET` | `/api/v1/db/titles` | Lists titles tracked in the SAM database. Query: `q`, `limit`, `offset`, `include_inactive`. |
 | `GET` | `/api/v1/mentions/reddit` | Reddit mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
 | `GET` | `/api/v1/mentions/youtube` | YouTube mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
 | `GET` | `/api/v1/mentions/bluesky` | Bluesky mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
@@ -64,17 +64,17 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/pipeline/quota` | Returns detailed usage of platform API limits (e.g., YouTube's Daily Budget). |
-| `GET` | `/api/v1/pipeline/runs` | Paginated pipeline run history. Query: `limit`, `offset`. |
+| `GET` | `/api/v1/pipeline/runs` | Paginated pipeline run history. Query: `limit`, `offset`, `status`. |
 | `GET` | `/api/v1/alerts/system-health` | System-wide health indicators (no ingest, collector failure, quota, Redis). Run automatically each collector cycle; results broadcast via WebSocket (throttled 15 min/type). |
 | `GET` | `/api/v1/metrics/app` | Application metrics in JSON format. |
-| `GET` | `/metrics` | Prometheus-compatible metrics in text format. |
+| `GET` | `/metrics` | Prometheus-compatible metrics in text format, including API-process metrics plus persisted collector totals derived from pipeline runs. |
 | `GET` | `/api/v1/ws/status` | Returns WebSocket connection count and subscription stats. |
 
 ---
 
 ## WebSockets
 
-Real-time anomalies and metrics are pushed to connected clients. Alerts are relayed through Redis pub/sub so scheduler-generated alerts (including system health issues) are delivered to API WebSocket clients. System health broadcasts are throttled to once per 15 minutes per alert type to avoid spam.
+Real-time anomalies and per-title metrics updates are pushed to connected clients. Alerts and metrics are relayed through Redis pub/sub so scheduler-generated events are delivered to API WebSocket clients even when the scheduler and API run in separate processes. System health broadcasts are throttled to once per 15 minutes per alert type to avoid spam.
 
 **Endpoint**: `ws://localhost:8000/ws`
 
@@ -160,4 +160,4 @@ High-cost endpoints are cached in Redis. TTLs are configurable via environment v
 
 ### Mentions Refresh
 
-When mentions data is older than `MENTIONS_REFRESH_STALE_MINUTES` (default 30), the API triggers a background refresh on the first request.
+When mentions data is older than `MENTIONS_REFRESH_STALE_MINUTES` (default 30), the API triggers a background refresh on the first request. The refresh now routes through the same authoritative collector ingestion path used by scheduled runs, so refreshed mentions receive the same persistence, snapshot, alerting, and accounting behavior.

@@ -72,7 +72,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     command: ["python", "-m", "sam.scheduler.runner"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      test: ["CMD", "python", "-m", "sam.cli", "collector-health"]
       interval: 30s
       timeout: 5s
       retries: 3

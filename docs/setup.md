@@ -143,6 +143,7 @@ SENTIMENT_MODEL=roberta   # Deep Learning, context-aware. Requires transformers 
 SENTIMENT_MODEL=both      # Runs both pipelines simultaneously for comparison.
 
 SAM_TRANSLATE_BEFORE_SENTIMENT=false # Translates non-English content to English before sentiment scoring
+SAM_TRANSLATION_PROVIDER=disabled    # disabled (default) or google_web for optional live translation
 SAM_SENTIMENT_FALLBACK_TO_VADER=true # Falls back to VADER if RoBERTa fails to load
 ```
 
@@ -175,6 +176,9 @@ REDIS_URL=redis://localhost:6379/0
 POLLING_INTERVAL_MINUTES=5                        # How often the pipeline runs
 TARGET_SUBREDDITS=movies,television,netflix       # CSV of subreddits to monitor
 MAX_POSTS_PER_SUBREDDIT=100                       # Fetch depth
+SAM_COLLECTOR_TITLE_CONCURRENCY=1                 # Bounded cross-title concurrency (1 keeps the serial path)
+SAM_TITLE_RETIREMENT_DAYS=7                       # Deactivate titles that fall out of the tracked set
+SAM_FRESH_SNAPSHOT_WINDOW_HOURS=48                # Treat only recent snapshots as "current" for alerts/trending
 
 # YouTube search tuning
 YOUTUBE_SEARCH_ORDER=relevance                    # relevance, date, rating, viewCount, title, videoCount
@@ -184,6 +188,10 @@ MENTIONS_REFRESH_STALE_MINUTES=30                 # Refresh mentions in API when
 
 SAM_STORAGE_ENABLE_RAW_DATA_STORAGE=false         # Save raw API JSONL dumps
 SAM_STORAGE_RAW_DATA_DIR=data/raw                 # Location for dumps
+SAM_RETENTION_MENTIONS_DAYS=90                    # Retention cleanup for mentions
+SAM_RETENTION_PIPELINE_RUNS_DAYS=30               # Retention cleanup for pipeline run history
+SAM_RETENTION_RAW_DATA_DAYS=7                     # Retention cleanup for raw JSONL dumps
+SAM_COLLECTOR_HEALTH_MAX_STALENESS_MINUTES=20     # Max age for collector-health probe
 ```
 
 ### Cache & WebSocket
@@ -262,6 +270,15 @@ Important behavior:
 - it refuses to evict an active lease from a healthy running collector process
 - use it for recovery, smoke tests, or local diagnostics, not normal steady-state operation
 
+### Collector Health Probe
+The collector container now uses a lease/run freshness probe instead of a simple "process exists" check. You can run the same probe manually:
+
+```bash
+python -m sam.cli collector-health
+```
+
+Use `--max-staleness-minutes` to override the default threshold from `SAM_COLLECTOR_HEALTH_MAX_STALENESS_MINUTES`.
+
 ### Integration Tests
 Integration tests require a real Postgres instance. Use `make test-integration` which:
 1. Starts Postgres on port 5433 (avoiding conflicts with local dev)
@@ -282,8 +299,8 @@ GitHub Actions enforce lint, type check, tests, and security audit. Dependabot o
 ## 4. Data Retention & Privacy
 
 - **Stored data**: SAM stores titles (TMDB metadata), mentions (post/comment content, platform IDs, sentiment scores), metrics snapshots, and alerts. Raw API responses can optionally be dumped to disk when `SAM_STORAGE_ENABLE_RAW_DATA_STORAGE=true`.
-- **Retention**: Data is kept indefinitely by default. Implement periodic cleanup (e.g. delete mentions older than N days) if required for compliance.
-- **GDPR / Privacy**: If you process data about EU users, ensure your use case complies with applicable laws. SAM does not implement retention limits or erasure workflows out of the box.
+- **Retention**: SAM now applies configurable retention cleanup during collector cycles. The defaults are `SAM_RETENTION_MENTIONS_DAYS=90`, `SAM_RETENTION_PIPELINE_RUNS_DAYS=30`, and `SAM_RETENTION_RAW_DATA_DAYS=7`. Set any of them to `0` to disable that cleanup path.
+- **GDPR / Privacy**: If you process data about EU users, ensure your use case complies with applicable laws. Retention is configurable, but SAM still does not implement subject-erasure workflows or legal/compliance automation on your behalf.
 
 ---
 

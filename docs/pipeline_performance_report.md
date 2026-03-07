@@ -6,6 +6,9 @@ Date: 2026-03-06
 
 This report summarizes findings from a full live end-to-end pipeline run in non-demo mode with TMDB, YouTube, and Bluesky enabled. The goal is to preserve the main runtime findings and the highest-value optimization opportunities for future implementation work.
 
+> [!NOTE]
+> This document is a historical performance snapshot from before the audit remediation work landed. It is still useful for understanding the original bottlenecks, but current runtime behavior now differs in a few important ways: translation is provider-gated and disabled by default, detected language is reused across stages, collector health uses a freshness probe, and metrics/refresh ingestion now follow the authoritative collector path.
+
 ## Live Run Summary
 
 - Run mode: live, non-demo
