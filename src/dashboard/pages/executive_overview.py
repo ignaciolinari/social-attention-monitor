@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from dashboard.api_client import get_json
-from dashboard.helpers import get_trending_metrics
+from dashboard.helpers import get_trending_metrics, render_metrics_approximation_notice
 from dashboard.pages import PageContext
 
 
@@ -24,6 +24,7 @@ def render(ctx: PageContext) -> None:
         if not items:
             st.info("No trending data yet. Run the collector first.")
         else:
+            render_metrics_approximation_notice(items, label="Top title metrics", st_module=st)
             for i, it in enumerate(items[:5], 1):
                 t = it.get("title", {})
                 m = it.get("metrics", {})

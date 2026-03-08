@@ -28,6 +28,15 @@ router = APIRouter(tags=["metrics"])
 
 def _snapshot_from_row(m: Any) -> MetricsSnapshotResponse:
     """Build a ``MetricsSnapshotResponse`` from a metrics ORM row."""
+    raw_metrics = getattr(m, "raw_metrics", None)
+    mentions_capped = (
+        bool(raw_metrics.get("mentions_capped")) if isinstance(raw_metrics, dict) else False
+    )
+    mentions_fetch_limit: int | None = None
+    if isinstance(raw_metrics, dict):
+        raw_limit = raw_metrics.get("mentions_fetch_limit")
+        if isinstance(raw_limit, int):
+            mentions_fetch_limit = raw_limit
     return MetricsSnapshotResponse(
         title_id=str(m.title_id),
         snapshot_time=m.snapshot_time.isoformat(),
@@ -45,7 +54,10 @@ def _snapshot_from_row(m: Any) -> MetricsSnapshotResponse:
         negative_ratio=getattr(m, "negative_ratio", None),
         attention_index=m.attention_index,
         hype_acceleration=m.hype_acceleration,
-        raw_metrics=getattr(m, "raw_metrics", None),
+        mentions_capped=mentions_capped,
+        mentions_fetch_limit=mentions_fetch_limit,
+        is_approximate=mentions_capped,
+        raw_metrics=raw_metrics,
     )
 
 

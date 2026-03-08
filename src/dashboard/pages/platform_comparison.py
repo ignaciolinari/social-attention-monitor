@@ -11,6 +11,7 @@ from dashboard.helpers import (
     PLATFORM_COLORS,
     build_title_options,
     get_trending_metrics,
+    render_metrics_approximation_notice,
     render_title_picker,
     title_option_label,
 )
@@ -47,6 +48,7 @@ def render(ctx: PageContext) -> None:
     if not points:
         st.info("No snapshots found for this title.")
         return
+    render_metrics_approximation_notice(points, label="Platform comparison", st_module=st)
 
     df = pd.DataFrame(points)
     df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])

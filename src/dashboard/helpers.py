@@ -112,6 +112,40 @@ def get_trending_metrics(
         return None
 
 
+def metrics_snapshot_is_approximate(snapshot: dict[str, Any] | None) -> bool:
+    """Return whether a metrics snapshot is known to be approximate."""
+    if not isinstance(snapshot, dict):
+        return False
+    if isinstance(snapshot.get("is_approximate"), bool):
+        return snapshot["is_approximate"]
+    raw_metrics = snapshot.get("raw_metrics")
+    return isinstance(raw_metrics, dict) and bool(raw_metrics.get("mentions_capped"))
+
+
+def render_metrics_approximation_notice(
+    items_or_points: list[dict[str, Any]],
+    *,
+    label: str,
+    st_module: Any = st,
+) -> None:
+    """Show a warning when a metrics view contains capped snapshots."""
+    approximate_count = 0
+    for item in items_or_points:
+        snapshot = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
+        if isinstance(snapshot, dict) and metrics_snapshot_is_approximate(snapshot):
+            approximate_count += 1
+
+    if approximate_count == 0:
+        return
+
+    noun = "snapshot" if approximate_count == 1 else "snapshots"
+    st_module.warning(
+        f"{label} includes {approximate_count} approximate {noun} because the current "
+        "metrics pipeline caps each window at 10,000 mentions. Counts, rankings, and "
+        "share-of-voice may be understated for high-volume titles."
+    )
+
+
 def build_title_options(items: list[dict[str, Any]]) -> list[TitleOption]:
     """Build stable select options that remain unique across duplicate names."""
     options: list[TitleOption] = []

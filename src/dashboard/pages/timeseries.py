@@ -10,6 +10,7 @@ from dashboard.api_client import get_json
 from dashboard.helpers import (
     build_title_options,
     get_trending_metrics,
+    render_metrics_approximation_notice,
     render_title_picker,
     title_option_label,
 )
@@ -46,6 +47,7 @@ def render(ctx: PageContext) -> None:
     if not points:
         st.info("No snapshots found for this title.")
         return
+    render_metrics_approximation_notice(points, label="This time-series view", st_module=st)
 
     df = pd.DataFrame(points)
     df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])

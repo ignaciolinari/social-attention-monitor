@@ -206,6 +206,9 @@ class MetricsSnapshotResponse(BaseModel):
 
     attention_index: float | None
     hype_acceleration: float | None
+    mentions_capped: bool = False
+    mentions_fetch_limit: int | None = None
+    is_approximate: bool = False
     raw_metrics: dict[str, Any] | None = None
 
 

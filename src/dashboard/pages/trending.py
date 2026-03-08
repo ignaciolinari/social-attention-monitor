@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from dashboard.helpers import get_trending_metrics
+from dashboard.helpers import get_trending_metrics, render_metrics_approximation_notice
 from dashboard.pages import PageContext
 
 
@@ -21,6 +21,7 @@ def render(ctx: PageContext) -> None:
     if not items:
         st.info("No metrics snapshots found. Run the collector to populate metrics.")
         return
+    render_metrics_approximation_notice(items, label="Trending rankings", st_module=st)
 
     rows = []
     for it in items:
@@ -41,6 +42,7 @@ def render(ctx: PageContext) -> None:
                 "youtube_mentions": m.get("youtube_mentions"),
                 "bluesky_mentions": m.get("bluesky_mentions"),
                 "snapshot_time": m.get("snapshot_time"),
+                "approximate": "yes" if m.get("is_approximate") else "",
                 "title_id": t["id"],
             }
         )
