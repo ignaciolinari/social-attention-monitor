@@ -26,6 +26,11 @@ class _DummyRedis:
         pass
 
 
+class _BrokenRedis:
+    async def ping(self) -> bool:
+        return False
+
+
 @asynccontextmanager
 async def _fake_get_session():
     yield _DummySession()
@@ -70,6 +75,19 @@ def test_health_includes_config_and_ok_flags(monkeypatch) -> None:
     assert "reddit_enabled" in payload
     assert "youtube_enabled" in payload
     assert "bluesky_enabled" in payload
+
+
+def test_ready_requires_redis(monkeypatch) -> None:
+    api.get_settings.cache_clear()
+    api.settings = api.get_settings()
+    monkeypatch.setattr(deps, "get_session", _fake_get_session)
+    monkeypatch.setattr(deps, "get_redis", lambda: _BrokenRedis())
+    monkeypatch.setattr("sam.cache.get_redis", lambda: _BrokenRedis())
+
+    with TestClient(api.app) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
 
 
 @respx.mock

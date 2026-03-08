@@ -41,7 +41,7 @@ async def readiness_check() -> ReadinessResponse:
     except Exception:
         redis_ok = False
 
-    ready = database_ok
+    ready = database_ok and redis_ok
     payload = ReadinessResponse(
         status="ready" if ready else "not_ready",
         timestamp=datetime.now(UTC).isoformat(),
@@ -158,8 +158,22 @@ async def health_check(
                 ttl_seconds=30,
             )
 
+    status = "healthy" if database_ok and redis_ok else "degraded"
+    if not database_ok and not redis_ok:
+        status = "unhealthy"
+    if external:
+        configured_checks = []
+        if settings.tmdb.is_configured:
+            configured_checks.append(bool(tmdb_reachable))
+        if deps.api_keys_configured("youtube"):
+            configured_checks.append(bool(youtube_reachable))
+        if deps.api_keys_configured("bluesky"):
+            configured_checks.append(bool(bluesky_reachable))
+        if configured_checks and not all(configured_checks) and status == "healthy":
+            status = "degraded"
+
     return HealthResponse(
-        status="healthy",
+        status=status,
         version=__version__,
         timestamp=datetime.now(UTC).isoformat(),
         demo_mode=settings.demo_mode,

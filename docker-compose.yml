@@ -40,7 +40,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       REDIS_URL: redis://redis:6379/0
-    command: ["uvicorn", "sam.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && exec uvicorn sam.api.main:app --host 0.0.0.0 --port 8000",
+      ]
     ports:
       - "8000:8000"
     healthcheck:
@@ -49,7 +54,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')",
         ]
       interval: 5s
       timeout: 5s
@@ -70,7 +75,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-sam}:${POSTGRES_PASSWORD:-sam}@postgres:5432/${POSTGRES_DB:-sam}
       REDIS_URL: redis://redis:6379/0
-    command: ["python", "-m", "sam.scheduler.runner"]
+    command:
+      [
+        "sh",
+        "-c",
+        "alembic upgrade head && exec python -m sam.scheduler.runner",
+      ]
     healthcheck:
       test: ["CMD", "python", "-m", "sam.cli", "collector-health"]
       interval: 30s

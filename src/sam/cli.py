@@ -194,14 +194,14 @@ async def collector_health(*, max_staleness_minutes: int | None = None) -> None:
     lease_healthy = bool(
         lease is not None and lease.expires_at is not None and lease.expires_at >= now
     )
-    recent_run = bool(
+    recent_completed_run = bool(
         latest_run is not None
         and latest_run.started_at is not None
         and latest_run.started_at >= now - threshold
-        and latest_run.status in {"success", "degraded", "running"}
+        and latest_run.status in {"success", "degraded"}
     )
 
-    if lease_healthy or recent_run:
+    if lease_healthy or recent_completed_run:
         print("collector healthy")
         return
 

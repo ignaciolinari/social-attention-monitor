@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 import sam.api.dependencies as deps
 import sam.api.main as api
 import sam.api.routes.alerts as alerts_mod
+from sam.collectors.base import collected_post_key
 from sam.config import get_settings
 from sam.processors.sentiment import SentimentResult
 
@@ -284,6 +286,56 @@ class TestMetricsEndpoints:
         assert "items" in data
         assert "window_hours" in data
 
+    def test_trending_metrics_surfaces_approximation_flags(self, client, monkeypatch) -> None:
+        async def mock_get_trending(*_args, **_kwargs):
+            title = SimpleNamespace(
+                id="title-1",
+                tmdb_id=42,
+                title="Dune",
+                media_type="movie",
+                release_date=None,
+                popularity=1.0,
+                is_active=True,
+            )
+            metrics = SimpleNamespace(
+                title_id="title-1",
+                snapshot_time=datetime.now(UTC),
+                window_hours=24,
+                mention_count=10000,
+                unique_authors=5000,
+                reddit_mentions=100,
+                youtube_mentions=9800,
+                bluesky_mentions=100,
+                mention_velocity=100.0,
+                velocity_change=5.0,
+                avg_sentiment=0.2,
+                sentiment_volatility=0.1,
+                positive_ratio=0.6,
+                negative_ratio=0.2,
+                attention_index=42.0,
+                hype_acceleration=1.0,
+                raw_metrics={"mentions_capped": True, "mentions_fetch_limit": 10000},
+            )
+            return [(title, metrics)]
+
+        async def mock_cache_get(_key):
+            return None
+
+        async def mock_cache_set(_key, _value, ttl_seconds=None):
+            del ttl_seconds
+            return None
+
+        monkeypatch.setattr(deps, "get_trending_by_attention_index", mock_get_trending)
+        monkeypatch.setattr(deps, "cache_get_json", mock_cache_get)
+        monkeypatch.setattr(deps, "cache_set_json", mock_cache_set)
+
+        response = client.get("/api/v1/metrics/trending", params={"window_hours": 24, "limit": 1})
+        assert response.status_code == 200
+        metrics = response.json()["items"][0]["metrics"]
+        assert metrics["mentions_capped"] is True
+        assert metrics["mentions_fetch_limit"] == 10000
+        assert metrics["is_approximate"] is True
+
     def test_timeseries_requires_title_id(self, client) -> None:
         """Timeseries endpoint should require title_id."""
         response = client.get("/api/v1/metrics/timeseries")
@@ -295,7 +347,7 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
     post = MagicMock()
     post.platform = "reddit"
     post.source_id = "abc123"
-    post.content = "Great movie"
+    post.content = "Great Dune movie"
     post.author = "user"
     post.url = "https://example.com"
     post.created_at = datetime.now(UTC)
@@ -309,6 +361,9 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
         collected_at=datetime.now(UTC),
     )
     monkeypatch.setattr(deps, "reddit_collector", collector)
+    monkeypatch.setattr(
+        deps, "resolve_title_context", AsyncMock(return_value=deps.fallback_tmdb_title("Dune"))
+    )
 
     roberta_result = SentimentResult(
         compound=0.7,
@@ -342,13 +397,100 @@ async def test_collect_mentions_live_persists_extra_sentiment(monkeypatch) -> No
         limit=1,
     )
 
-    payload = sentiment_by_source_id["abc123"]
+    payload = (
+        sentiment_by_source_id.get("abc123") or sentiment_by_source_id[collected_post_key(post)]
+    )
     assert payload["model"] == "both"
     assert "extra" in payload
     assert payload["extra"]["roberta"]["compound"] == 0.7
     assert mentions[0].source_type == "post"
     assert mentions[0].sentiment is not None
     assert "extra" in mentions[0].sentiment
+
+
+@pytest.mark.asyncio
+async def test_collect_mentions_live_applies_matching_and_cleanup(monkeypatch) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("SAM_DEMO_MODE", "false")
+
+    base_time = datetime.now(UTC)
+
+    def _post(*, source_id: str, content: str, author: str, minutes_ago: int) -> MagicMock:
+        post = MagicMock()
+        post.platform = "reddit"
+        post.source_id = source_id
+        post.source_type = "post"
+        post.content = content
+        post.author = author
+        post.url = f"https://example.com/{source_id}"
+        post.created_at = base_time - timedelta(minutes=minutes_ago)
+        post.metrics = {}
+        return post
+
+    kept = _post(
+        source_id="keep",
+        content="Dune trailer reactions are everywhere today",
+        author="user-a",
+        minutes_ago=1,
+    )
+    duplicate = _post(
+        source_id="dup",
+        content="Dune trailer reactions are everywhere today",
+        author="user-b",
+        minutes_ago=2,
+    )
+    spam = _post(
+        source_id="spam",
+        content=(
+            "Dune FREE TRIAL!!! https://spam.example.com https://spam.example.com "
+            "#dune #movie #trailer #free #promo #deal"
+        ),
+        author="user-c",
+        minutes_ago=3,
+    )
+    unrelated = _post(
+        source_id="other",
+        content="Completely unrelated post about cooking",
+        author="user-d",
+        minutes_ago=4,
+    )
+
+    collector = AsyncMock()
+    collector.collect.return_value = MagicMock(
+        success=True,
+        posts=[kept, duplicate, spam, unrelated],
+        collected_at=base_time,
+    )
+    monkeypatch.setattr(deps, "reddit_collector", collector)
+    monkeypatch.setattr(
+        deps, "resolve_title_context", AsyncMock(return_value=deps.fallback_tmdb_title("Dune"))
+    )
+
+    sentiment_result = SentimentResult(
+        compound=0.4,
+        positive=0.6,
+        negative=0.1,
+        neutral=0.3,
+        label="positive",
+        model="vader",
+        raw_scores={},
+    )
+
+    def _fake_analyze_texts(texts, *, translate, log_context="api"):
+        _ = (translate, log_context)
+        return [sentiment_result] * len(texts)
+
+    monkeypatch.setattr(deps, "analyze_texts_for_sentiment", _fake_analyze_texts)
+
+    mentions, _sentiment_by_source_id, posts, _collected_at = await deps.collect_mentions_live(
+        platform="reddit",
+        title="Dune",
+        limit=10,
+    )
+
+    assert [post.source_id for post in posts] == ["keep"]
+    assert [mention.source_id for mention in mentions] == ["keep"]
+    get_settings.cache_clear()
 
 
 class TestSentimentEndpoint:

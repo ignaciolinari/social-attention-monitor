@@ -139,6 +139,20 @@ wait_for_http() {
   return 1
 }
 
+run_migrations() {
+  echo "[step] Applying database migrations..."
+  for ((i=1; i<=60; i++)); do
+    if "$VENV_PY" -m alembic -c "$ROOT_DIR/alembic.ini" upgrade head >/dev/null 2>&1; then
+      echo "[ok] Database migrations applied"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "[error] Failed to apply database migrations; retry output follows:" >&2
+  "$VENV_PY" -m alembic -c "$ROOT_DIR/alembic.ini" upgrade head
+}
+
 start_all() {
   require_cmd docker
   require_cmd curl
@@ -153,6 +167,8 @@ start_all() {
 
   echo "[step] Starting postgres + redis via docker compose..."
   docker compose up -d postgres redis >/dev/null
+
+  run_migrations
 
   echo "[step] Starting local app services via .venv..."
   start_service \
@@ -180,7 +196,7 @@ start_all() {
     "$VENV_PY" -m streamlit run src/dashboard/app.py --server.address 127.0.0.1 --server.port 8501
 
   echo "[step] Waiting for health endpoints..."
-  wait_for_http "http://127.0.0.1:8000/health" 60 "API" || true
+  wait_for_http "http://127.0.0.1:8000/ready" 60 "API" || true
   wait_for_http "http://127.0.0.1:8501/_stcore/health" 60 "Dashboard" || true
 
   echo ""
