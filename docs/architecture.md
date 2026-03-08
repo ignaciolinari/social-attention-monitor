@@ -77,5 +77,5 @@ The backend service exposes data to the dashboard and external clients. The API 
 
 ## 5. Presentation Layer (Streamlit)
 The dashboard provides operational observability, structured as modular pages under `dashboard/pages/` with shared helpers in `dashboard/api_client.py`, `dashboard/helpers.py`, and `dashboard/sidebar.py`.
-- **Multipage Navigation**: Sidebar-driven navigation across 15 pages, including Executive Overview (landing), Compare Titles, Box Office (with correlation coefficients), Language Segmentation, Historical Benchmark, and Watchlists. CSV export available on Trending and Compare tables.
+- **Multipage Navigation**: Sidebar-driven navigation across 16 pages, including Executive Overview (landing), Compare Titles, Box Office (with correlation coefficients), Language Segmentation, Historical Benchmark, and Watchlists. CSV export available on Trending and Compare tables.
 - **State Management**: Utilizes Streamlit's `st.session_state` to decouple heavy API calls from rapid UI redraws.

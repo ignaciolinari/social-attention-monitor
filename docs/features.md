@@ -91,7 +91,9 @@ Title-driven analytics pages now use DB-backed selectors, so operators can searc
 - **Executive Overview** *(landing page)*: At-a-glance summary of top titles, system health, recent alerts, and pipeline metrics.
 - **Trending Now**: High-level overview of tracking counts, pipeline health, and top trending titles ranked by the dynamic **Attention Index**. Includes **Share of Voice** (%), **Hype Acceleration**, and CSV export.
 - **Time Series**: Deep-dive into specific titles. Renders rich timeseries graphs comparing Mention Velocity, Attention Index, Hype Acceleration, and Sentiment Volatility over custom time windows.
+- **Sentiment Distribution**: Sentiment breakdown for a single title with VADER vs. RoBERTa model selector. Shows positive/negative/neutral mix, per-snapshot sentiment trend lines, and compound score evolution over the selected time window.
 - **Sentiment Comparison**: A side-by-side analysis of how different platforms (e.g., Reddit vs. YouTube) compare in their sentiment for a specific title, bringing the **Sentiment Divergence** metric to life.
+- **Platform Comparison**: Overlaid per-platform mention volume timeseries for a single title. Dynamically shows only the platforms that are currently enabled, making it easy to spot cross-platform audience distribution patterns over time.
 - **Alpha Metrics**: Dashboard for advanced analytical scores like Audience Fatigue, Viral Coefficient, Author Diversity (HHI), and Repeat Author Ratio.
 - **Compare Titles**: Side-by-side comparison of 2–5 titles with overlaid line charts for attention index, mention velocity, and sentiment. Summary table includes hype acceleration, sentiment volatility, negative ratio. CSV export available.
 - **Box Office**: Scatter-plot correlation between social attention and commercial performance (revenue/budget from TMDB). Shows Pearson and Spearman correlation coefficients. Includes ROI analysis.
@@ -103,7 +105,6 @@ Title-driven analytics pages now use DB-backed selectors, so operators can searc
 - **API Quota**: Visualizations of external API usage (especially YouTube's daily budget) to ensure the system stays within limits.
 - **Pipeline Observability**: Per-run timing breakdown, per-title processing times (`per_title_ms`), collector stats, translation metrics, title-retirement counts, match-filter counts, and snapshot truncation signals (`mentions_capped_titles` / `mentions_capped_title_names`) when applicable.
 - **System Config**: UI for dynamically toggling collectors on or off (sends API key automatically when `SAM_API_KEY` is configured).
-- **Native Streamlit Theming**: Dashboard colors now follow the user's Streamlit theme settings instead of a custom in-app light/dark toggle.
 
 ---
 

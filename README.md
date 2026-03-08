@@ -5,7 +5,7 @@
 
 A near-real-time platform for tracking film and TV attention across TMDB, YouTube, and Bluesky. SAM turns live mentions into sentiment, momentum, and anomaly signals inside a unified operator dashboard.
 
-![Dashboard Preview](docs/assets/dashboard_landing_1.png)
+![Dashboard Preview](docs/assets/dashboard_landing_big.png)
 
 ### Why SAM
 
@@ -22,11 +22,15 @@ A near-real-time platform for tracking film and TV attention across TMDB, YouTub
 **Pending Integration:**<br>
 ![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)
 
-### Product Snapshots
+### Dashboard Snapshots
 
-| Landing Overview | Metrics Overview |
+| Landing Overview | Landing Overview Scrolled |
 | --- | --- |
 | ![Dashboard Landing 1](docs/assets/dashboard_landing_1.png) | ![Dashboard Landing 2](docs/assets/dashboard_landing_2.png) |
+
+| Trending Now | Alpha Metrics |
+| --- | --- |
+| ![Dashboard Trending](docs/assets/dashboard_trending.png) | ![Dashboard Alpha Metrics](docs/assets/dashboard_alpha_metrics.png) |
 
 | Language Breakdown | Sentiment Analysis |
 | --- | --- |
@@ -53,6 +57,7 @@ The pipeline is designed to operate **fully within official APIs and their terms
 - **Box Office Correlation**: Automatic revenue/budget data from TMDB, scatter-plot analysis of social attention vs. commercial performance.
 - **Language Segmentation**: Automatic language detection on mentions with per-language sentiment breakdowns.
 - **Comparative Title Analytics**: Side-by-side comparison of up to 5 titles with overlaid attention, velocity, and sentiment charts.
+- **Platform Comparison**: Per-platform mention volume timeseries for a single title, dynamically showing only enabled collectors.
 - **Expanded Title Browsing**: Title-driven dashboard tabs can search beyond the trending subset, filter by type/status/trending, and a dedicated Title Catalog page exposes the full DB title list.
 - **User-Defined Watchlists**: Create, edit, and delete persistent watchlists to track custom sets of titles beyond TMDB trending.
 - **Historical Benchmarking**: Compare a title's early day-level trajectory against averaged daily peer performance.
