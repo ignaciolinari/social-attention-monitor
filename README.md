@@ -3,6 +3,16 @@
 [![CI](https://github.com/ignaciolinari/social-attention-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/ignaciolinari/social-attention-monitor/actions) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/) [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io/) [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/) [![Docker](https://img.shields.io/badge/Docker-2CA5E0?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
 
+A near-real-time platform for tracking film and TV attention across TMDB, YouTube, and Bluesky. SAM turns live mentions into sentiment, momentum, and anomaly signals inside a unified operator dashboard.
+
+![Dashboard Preview](docs/assets/dashboard_landing_1.png)
+
+### Why SAM
+
+- Track newly released titles across multiple official APIs in one place.
+- Detect momentum shifts with attention, hype, sentiment, and anomaly alerts before they are obvious in static reporting.
+- Run the full stack locally with FastAPI, Streamlit, PostgreSQL, and Redis.
+
 **Supported Platforms (tested):**<br>
 ![TMDB](https://img.shields.io/badge/TMDB-01B4E4?style=for-the-badge&logo=themoviedb&logoColor=white) ![YouTube](https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white) ![Bluesky](https://img.shields.io/badge/Bluesky-0285FF?style=for-the-badge&logo=bluesky&logoColor=white) <br>
 <br>
@@ -12,24 +22,20 @@
 **Pending Integration:**<br>
 ![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)
 
-A near–real-time data pipeline that monitors social engagement and public sentiment around newly released movies and TV series.
+### Product Snapshots
 
-<!-- ![Dashboard Preview](docs/assets/dashboard_demo.webp) -->
+| Landing Overview | Metrics Overview |
+| --- | --- |
+| ![Dashboard Landing 1](docs/assets/dashboard_landing_1.png) | ![Dashboard Landing 2](docs/assets/dashboard_landing_2.png) |
 
-### Dashboard Highlights
+| Language Breakdown | Sentiment Analysis |
+| --- | --- |
+| ![Dashboard Language](docs/assets/dashboard_language.png) | ![Dashboard Sentiment](docs/assets/dashboard_sentiment.png) |
 
-**Executive Overview:** At-a-glance landing page with top titles, system health, recent alerts, and pipeline metrics.
+| Sentiment Comparison Demo |
+| --- |
+| ![Sentiment Comparison Demo](docs/assets/demo_sentiment_comparison_readme.gif) |
 
-**Trending Now:** Monitor real-time traction, share of voice, and hype acceleration. Export to CSV.
-<!-- ![Trending Now Snapshot](docs/assets/tab_trending.png) -->
-
-**Title Catalog:** Browse the full DB-backed title list, filter it, and jump directly into analysis tabs from the catalog.
-
-**Sentiment Analysis:** Understand public sentiment using VADER & RoBERTa models.
-<!-- ![Sentiment Analysis Snapshot](docs/assets/tab_sentiment.png) -->
-
-**Live Alerts:** Catch viral hype spikes and sentiment shifts the moment they happen. Includes system health monitoring.
-<!-- ![Live Alerts Snapshot](docs/assets/tab_alerts.png) -->
 
 ## Overview
 
@@ -112,6 +118,8 @@ If you prefer one command for local development:
 ./run-all-local.sh start
 ```
 
+This launcher now applies Alembic migrations before starting the app services and waits for the API readiness probe at `/ready` before reporting the stack as ready.
+
 Useful companion commands:
 
 ```bash
@@ -166,6 +174,10 @@ The project uses GitHub Actions to enforce quality:
 - tested coverage (`pytest`)
 - dependency security audits (`pip-audit`)
 - end-to-end smoke test (Postgres + Redis + API + collector seed + benchmark)
+
+## Full Dashboard Tour
+
+![Full Dashboard Tour](docs/assets/demo_full_readme.gif)
 
 ## License
 

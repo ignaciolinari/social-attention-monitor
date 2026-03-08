@@ -13,7 +13,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 ### 1. Health & Pipeline Status
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Basic system liveness, dependency states, and toggle states. |
+| `GET` | `/health` | Liveness and dependency report. Always returns HTTP 200, with `status` values such as `healthy`, `degraded`, or `unhealthy`. |
 | `GET` | `/ready` | Readiness probe (returns 503 when required dependencies are unavailable). |
 | `GET` | `/api/v1/pipeline/health` | Comprehensive operational stats (data freshness, mention counts in last 24h, latest runs). |
 
@@ -21,7 +21,7 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/collectors/status` | Returns enabled/configured status for Reddit, YouTube, Bluesky. |
-| `PUT` | `/api/v1/collectors/{platform}/toggle?enabled=true\|false` | Toggle YouTube or Bluesky on/off at runtime. Reddit cannot be toggled (requires `.env`). |
+| `PUT` | `/api/v1/collectors/{platform}/toggle?enabled=true\|false` | Toggle YouTube or Bluesky on/off at runtime. Reddit cannot be toggled (requires `.env`). Returns `503` if Redis is unavailable and the override cannot be persisted. |
 
 ### 3. General Data Access
 | Method | Endpoint | Description |
@@ -43,6 +43,8 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | `GET` | `/api/v1/metrics/compare` | Parallel timeseries for multi-title comparison. Query: `title_ids` (comma-separated, 2–5 required), `window_hours`, `hours`. |
 | `GET` | `/api/v1/metrics/benchmark` | Compare a title's first-N-days day-level trajectory against averaged peers of the same media type. Query: `title_id` (required), `comparison_type=movie|tv`, `days`, `window_hours`, `comparison_limit`. |
 | `GET` | `/api/v1/sentiment/analyze` | Submit arbitrary text via `?text=` for an ad-hoc sentiment score. |
+
+Metrics snapshot payloads now include `mentions_capped`, `mentions_fetch_limit`, and `is_approximate` so clients can distinguish exact windows from windows computed from the 10k mention cap.
 
 ### 5. Watchlists
 | Method | Endpoint | Description |

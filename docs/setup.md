@@ -39,6 +39,7 @@ make run-collector
 > For a local `.venv`-based workflow in one command, use:
 > `./run-all-local.sh start`
 > This starts Docker `postgres` + `redis`, and local `api` + `dashboard` + `collector`.
+> Both startup paths now apply Alembic migrations before the stack is treated as ready.
 
 ---
 
@@ -95,6 +96,8 @@ And for lifecycle helpers:
 ./run-all-local.sh logs
 ./run-all-local.sh stop
 ```
+
+The launcher waits on `http://127.0.0.1:8000/ready`, not `/health`, so dependency readiness is validated before it reports success.
 
 ---
 
@@ -170,6 +173,8 @@ API_PORT=8000
 DASHBOARD_PORT=8501
 REDIS_URL=redis://localhost:6379/0
 ```
+
+`REDIS_URL` is not just a cache dependency: it is also used for readiness, runtime collector toggles, shared YouTube quota accounting, and WebSocket event relay between processes.
 
 ### Collection & Storage Configuration
 ```env

@@ -4,4 +4,4 @@ Social Attention Monitor (SAM)
 Real-time social attention monitoring for film & TV releases.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

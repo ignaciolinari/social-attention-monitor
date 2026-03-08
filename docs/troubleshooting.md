@@ -40,7 +40,7 @@ When the Dashboard runs in Docker or on another host:
 
 - Set `API_HOST=api` and `API_PORT=8000` (for Docker Compose, where the API service is named `api`).
 - Or set `SAM_API_BASE_URL=http://host:port` to override entirely.
-- Ensure the API container is healthy: `curl http://localhost:8000/health`
+- Ensure the API is actually ready: `curl http://localhost:8000/ready`
 
 ### API fails to start: `[Errno 48] Address already in use`
 
@@ -99,7 +99,7 @@ The architecture supports it. A Twitter collector would need to be implemented; 
 Yes. See [Setup](setup.md#4-data-retention--privacy) for the retention environment variables and defaults. Mentions, raw dumps, and pipeline-run history can all be cleaned up automatically during collector cycles.
 
 **How do I run the full stack in Docker?**
-`docker compose up -d` starts postgres, redis, api, collector, and dashboard.
+`docker compose up -d` starts postgres, redis, api, collector, and dashboard. The API and collector commands now run `alembic upgrade head` before they enter their steady state, and readiness is reported from `/ready`.
 
 **What does "mentions capped" mean in pipeline stats?**
-Metrics snapshots fetch up to 10,000 mentions per title per window. If a title has more, the snapshot is computed from the cap and `mentions_capped_titles` is incremented in pipeline run stats. Check Pipeline Observability for this metric. For very high-volume titles, consider increasing the limit in `metrics_snapshots.py` or splitting by platform.
+Metrics snapshots fetch up to 10,000 mentions per title per window. If a title has more, the snapshot is computed from the cap and `mentions_capped_titles` is incremented in pipeline run stats. The metrics API now exposes `mentions_capped` / `is_approximate`, and dashboard consumers warn when a view includes capped snapshots. For very high-volume titles, consider increasing the limit in `metrics_snapshots.py` or moving more of the aggregation into SQL.

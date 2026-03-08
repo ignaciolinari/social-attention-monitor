@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-03-08
+
+### Added
+- **Shared title-aware collection flow**: Live mention refresh and the scheduled collector now reuse the same title-context, query-building, title-match filtering, deduplication, and spam-filtering primitives.
+- **Metrics approximation flags**: Metrics API responses now expose `mentions_capped`, `mentions_fetch_limit`, and `is_approximate`, and dashboard consumers surface warnings when a snapshot was computed from the 10k mention cap.
+
+### Changed
+- **Live mention refresh parity**: API-triggered refreshes now follow the same authoritative ingestion rules as scheduled collector runs, and stale DB-backed mention responses preserve the true `last_collected_at` timestamp instead of returning `now`.
+- **Shared quota accounting**: Current-day YouTube quota usage now prefers shared Redis-backed state so API-driven live collection and the separate collector process see the same budget and `/api/v1/pipeline/quota` reports the same truth.
+- **Runtime collector toggles**: YouTube/Bluesky toggles now require Redis persistence and return `503` if the toggle cannot be durably stored.
+- **Health and startup contract**: `/health` remains a liveness/dependency report but can now return `healthy`, `degraded`, or `unhealthy`, while `/ready` is the strict readiness gate used by Docker healthchecks and the local launcher. One-command startup paths now apply migrations before the stack is treated as ready.
+
+### Fixed
+- **Title attribution safety**: `get_title_by_name()` now resolves only exact active title matches when `title_id` is omitted, and title upserts refresh `updated_at` so stale rows are not retired prematurely.
+- **Short-title matching**: Ambiguous short titles no longer get an unconditional `score=1.0` substring match that bypasses threshold checks.
+- **Bluesky identity stability**: Mentions now use the stable post URI instead of `cid`, so edits do not create duplicate identities.
+
+### Documentation
+- **Operational docs**: Updated the README, setup guide, API reference, and troubleshooting notes for the new readiness semantics, migration-on-start behavior, Redis-backed toggles/quota, and metrics approximation surfacing.
+
 ## [0.3.2] - 2026-03-07
 
 ### Added
