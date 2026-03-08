@@ -170,6 +170,25 @@ def _alias_matches(normalized_text: str, alias: str) -> bool:
     return False
 
 
+def _candidate_matches(normalized_text: str, candidate: str) -> bool:
+    """Return True when a candidate appears as full token(s) in text."""
+    candidate_norm = normalize_title(candidate)
+    if not candidate_norm:
+        return False
+    text_tokens = normalized_text.split()
+    candidate_tokens = candidate_norm.split()
+    if not candidate_tokens:
+        return False
+    if len(candidate_tokens) == 1:
+        return candidate_tokens[0] in text_tokens
+
+    window_size = len(candidate_tokens)
+    for idx in range(len(text_tokens) - window_size + 1):
+        if text_tokens[idx : idx + window_size] == candidate_tokens:
+            return True
+    return False
+
+
 # Select matching backend
 try:
     from rapidfuzz.fuzz import ratio as _rapidfuzz_ratio
@@ -214,7 +233,14 @@ def match_best(
     best: MatchResult | None = None
     for c in candidates:
         nc = normalize_title(c)
-        score = 1.0 if nc and nc in nt else _ratio(nt, nc)
+        if (
+            nt == nc
+            or _candidate_matches(nt, c)
+            and (len(nc.split()) > 1 or nc not in _STOPWORD_TITLES)
+        ):
+            score = 1.0
+        else:
+            score = _ratio(nt, nc)
         if best is None or score > best.score:
             best = MatchResult(candidate=c, score=score)
     if best is None or best.score < min_score:

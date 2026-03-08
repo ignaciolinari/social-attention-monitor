@@ -40,6 +40,7 @@ async def get_all_watchlist_tmdb_ids(session: AsyncSession) -> set[int]:
 
 async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
     """Insert/update a Title row and return the persisted object."""
+    now = datetime.now(UTC)
     values: dict[str, Any] = {
         "tmdb_id": tmdb_title.tmdb_id,
         "title": tmdb_title.title,
@@ -55,6 +56,7 @@ async def upsert_title(session: AsyncSession, tmdb_title: TMDBTitle) -> Title:
         "revenue": tmdb_title.revenue,
         "budget": tmdb_title.budget,
         "is_active": True,
+        "updated_at": now,
     }
 
     stmt = (
@@ -147,11 +149,19 @@ def escape_like(value: str) -> str:
 
 async def get_title_by_name(session: AsyncSession, title: str) -> Title | None:
     """Find a title by case-insensitive match."""
-    pattern = f"%{escape_like(title)}%"
+    normalized = title.strip().casefold()
+    if not normalized:
+        return None
     stmt = (
         select(Title)
-        .where(Title.title.ilike(pattern, escape="\\"))
-        .order_by(Title.popularity.desc().nullslast())
+        .where(
+            Title.is_active.is_(True),
+            or_(
+                func.lower(func.trim(Title.title)) == normalized,
+                func.lower(func.trim(Title.original_title)) == normalized,
+            ),
+        )
+        .order_by(Title.popularity.desc().nullslast(), Title.updated_at.desc())
     )
     result = await session.execute(stmt)
     return result.scalars().first()

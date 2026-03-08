@@ -51,7 +51,7 @@ class TestParsePost:
 
         assert result is not None
         assert result.platform == "bluesky"
-        assert result.source_id == "bafyreihash"
+        assert result.source_id == "at://did:plc:abc123/app.bsky.feed.post/3abc"
         assert result.source_type == "post"
         assert result.content == "Hello Bluesky!"
         assert result.author == "alice.bsky.social"

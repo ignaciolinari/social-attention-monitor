@@ -363,6 +363,18 @@ class TestTitleLookups:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_get_title_by_name_uses_exact_active_match(self) -> None:
+        session = _mock_session()
+        session.execute.return_value = _mock_execute_result(first=None)
+
+        await get_title_by_name(session, "  Dune  ")
+
+        stmt = session.execute.call_args.args[0]
+        stmt_text = str(stmt).lower()
+        assert "titles.is_active is true" in stmt_text
+        assert "lower(trim(titles.title))" in stmt_text
+
+    @pytest.mark.asyncio
     async def test_get_title_by_id_found(self) -> None:
         fake_title = MagicMock(title="Dune")
         session = _mock_session()

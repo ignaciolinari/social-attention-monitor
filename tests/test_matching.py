@@ -29,3 +29,11 @@ def test_alias_matching_keeps_expected_shortcuts() -> None:
     wl = match_best("new wl trailer", candidates=candidates, min_score=0.95)
     assert wl is not None
     assert wl.candidate == "The White Lotus"
+
+
+def test_stopword_titles_do_not_auto_match_on_plain_substring() -> None:
+    candidates = ["You", "Her", "Us"]
+    assert match_best("I think you should leave", candidates=candidates, min_score=0.96) is None
+    assert (
+        match_best("Her performance was incredible", candidates=candidates, min_score=0.96) is None
+    )

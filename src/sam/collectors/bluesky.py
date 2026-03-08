@@ -253,7 +253,7 @@ class BlueskyCollector(BaseCollector):
 
             return CollectedPost(
                 platform=self.platform_name,
-                source_id=post_view.cid,
+                source_id=str(post_uri or post_view.cid),
                 source_type="post",
                 content=getattr(record, "text", "") or "",
                 author=author_handle,
