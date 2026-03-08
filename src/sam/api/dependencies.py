@@ -31,16 +31,24 @@ from sam.cache import cache_get_json, cache_set_json, close_redis, get_redis
 from sam.collectors.base import BaseCollector, CollectedPost, collected_post_key
 from sam.collectors.bluesky import BlueskyCollector
 from sam.collectors.reddit import RedditCollector
-from sam.collectors.tmdb import TMDBCollector
+from sam.collectors.tmdb import TMDBCollector, TMDBTitle
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import Settings, get_settings
+from sam.pipeline.collection_utils import (
+    build_platform_query,
+    dedupe_posts_by_source,
+    fallback_tmdb_title,
+    filter_title_matches,
+    prune_duplicate_and_spam,
+    tmdb_title_from_db_row,
+)
 from sam.pipeline.enrichment import (
     analyze_texts_for_sentiment,
     build_enriched_sentiment_map,
     translate_before_sentiment_enabled,
 )
 from sam.processors.sentiment import SentimentResult, analyze_sentiment
-from sam.quota import aggregate_youtube_quota_from_db
+from sam.quota import aggregate_youtube_quota_from_db, get_current_youtube_quota
 from sam.storage.database import get_session
 from sam.storage.models import Title as TitleModel
 from sam.storage.repository import (
@@ -76,6 +84,7 @@ __all__ = [
     "get_benchmark_contributors_count",
     "get_alert_counts_by_severity",
     "get_metrics_timeseries",
+    "get_current_youtube_quota",
     "get_pipeline_health_stats",
     "get_pipeline_runs",
     "get_recent_alerts",
@@ -206,6 +215,19 @@ def title_from_row(row: TitleModel) -> DbTitleResponse:
     )
 
 
+async def resolve_title_context(*, title: str, title_id: UUID | None) -> TMDBTitle:
+    """Resolve the best canonical title context available for live collection."""
+    async with get_session() as session:
+        row = (
+            await get_title_by_id(session, title_id)
+            if title_id is not None
+            else await get_title_by_name(session, title)
+        )
+    if row is None:
+        return fallback_tmdb_title(title)
+    return tmdb_title_from_db_row(row)
+
+
 async def get_mentions_from_db(
     *,
     title: str,
@@ -333,6 +355,7 @@ async def collect_mentions_live(
     platform: str,
     title: str,
     limit: int,
+    title_id: UUID | None = None,
 ) -> tuple[list[MentionResponse], dict[str, dict[str, Any]], list[Any], datetime]:
     if platform in TOGGLEABLE_PLATFORMS and not await is_collector_enabled(platform):
         raise HTTPException(status_code=503, detail=f"{platform} collector is currently disabled")
@@ -350,13 +373,22 @@ async def collect_mentions_live(
     if not collector:
         raise HTTPException(status_code=503, detail=f"{platform} collector not initialized")
 
-    result = await collector.collect(query=title, limit=limit)
+    settings = get_settings()
+    title_context = await resolve_title_context(title=title, title_id=title_id)
+    query = build_platform_query(title_context, platform=platform) or title_context.title
+
+    result = await collector.collect(query=query, limit=limit)
     if not result.success:
         raise HTTPException(status_code=500, detail=result.error)
 
-    settings = get_settings()
     posts: list[CollectedPost] = result.posts or []
     if platform == "youtube":
+        if not settings.demo_mode and posts:
+            posts, filtered = filter_title_matches(posts, title=title_context)
+            if filtered:
+                logger.debug(
+                    f"[api] Filtered {filtered} YouTube video(s) for '{title_context.title}'"
+                )
         yt_collector = cast(YouTubeCollector, collector)
         comment_posts = await collect_youtube_comment_posts(
             yt_collector,
@@ -365,6 +397,25 @@ async def collect_mentions_live(
             settings=settings,
         )
         posts.extend(comment_posts)
+    elif not settings.demo_mode and posts:
+        posts, filtered = filter_title_matches(posts, title=title_context)
+        if filtered:
+            logger.debug(
+                f"[api] Filtered {filtered} {platform} post(s) for '{title_context.title}'"
+            )
+
+    if platform in {"reddit", "bluesky"} and posts:
+        posts = dedupe_posts_by_source(posts)
+
+    if posts:
+        posts, duplicate_count, spam_count = prune_duplicate_and_spam(
+            posts,
+            enable_spam_filter=settings.enable_spam_filter,
+        )
+        if duplicate_count:
+            logger.debug(f"[api] Removed {duplicate_count} duplicate {platform} post(s)")
+        if spam_count:
+            logger.debug(f"[api] Removed {spam_count} likely spam {platform} post(s)")
 
     # Keep response/persist set bounded by requested limit and favor fresh content.
     posts = sorted(posts, key=lambda p: p.created_at, reverse=True)[:limit]

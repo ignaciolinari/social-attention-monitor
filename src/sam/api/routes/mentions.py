@@ -55,7 +55,7 @@ async def _get_mentions_for_platform(
                 mentions=db_result.mentions,
                 total_count=db_result.total_count,
                 next_offset=db_result.next_offset,
-                collected_at=datetime.now(UTC).isoformat(),
+                collected_at=(db_result.last_collected_at or datetime.now(UTC)).isoformat(),
             )
     elif offset > 0:
         raise HTTPException(
@@ -66,6 +66,7 @@ async def _get_mentions_for_platform(
     mentions, _sentiment_by_source_id, _posts, collected_at = await deps.collect_mentions_live(
         platform=platform,
         title=title,
+        title_id=db_result.title_id if db_result is not None else title_id,
         limit=limit,
     )
 

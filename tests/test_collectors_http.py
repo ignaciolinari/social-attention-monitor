@@ -54,6 +54,7 @@ async def test_tmdb_get_trending(monkeypatch) -> None:
 async def test_youtube_collect(monkeypatch) -> None:
     monkeypatch.setenv("SAM_DEMO_MODE", "false")
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("REDIS_URL", "")
 
     respx.get("https://www.googleapis.com/youtube/v3/search").respond(
         200,
@@ -106,6 +107,7 @@ async def test_youtube_quota_not_recorded_on_http_error(monkeypatch) -> None:
     """
     monkeypatch.setenv("SAM_DEMO_MODE", "false")
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("REDIS_URL", "")
 
     respx.get("https://www.googleapis.com/youtube/v3/search").respond(
         403,
@@ -118,7 +120,7 @@ async def test_youtube_quota_not_recorded_on_http_error(monkeypatch) -> None:
         },
     )
 
-    with patch("sam.collectors.youtube.get_quota_tracker") as mock_get_qt:
+    with patch("sam.quota.get_quota_tracker") as mock_get_qt:
         mock_tracker = mock_get_qt.return_value
 
         collector = YouTubeCollector()
@@ -136,6 +138,7 @@ async def test_youtube_quota_recorded_on_success(monkeypatch) -> None:
     """A2 positive path: quota IS recorded after successful responses."""
     monkeypatch.setenv("SAM_DEMO_MODE", "false")
     monkeypatch.setenv("YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("REDIS_URL", "")
 
     respx.get("https://www.googleapis.com/youtube/v3/search").respond(
         200,
@@ -160,7 +163,7 @@ async def test_youtube_quota_recorded_on_success(monkeypatch) -> None:
         },
     )
 
-    with patch("sam.collectors.youtube.get_quota_tracker") as mock_get_qt:
+    with patch("sam.quota.get_quota_tracker") as mock_get_qt:
         mock_tracker = mock_get_qt.return_value
 
         collector = YouTubeCollector()

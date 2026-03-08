@@ -28,6 +28,8 @@ def _fake_mention(platform: str = "reddit") -> api.MentionResponse:
 
 @pytest.mark.asyncio
 async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
+    stale_at = datetime.now(UTC) - timedelta(minutes=90)
+
     async def fake_get_mentions_from_db(
         *,
         title: str,
@@ -42,7 +44,7 @@ async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
             total_count=1,
             next_offset=None,
             title_id=uuid4(),
-            last_collected_at=datetime.now(UTC) - timedelta(minutes=90),
+            last_collected_at=stale_at,
         )
 
     monkeypatch.setattr(deps, "get_mentions_from_db", fake_get_mentions_from_db)
@@ -57,6 +59,7 @@ async def test_mentions_refreshes_when_stale(monkeypatch) -> None:
 
     assert response.platform == "reddit"
     assert len(background_tasks.tasks) == 1
+    assert response.collected_at == stale_at.isoformat()
 
 
 @pytest.mark.asyncio

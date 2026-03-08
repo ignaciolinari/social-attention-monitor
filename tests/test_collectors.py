@@ -17,7 +17,18 @@ class _DummySession:
 
 
 class _DummyRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
     async def ping(self) -> bool:
+        return True
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+        del ex
+        self.store[key] = value
         return True
 
 
@@ -48,12 +59,11 @@ def _setup(monkeypatch) -> None:
     api.get_settings.cache_clear()
     api.settings = api.get_settings()
 
+    redis = _DummyRedis()
     monkeypatch.setattr(deps, "get_session", _fake_get_session)
-    monkeypatch.setattr(deps, "get_redis", lambda: _DummyRedis())
-
-    # Ensure cache module uses no Redis so collector_toggle_get returns None
+    monkeypatch.setattr(deps, "get_redis", lambda: redis)
     monkeypatch.setattr(cache, "_redis", None)
-    monkeypatch.setattr(cache, "get_redis", lambda: None)
+    monkeypatch.setattr(cache, "get_redis", lambda: redis)
 
     # Reset runtime overrides between tests
     deps.collector_enabled_overrides.clear()
@@ -161,3 +171,16 @@ def test_toggle_reflects_in_status(monkeypatch) -> None:
     assert resp.status_code == 200
     collectors = {c["platform"]: c for c in resp.json()["collectors"]}
     assert collectors["youtube"]["enabled"] is False
+
+
+def test_toggle_requires_redis(monkeypatch) -> None:
+    _setup(monkeypatch)
+    monkeypatch.setattr(cache, "get_redis", lambda: None)
+
+    with TestClient(api.app) as client:
+        resp = client.put(
+            "/api/v1/collectors/youtube/toggle",
+            params={"enabled": "false"},
+        )
+
+    assert resp.status_code == 503
