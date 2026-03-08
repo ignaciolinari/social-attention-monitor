@@ -99,6 +99,7 @@ from sam.api.websocket import (  # noqa: F401
 )
 from sam.config import get_settings, install_sighup_handler
 from sam.logging import setup_logging
+from sam.quota import seed_quota_from_db
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -112,6 +113,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info(f"[api] Starting SAM API v{__version__} (demo_mode={settings.demo_mode})")
 
     install_sighup_handler()
+    await seed_quota_from_db()
     await init_collectors()
     await ws_manager.start_cleanup_task(settings.ws_cleanup_interval_seconds)
     await ws_manager.start_alert_relay_task()

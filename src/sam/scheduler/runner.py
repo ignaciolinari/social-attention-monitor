@@ -35,6 +35,15 @@ from sam.collectors.tmdb import TMDBCollector, TMDBTitle
 from sam.collectors.youtube import YouTubeCollector
 from sam.config import get_settings
 from sam.logging import setup_logging
+from sam.pipeline.collection_utils import (
+    build_platform_query,
+    dedupe_posts_by_source,
+    title_collected_at,
+    tmdb_title_from_db_row,
+)
+from sam.pipeline.collection_utils import (
+    filter_title_matches as shared_filter_title_matches,
+)
 from sam.pipeline.enrichment import (
     analyze_texts_for_sentiment_with_stats_and_languages as analyze_texts_for_sentiment_with_stats,
 )
@@ -49,7 +58,6 @@ from sam.pipeline.metrics_snapshots import (
 )
 from sam.pipeline.raw_storage import delete_raw_data_older_than, persist_collection_result
 from sam.pipeline.time import DEFAULT_SNAPSHOT_BUCKET_MINUTES, floor_time_bucket
-from sam.processors.matching import build_search_query, match_title_text
 from sam.processors.spam_detector import detect_duplicate_content, filter_spam
 from sam.quota import YOUTUBE_COMMENT_THREADS_COST, get_quota_tracker, seed_quota_from_db
 from sam.storage.database import cleanup_stale_state, close_db, get_session, init_db
@@ -167,30 +175,7 @@ REFRESH_JOB_NAME = "collector-refresh"
 
 def _tmdb_title_from_db_row(row: Any) -> TMDBTitle:
     """Rebuild a minimal ``TMDBTitle`` from a persisted DB row."""
-    return TMDBTitle(
-        tmdb_id=int(row.tmdb_id),
-        title=str(row.title),
-        original_title=str(row.original_title or row.title),
-        media_type=str(row.media_type),
-        release_date=row.release_date,
-        overview=str(row.overview or ""),
-        poster_path=row.poster_path,
-        backdrop_path=(row.extra_data or {}).get("backdrop_path")
-        if isinstance(row.extra_data, dict)
-        else None,
-        popularity=float(row.popularity or 0.0),
-        vote_average=float(row.vote_average or 0.0),
-        vote_count=int((row.extra_data or {}).get("vote_count", 0) or 0)
-        if isinstance(row.extra_data, dict)
-        else 0,
-        genres=list(row.genres or []),
-        original_language=str((row.extra_data or {}).get("original_language", "en"))
-        if isinstance(row.extra_data, dict)
-        else "en",
-        revenue=row.revenue,
-        budget=row.budget,
-        raw_data=dict(row.extra_data or {}),
-    )
+    return tmdb_title_from_db_row(row)
 
 
 def _snapshot_bucket(dt: datetime) -> datetime:
@@ -215,32 +200,14 @@ def _derive_run_status(stats: dict[str, Any]) -> str:
 
 def _normalized_collected_at(value: Any) -> datetime:
     """Normalize collector timestamps to tz-aware UTC datetimes."""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value
-    return datetime.now(UTC)
+    return title_collected_at(value)
 
 
 def _filter_title_matches(
     posts: list[CollectedPost], *, title: TMDBTitle
 ) -> tuple[list[CollectedPost], int]:
     """Drop posts that do not confidently match the expected title."""
-    kept: list[CollectedPost] = []
-    filtered = 0
-    for post in posts:
-        if (
-            match_title_text(
-                post.content,
-                title=title.title,
-                original_title=title.original_title,
-            )
-            is None
-        ):
-            filtered += 1
-            continue
-        kept.append(post)
-    return kept, filtered
+    return shared_filter_title_matches(posts, title=title)
 
 
 def _coerce_int_setting(value: Any, default: int) -> int:
@@ -585,12 +552,7 @@ async def collect_once(
                         # We gather posts first, then run sentiment in a single
                         # batch across platforms (B3 optimisation).
                         all_posts: list[CollectedPost] = []
-                        youtube_query = build_search_query(
-                            t.title,
-                            original_title=t.original_title,
-                            media_type=t.media_type,
-                            release_date=t.release_date,
-                        )
+                        search_query = build_platform_query(t, platform="youtube")
                         # (platform, stats_key, posts, collected_at)
                         platform_batches: list[tuple[str, str, list[CollectedPost], datetime]] = []
 
@@ -628,12 +590,7 @@ async def collect_once(
                                         int(stats.get("matching_filtered", 0)) + filtered_reddit
                                     )
                                 # A4: Deduplicate posts by source_id (crossposts).
-                                seen_ids: set[str] = set()
-                                deduped: list[CollectedPost] = []
-                                for p in matched_reddit:
-                                    if p.source_id not in seen_ids:
-                                        seen_ids.add(p.source_id)
-                                        deduped.append(p)
+                                deduped = dedupe_posts_by_source(matched_reddit)
 
                                 if settings.storage.enable_raw_data_storage:
                                     ok = await persist_collection_result(
@@ -682,7 +639,7 @@ async def collect_once(
                             else:
                                 try:
                                     yt_result = await youtube.collect(
-                                        query=youtube_query or t.title,
+                                        query=search_query or t.title,
                                         limit=limit_youtube,
                                     )
                                 except Exception as exc:
@@ -712,7 +669,7 @@ async def collect_once(
                                     raw_data_dir=settings.storage.raw_data_dir,
                                     title=t.title,
                                     title_id=db_title.id,
-                                    query=youtube_query or t.title,
+                                    query=search_query or t.title,
                                     run_id=run_id,
                                 )
                                 if not ok:
@@ -772,7 +729,7 @@ async def collect_once(
                         if bsky_eligible:
                             try:
                                 bluesky_result = await bluesky.collect(
-                                    query=youtube_query or t.title,
+                                    query=search_query or t.title,
                                     limit=limit_bluesky,
                                 )
                             except Exception as exc:
@@ -798,12 +755,7 @@ async def collect_once(
                                         int(stats.get("matching_filtered", 0)) + filtered_bluesky
                                     )
                                 # Deduplicate posts by source_id (reposts).
-                                bsky_seen: set[str] = set()
-                                bsky_deduped: list[CollectedPost] = []
-                                for p in matched_bluesky:
-                                    if p.source_id not in bsky_seen:
-                                        bsky_seen.add(p.source_id)
-                                        bsky_deduped.append(p)
+                                bsky_deduped = dedupe_posts_by_source(matched_bluesky)
 
                                 if settings.storage.enable_raw_data_storage:
                                     ok = await persist_collection_result(
@@ -811,7 +763,7 @@ async def collect_once(
                                         raw_data_dir=settings.storage.raw_data_dir,
                                         title=t.title,
                                         title_id=db_title.id,
-                                        query=youtube_query or t.title,
+                                        query=search_query or t.title,
                                         run_id=run_id,
                                     )
                                     if not ok:

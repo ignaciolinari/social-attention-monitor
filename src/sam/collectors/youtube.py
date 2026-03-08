@@ -24,7 +24,8 @@ from sam.quota import (
     YOUTUBE_COMMENT_THREADS_COST,
     YOUTUBE_SEARCH_COST,
     YOUTUBE_VIDEOS_COST,
-    get_quota_tracker,
+    record_youtube_usage,
+    youtube_has_budget,
 )
 
 
@@ -137,8 +138,7 @@ class YouTubeCollector(BaseCollector):
             # Don't record quota for failed requests
             raise
         if quota_endpoint and quota_units:
-            quota = get_quota_tracker()
-            quota.record("youtube", quota_endpoint, quota_units)
+            await record_youtube_usage(quota_endpoint, quota_units)
         return cast(dict[str, Any], response.json())
 
     async def collect(
@@ -195,8 +195,7 @@ class YouTubeCollector(BaseCollector):
             )
 
             while len(posts) < limit:
-                quota = get_quota_tracker()
-                if not quota.youtube_has_budget(cost=YOUTUBE_SEARCH_COST):
+                if not await youtube_has_budget(cost=YOUTUBE_SEARCH_COST):
                     logger.warning("[youtube] Quota guard blocked search.list call")
                     break
                 search_params = {
@@ -230,7 +229,7 @@ class YouTubeCollector(BaseCollector):
                             break
                         continue
 
-                if not quota.youtube_has_budget(cost=YOUTUBE_VIDEOS_COST):
+                if not await youtube_has_budget(cost=YOUTUBE_VIDEOS_COST):
                     logger.warning("[youtube] Quota guard blocked videos.list call")
                     break
                 stats_data = await self._get_json(
@@ -388,8 +387,7 @@ class YouTubeCollector(BaseCollector):
 
         try:
             while len(comments) < limit:
-                quota = get_quota_tracker()
-                if not quota.youtube_has_budget(cost=YOUTUBE_COMMENT_THREADS_COST):
+                if not await youtube_has_budget(cost=YOUTUBE_COMMENT_THREADS_COST):
                     logger.warning(
                         f"[youtube] Quota guard blocked commentThreads.list for {video_id}"
                     )

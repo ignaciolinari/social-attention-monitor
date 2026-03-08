@@ -31,7 +31,7 @@ async def pipeline_health() -> PipelineHealthResponse:
     api_quota: dict[str, ApiQuotaInfo] = {}
     async with deps.get_session() as session:
         stats = await deps.get_pipeline_health_stats(session)
-        quota = await deps.aggregate_youtube_quota_from_db(session)
+        quota = await deps.get_current_youtube_quota(session)
         api_quota["youtube"] = ApiQuotaInfo(**quota.to_api_dict())
 
     sentiment_stats: PipelineSentimentStats | None = None
@@ -70,7 +70,7 @@ async def pipeline_health() -> PipelineHealthResponse:
 @router.get("/quota", response_model=PipelineQuotaResponse)
 async def pipeline_quota() -> PipelineQuotaResponse:
     """API quota usage summary (YouTube daily budget)."""
-    quota = await deps.aggregate_youtube_quota_from_db()
+    quota = await deps.get_current_youtube_quota()
     return PipelineQuotaResponse(
         youtube=ApiQuotaInfo(**quota.to_api_dict()),
         last_run_at=quota.last_run_at,

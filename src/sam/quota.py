@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -91,6 +91,20 @@ class QuotaTracker:
                 usage.calls[ep] = usage.calls.get(ep, 0) + cnt
             logger.info(f"[quota] Seeded {platform} with {units} units (total now: {usage.units})")
 
+    def replace(
+        self,
+        platform: str,
+        units: int,
+        calls_by_endpoint: dict[str, int] | None = None,
+    ) -> None:
+        """Overwrite today's usage for a platform."""
+        with self._lock:
+            usage = self._get_platform(platform)
+            usage.units = max(0, units)
+            usage.calls = {
+                str(ep): max(0, int(cnt or 0)) for ep, cnt in (calls_by_endpoint or {}).items()
+            }
+
     def record(self, platform: str, endpoint: str, units: int) -> None:
         """Record an API call and its quota cost."""
         with self._lock:
@@ -98,7 +112,7 @@ class QuotaTracker:
             usage.calls[endpoint] = usage.calls.get(endpoint, 0) + 1
             usage.units += units
 
-    def get_usage(self, platform: str) -> dict[str, int | str | dict[str, int]]:
+    def get_usage(self, platform: str) -> dict[str, Any]:
         """Get current usage summary for a platform."""
         with self._lock:
             usage = self._get_platform(platform)
@@ -162,6 +176,127 @@ def get_quota_tracker() -> QuotaTracker:
             if _tracker is None:
                 _tracker = QuotaTracker()
     return _tracker
+
+
+_REDIS_QUOTA_PREFIX = "sam:quota"
+
+
+def _youtube_quota_today() -> str:
+    return datetime.now(QuotaTracker._YOUTUBE_RESET_TZ).strftime("%Y-%m-%d")
+
+
+def _shared_quota_key(platform: str, *, day: str | None = None) -> str:
+    normalized_day = day or _youtube_quota_today()
+    return f"{_REDIS_QUOTA_PREFIX}:{platform}:{normalized_day}"
+
+
+async def _get_shared_usage(
+    platform: str,
+) -> dict[str, Any] | None:
+    from sam.cache import get_redis
+
+    r = get_redis()
+    if r is None:
+        return None
+
+    key = _shared_quota_key(platform)
+    try:
+        raw = await cast(Any, r).hgetall(key)
+    except Exception:
+        return None
+
+    if not raw:
+        return {
+            "date": _youtube_quota_today(),
+            "total_units": 0,
+            "total_calls": 0,
+            "calls_by_endpoint": {},
+        }
+
+    calls_by_endpoint = {
+        field[3:]: int(value or 0) for field, value in raw.items() if field.startswith("ep:")
+    }
+    total_calls_raw = raw.get("total_calls")
+    total_calls = (
+        int(total_calls_raw or 0)
+        if total_calls_raw is not None
+        else sum(calls_by_endpoint.values())
+    )
+    return {
+        "date": raw.get("date", _youtube_quota_today()),
+        "total_units": int(raw.get("total_units", 0) or 0),
+        "total_calls": total_calls,
+        "calls_by_endpoint": calls_by_endpoint,
+    }
+
+
+async def _sync_shared_usage(
+    platform: str,
+    *,
+    units: int,
+    calls_by_endpoint: dict[str, int] | None = None,
+) -> None:
+    from sam.cache import get_redis
+
+    r = get_redis()
+    if r is None:
+        return
+
+    key = _shared_quota_key(platform)
+    today = _youtube_quota_today()
+    calls = {str(ep): max(0, int(cnt or 0)) for ep, cnt in (calls_by_endpoint or {}).items()}
+    payload: dict[str, str | int] = {
+        "date": today,
+        "total_units": max(0, units),
+        "total_calls": sum(calls.values()),
+    }
+    payload.update({f"ep:{ep}": count for ep, count in calls.items()})
+    try:
+        pipe = r.pipeline(transaction=True)
+        pipe.delete(key)
+        pipe.hset(key, mapping=payload)
+        pipe.expire(key, 172800)
+        await pipe.execute()
+    except Exception:
+        return
+
+
+async def youtube_has_budget(cost: int = YOUTUBE_SEARCH_COST) -> bool:
+    """Check YouTube budget using shared state when available."""
+    shared = await _get_shared_usage("youtube")
+    if shared is not None:
+        total_units = shared.get("total_units", 0)
+        if isinstance(total_units, int):
+            return (total_units + cost) <= YOUTUBE_DAILY_BUDGET
+
+    tracker = get_quota_tracker()
+    return tracker.youtube_has_budget(cost=cost)
+
+
+async def record_youtube_usage(endpoint: str, units: int) -> None:
+    """Record YouTube quota usage in shared state when available."""
+    if units <= 0:
+        return
+
+    from sam.cache import get_redis
+
+    r = get_redis()
+    if r is not None:
+        key = _shared_quota_key("youtube")
+        try:
+            pipe = r.pipeline(transaction=True)
+            pipe.hset(key, mapping={"date": _youtube_quota_today()})
+            pipe.hincrby(key, "total_units", units)
+            pipe.hincrby(key, "total_calls", 1)
+            pipe.hincrby(key, f"ep:{endpoint}", 1)
+            pipe.expire(key, 172800)
+            await pipe.execute()
+            return
+        except Exception:
+            pass
+
+    tracker = get_quota_tracker()
+    tracker.record("youtube", endpoint, units)
 
 
 @dataclass
@@ -297,6 +432,49 @@ async def aggregate_youtube_quota_from_db(
     )
 
 
+async def get_current_youtube_quota(
+    session: AsyncSession | None = None,
+) -> YouTubeDailyQuota:
+    """Return the best current YouTube quota summary.
+
+    Prefers shared Redis-backed state when available so API-driven live usage and
+    collector usage are visible across processes in near real time. Falls back to
+    the greater of the local in-memory tracker or persisted run history.
+    """
+    shared = await _get_shared_usage("youtube")
+    if shared is not None:
+        db_quota = await aggregate_youtube_quota_from_db(session)
+        return YouTubeDailyQuota(
+            date=str(shared.get("date", _youtube_quota_today())),
+            total_units=int(shared.get("total_units", 0) or 0),
+            total_calls=int(shared.get("total_calls", 0) or 0),
+            calls_by_endpoint={
+                str(ep): int(cnt or 0)
+                for ep, cnt in (shared.get("calls_by_endpoint", {}) or {}).items()
+            },
+            last_run_at=db_quota.last_run_at,
+        )
+
+    db_quota = await aggregate_youtube_quota_from_db(session)
+    tracker_usage = get_quota_tracker().get_usage("youtube")
+    tracker_units = tracker_usage.get("total_units", 0)
+    if isinstance(tracker_units, int) and tracker_units > db_quota.total_units:
+        calls_by_endpoint = tracker_usage.get("calls_by_endpoint", {})
+        return YouTubeDailyQuota(
+            date=str(tracker_usage.get("date", db_quota.date)),
+            total_units=tracker_units,
+            total_calls=int(tracker_usage.get("total_calls", 0) or 0),
+            calls_by_endpoint={
+                str(ep): int(cnt or 0)
+                for ep, cnt in (
+                    calls_by_endpoint if isinstance(calls_by_endpoint, dict) else {}
+                ).items()
+            },
+            last_run_at=db_quota.last_run_at,
+        )
+    return db_quota
+
+
 async def seed_quota_from_db() -> None:
     """Load today's accumulated YouTube quota from persisted pipeline runs
     and seed the in-memory tracker.
@@ -305,11 +483,24 @@ async def seed_quota_from_db() -> None:
     the quota guard (``youtube_has_budget``) correctly accounts for units
     already spent by previous ``--once`` invocations today.
     """
-    quota = await aggregate_youtube_quota_from_db()
+    try:
+        quota = await aggregate_youtube_quota_from_db()
+    except Exception as exc:
+        logger.warning(f"[quota] Failed to seed YouTube quota from DB: {exc}")
+        return
+
+    tracker = get_quota_tracker()
+    tracker.replace("youtube", quota.total_units, quota.calls_by_endpoint)
+    shared = await _get_shared_usage("youtube")
+    shared_units = shared.get("total_units", 0) if isinstance(shared, dict) else 0
+    if not isinstance(shared_units, int) or shared_units < quota.total_units:
+        await _sync_shared_usage(
+            "youtube",
+            units=quota.total_units,
+            calls_by_endpoint=quota.calls_by_endpoint,
+        )
 
     if quota.total_units > 0:
-        tracker = get_quota_tracker()
-        tracker.seed("youtube", quota.total_units, quota.calls_by_endpoint)
         logger.info(f"[quota] Loaded {quota.total_units} YouTube units from DB today")
     else:
         logger.debug("[quota] No prior YouTube usage found for today")

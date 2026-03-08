@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from sam.quota import (
     YOUTUBE_DAILY_BUDGET,
     YOUTUBE_SEARCH_COST,
     YOUTUBE_VIDEOS_COST,
     QuotaTracker,
+    YouTubeDailyQuota,
+    get_current_youtube_quota,
 )
 
 
@@ -157,3 +161,31 @@ class TestQuotaTrackerSeed:
         assert tracker.youtube_has_budget(cost=50) is True
         # 9950 + 51 = 10001 > 10000 — just over
         assert tracker.youtube_has_budget(cost=51) is False
+
+
+@pytest.mark.asyncio
+async def test_get_current_youtube_quota_prefers_shared_usage(monkeypatch) -> None:
+    async def _fake_shared(_platform: str):
+        return {
+            "date": "2026-02-04",
+            "total_units": 321,
+            "total_calls": 7,
+            "calls_by_endpoint": {"search.list": 3, "videos.list": 4},
+        }
+
+    async def _fake_db(_session=None):
+        return YouTubeDailyQuota(
+            date="2026-02-04",
+            total_units=100,
+            total_calls=2,
+            calls_by_endpoint={"search.list": 1, "videos.list": 1},
+            last_run_at="2026-02-04T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr("sam.quota._get_shared_usage", _fake_shared)
+    monkeypatch.setattr("sam.quota.aggregate_youtube_quota_from_db", _fake_db)
+
+    quota = await get_current_youtube_quota()
+    assert quota.total_units == 321
+    assert quota.total_calls == 7
+    assert quota.calls_by_endpoint["videos.list"] == 4
