@@ -55,10 +55,16 @@ async def toggle_collector(
             ),
         )
 
-    deps.set_collector_override(platform, enabled)
     from sam.cache import collector_toggle_set
 
-    await collector_toggle_set(platform, enabled)
+    persisted = await collector_toggle_set(platform, enabled)
+    if not persisted:
+        raise HTTPException(
+            status_code=503,
+            detail="Runtime collector toggles require Redis to be available.",
+        )
+
+    deps.set_collector_override(platform, enabled)
     logger.info(f"[api] Collector '{platform}' toggled to enabled={enabled}")
 
     api_ok = deps.api_keys_configured(platform)

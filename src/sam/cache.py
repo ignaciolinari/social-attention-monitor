@@ -96,16 +96,18 @@ _ALERTS_CHANNEL = "sam:alerts"
 _METRICS_CHANNEL = "sam:metrics"
 
 
-async def collector_toggle_set(platform: str, enabled: bool) -> None:
+async def collector_toggle_set(platform: str, enabled: bool) -> bool:
     """Persist a collector enabled override in Redis."""
     r = get_redis()
     if r is None:
-        return
+        return False
     key = f"{_COLLECTOR_TOGGLE_PREFIX}{platform}:enabled"
     try:
         await r.set(key, json.dumps(enabled))
+        return True
     except Exception as exc:
         _warn_redis_error("collector_toggle_set", exc)
+        return False
 
 
 async def collector_toggle_get(platform: str) -> bool | None:
