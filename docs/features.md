@@ -27,9 +27,10 @@ SAM doesn't just count mentions; it attempts to understand them through a multi-
 ### Advanced Capabilities
 - **Translation (optional, provider-gated)**: Translation is disabled by default in the hot ingestion path. When enabled, SAM detects language once, reuses that metadata downstream, and performs bounded concurrent translations before scoring. This keeps translation available for targeted deployments without making it mandatory for every ingestion cycle.
 - **Emotion Classification**: Maps text into discrete categories (e.g., Joy, Anger, Sadness, Surprise).
-- **Sarcasm Detection**: Identifies potentially sarcastic comments that might otherwise skew the core sentiment score.
+- **Sarcasm Detection**: Annotates each mention with an irony/sarcasm probability score. Stored alongside the sentiment payload for dashboard display; does not modify the compound score.
 - **Aspect-Based Sentiment** *(optional)*: When `SAM_ENABLE_ASPECT_SENTIMENT=true`, long-form content (>100 chars) is analyzed for per-aspect sentiment (e.g., "acting", "plot", "visuals"), stored in the sentiment JSONB payload.
 - **Keyword Extraction**: Identifies the most prominent terms used alongside the tracked entity to highlight trending topics. Input is sampled to a max of 500 texts for performance.
+- **Title Entity Resolution**: Before persistence, every captured mention passes through a fuzzy-matching step (`matching.py`) that verifies the text actually contains the tracked title. Uses an alias table (e.g. `tlou` → *The Last of Us*) and `rapidfuzz`-powered fuzzy matching with per-title confidence thresholds — shorter or ambiguous titles get stricter thresholds. Mentions that don't meet the threshold are discarded.
 - **Content Deduplication**: `detect_duplicate_content` runs in the pipeline before persistence, removing near-duplicate mentions across collection cycles to improve data quality.
 - **Text Cleaning & Spam Filtering**: Strips URLs and HTML. Evaluates text against heuristic patterns (like excessive repetition or known spam phrases) to drop low-quality data early.
 
@@ -40,7 +41,6 @@ SAM doesn't just count mentions; it attempts to understand them through a multi-
 Raw mentions are aggregated into Time-Series Windows (e.g., Hourly snapshots) for each tracked title.
 
 ### 3.1. Core Composite Scores
-Raw mentions are aggregated into Time-Series Windows (e.g., Hourly snapshots) for each tracked title.
 
 #### Attention Index
 The primary ranking metric (scaled 0-100), combining:

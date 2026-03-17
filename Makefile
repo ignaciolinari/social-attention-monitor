@@ -11,8 +11,10 @@ help:
 	@echo "  test          Run tests with coverage"
 	@echo "  test-ci       Run tests exactly like CI"
 	@echo "  test-integration Run tests with Docker Postgres"
+	@echo "  test-fast     Run tests without coverage, stop on first failure"
 	@echo "  lint          Run linter (ruff)"
 	@echo "  format        Format code (ruff)"
+	@echo "  typecheck     Run mypy type checking on src/sam/"
 	@echo "  ci-check      Run lint, format check, mypy, and tests like CI"
 	@echo "  run-api       Start FastAPI server"
 	@echo "  run-dashboard Start Streamlit dashboard"
@@ -51,7 +53,7 @@ ci-deps:
 VENV_PY := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
 
 test:
-	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
+	$(VENV_PY) -m pytest tests/ -v --cov=src/sam --cov-report=term-missing
 
 test-ci:
 	$(VENV_PY) -m pytest tests/ -v --cov=src/sam --cov-report=xml --cov-report=term
@@ -67,7 +69,7 @@ test-integration:
 	@docker exec sam-postgres sh -c 'psql -U "$(POSTGRES_USER)" -d postgres -c "ALTER USER \"$(POSTGRES_USER)\" CREATEDB" >/dev/null 2>&1 || true'
 	@docker exec sam-postgres sh -c 'createdb -U "$(POSTGRES_USER)" "$(TEST_DB)" 2>/dev/null || true'
 	SAM_TEST_DATABASE_URL=postgresql+asyncpg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@127.0.0.1:5433/$(TEST_DB) \
-	$(VENV_PY) -m pytest tests/ -v --cov=sam --cov-report=term-missing
+	$(VENV_PY) -m pytest tests/ -v --cov=src/sam --cov-report=term-missing
 
 test-fast:
 	$(VENV_PY) -m pytest tests/ -v -x --no-cov

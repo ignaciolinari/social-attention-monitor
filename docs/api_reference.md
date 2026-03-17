@@ -27,21 +27,22 @@ The FastAPI server provides REST endpoints for data access and a WebSocket conne
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/trending` | Fetches trending movies/TV shows from TMDB. Query: `?media_type=all|movie|tv`, `?limit=20`. |
-| `GET` | `/api/v1/search` | Search TMDB for titles. Query: `?query=<query>`. |
+| `GET` | `/api/v1/search` | Search TMDB for titles. Query: `?query=<query>` (required), `media_type=multi\|movie\|tv` (default `multi`), `limit` (default 10, max 20). |
 | `GET` | `/api/v1/db/titles` | Lists titles tracked in the SAM database. Query: `q`, `limit`, `offset`, `include_inactive`. |
-| `GET` | `/api/v1/mentions/reddit` | Reddit mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
-| `GET` | `/api/v1/mentions/youtube` | YouTube mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
-| `GET` | `/api/v1/mentions/bluesky` | Bluesky mentions. Query: `title` (required), `title_id` (optional, preferred), `limit`, `offset`. |
+| `GET` | `/api/v1/mentions/{platform}` | Mentions for a title from any platform (`reddit`, `youtube`, `bluesky`). Query: `title` (required), `title_id` (optional UUID, preferred), `limit` (default 50, max 100), `offset` (default 0). Returns `400` for unsupported platforms. |
+| `GET` | `/api/v1/mentions/reddit` | Backward-compatible alias for `/mentions/reddit`. Query: `title` (required), `title_id` (optional UUID), `limit` (default 50, max 100), `offset` (default 0). |
+| `GET` | `/api/v1/mentions/youtube` | Backward-compatible alias for `/mentions/youtube`. Query: `title` (required), `title_id` (optional UUID), `limit` (default 20, max 100), `offset` (default 0). |
+| `GET` | `/api/v1/mentions/bluesky` | Backward-compatible alias for `/mentions/bluesky`. Query: `title` (required), `title_id` (optional UUID), `limit` (default 50, max 100), `offset` (default 0). |
 
 ### 4. Metrics
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/metrics/trending` | Returns locally tracked titles ranked by Attention Index. |
-| `GET` | `/api/v1/metrics/timeseries` | Historical sentiment and velocity. Query: `title_id` (required), `window_hours`, `hours` (lookback). |
-| `GET` | `/api/v1/metrics/box-office` | Titles with revenue/budget alongside attention index for correlation analysis. Query: `window_hours`, `limit`. |
-| `GET` | `/api/v1/metrics/language-breakdown` | Mention aggregation by detected language with per-language sentiment. Returns `404` when `title_id` is unknown. Query: `title_id` (required), `hours`. |
-| `GET` | `/api/v1/metrics/compare` | Parallel timeseries for multi-title comparison. Query: `title_ids` (comma-separated, 2–5 required), `window_hours`, `hours`. |
-| `GET` | `/api/v1/metrics/benchmark` | Compare a title's first-N-days day-level trajectory against averaged peers of the same media type. Query: `title_id` (required), `comparison_type=movie|tv`, `days`, `window_hours`, `comparison_limit`. |
+| `GET` | `/api/v1/metrics/timeseries` | Historical sentiment and velocity. Query: `title_id` (required), `window_hours` (default 1, max 168), `hours` (default 24, max 720). |
+| `GET` | `/api/v1/metrics/box-office` | Titles with revenue/budget alongside attention index for correlation analysis. Query: `window_hours` (default 24, max 168), `limit` (default 20, max 50). |
+| `GET` | `/api/v1/metrics/language-breakdown` | Mention aggregation by detected language with per-language sentiment. Returns `404` when `title_id` is unknown. Query: `title_id` (required), `hours` (default 24, max 720). |
+| `GET` | `/api/v1/metrics/compare` | Parallel timeseries for multi-title comparison. Query: `title_ids` (comma-separated, 2–5 required), `window_hours` (default 24, max 168), `hours` (default 168, max 720). |
+| `GET` | `/api/v1/metrics/benchmark` | Compare a title's first-N-days day-level trajectory against averaged peers of the same media type. Query: `title_id` (required), `comparison_type=movie|tv` (default `movie`), `days` (default 7, max 90), `window_hours` (default 24, max 168), `comparison_limit` (default 20, max 50). |
 | `GET` | `/api/v1/sentiment/analyze` | Submit arbitrary text via `?text=` for an ad-hoc sentiment score. |
 
 Metrics snapshot payloads now include `mentions_capped`, `mentions_fetch_limit`, and `is_approximate` so clients can distinguish exact windows from windows computed from the 10k mention cap.
@@ -51,16 +52,16 @@ Metrics snapshot payloads now include `mentions_capped`, `mentions_fetch_limit`,
 |--------|----------|-------------|
 | `GET` | `/api/v1/watchlists` | List all user-defined watchlists. Query: `limit`, `offset`. |
 | `POST` | `/api/v1/watchlists` | Create a new watchlist. JSON body: `{"name": "...", "tmdb_ids": [...]}`. |
-| `PUT` | `/api/v1/watchlists/{id}` | Update an existing watchlist. JSON body: `{"name": "...", "tmdb_ids": [...]}`. |
-| `DELETE` | `/api/v1/watchlists/{id}` | Delete a watchlist. |
+| `PUT` | `/api/v1/watchlists/{watchlist_id}` | Update an existing watchlist. JSON body: `{"name": "...", "tmdb_ids": [...]}`. |
+| `DELETE` | `/api/v1/watchlists/{watchlist_id}` | Delete a watchlist. |
 
 ### 6. Alerts
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/v1/alerts` | Lists recent alerts. Filters: `limit`, `offset`, `title_id`, `severity`, `hours`, `unacknowledged_only`. |
 | `GET` | `/api/v1/alerts/counts` | Summary counts of alerts grouped by severity. |
-| `POST`| `/api/v1/alerts/{alert_id}/acknowledge`| Marks a specific alert as acknowledged. |
-| `POST`| `/api/v1/alerts/run-detection`| Manually trigger anomaly detection run. |
+| `POST` | `/api/v1/alerts/{alert_id}/acknowledge` | Marks a specific alert as acknowledged. |
+| `POST` | `/api/v1/alerts/run-detection` | Manually trigger anomaly detection run. Query: `window_hours` (default 1, max 24), `history_points` (default 24, min 5, max 168). |
 
 ### 7. Pipeline & WebSocket Status
 | Method | Endpoint | Description |
@@ -125,7 +126,7 @@ ws.send(JSON.stringify({action: 'subscribe', topic: 'alerts'}));
 |--------|----------|--------|
 | `PUT` | `/api/v1/collectors/{platform}/toggle` | Collector control |
 | `POST` | `/api/v1/alerts/run-detection` | Admin action |
-| `POST` | `/api/v1/alerts/{id}/acknowledge` | Alert mutation |
+| `POST` | `/api/v1/alerts/{alert_id}/acknowledge` | Alert mutation |
 | `GET` | `/api/v1/sentiment/analyze` | Expensive NLP endpoint |
 | `GET` | `/health?external=true` | External dependency probes |
 | `POST` / `PUT` / `DELETE` | Any `/api/*` path | Mutation operations |
