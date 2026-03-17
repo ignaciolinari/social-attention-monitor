@@ -117,6 +117,6 @@ def detect_duplicate_content(posts: list[CollectedPost]) -> set[int]:
             # Keep the first occurrence, mark the rest as duplicates
             authors = {posts[i].author for i in indices}
             if len(authors) > 1:
-                # Same content from different authors = bot
+                # Identical content from multiple distinct authors — likely coordinated posting or bot activity.
                 duplicate_indices.update(indices[1:])
     return duplicate_indices

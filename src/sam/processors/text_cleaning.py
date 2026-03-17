@@ -49,6 +49,6 @@ def clean_text_for_sentiment(text: str) -> str:
 
     Keeps punctuation/emojis (important for VADER) while removing noisy markup.
     """
-    # For now, sentiment cleaning matches NLP cleaning except it keeps any punctuation/emojis
-    # by not doing any character filtering beyond markup removal.
+    # Delegates to NLP cleaning intentionally — both entry points exist for semantic clarity
+    # (sentiment vs. NLP contexts may diverge in future), not because the implementations differ.
     return clean_text_for_nlp(text)

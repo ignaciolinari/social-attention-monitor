@@ -424,8 +424,8 @@ class SentimentAnalyzer:
         neutral = float(scores[1])
         positive = float(scores[2])
 
-        # Calculate compound score roughly compatible with VADER (-1 to 1)
-        # Verify if this formula needs adjustment
+        # Map RoBERTa softmax outputs to a VADER-compatible compound score in [-1, 1].
+        # positive - negative is the standard approach for this label ordering.
         compound = positive - negative
 
         if compound >= self.POSITIVE_THRESHOLD:

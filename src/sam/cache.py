@@ -61,6 +61,11 @@ async def close_redis() -> None:
 
 
 async def cache_get_json(key: str) -> Any | None:
+    """Return the cached JSON value for *key*, or ``None`` on a miss or error.
+
+    Silently returns ``None`` for both cache misses and JSON decode errors so
+    callers never need to guard against deserialization failures.
+    """
     r = get_redis()
     if r is None:
         return None
@@ -78,6 +83,14 @@ async def cache_get_json(key: str) -> Any | None:
 
 
 async def cache_set_json(key: str, value: Any, *, ttl_seconds: int) -> None:
+    """Serialize *value* to JSON and store it in Redis under *key*.
+
+    Args:
+        key: Redis key.
+        value: Any JSON-serializable object.
+        ttl_seconds: Time-to-live in seconds. Required keyword argument —
+            must be specified explicitly to prevent accidental infinite TTLs.
+    """
     r = get_redis()
     if r is None:
         return

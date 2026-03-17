@@ -180,12 +180,16 @@ class DbTitleResponse(BaseModel):
 
 
 class TitlesResponse(BaseModel):
+    """Paginated list of titles tracked in the SAM database."""
+
     titles: list[DbTitleResponse]
     total_count: int
     next_offset: int | None = None
 
 
 class MetricsSnapshotResponse(BaseModel):
+    """A single computed metrics snapshot for a title over a given time window."""
+
     title_id: str
     snapshot_time: str
     window_hours: int
@@ -213,17 +217,23 @@ class MetricsSnapshotResponse(BaseModel):
 
 
 class TrendingMetricsItem(BaseModel):
+    """A (title, metrics snapshot) pair in a trending metrics response."""
+
     title: DbTitleResponse
     metrics: MetricsSnapshotResponse
 
 
 class TrendingMetricsResponse(BaseModel):
+    """Ranked list of tracked titles with their latest attention metrics."""
+
     window_hours: int
     collected_at: str
     items: list[TrendingMetricsItem]
 
 
 class MetricsTimeseriesResponse(BaseModel):
+    """Time-ordered sequence of metrics snapshots for a single title."""
+
     title: DbTitleResponse
     window_hours: int
     since: str

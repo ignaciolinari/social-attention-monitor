@@ -200,6 +200,12 @@ class DatabaseSettings(BaseSettings):
     pool_size: int = Field(default=5, description="Connection pool size")
 
     def effective_url(self, *, demo_mode: bool) -> str:
+        """Return the database URL appropriate for the current operating mode.
+
+        When *demo_mode* is ``True`` and a non-empty ``demo_url`` is configured,
+        returns ``demo_url``; otherwise falls back to the primary ``url`` regardless
+        of the demo flag.
+        """
         if demo_mode and _is_effectively_set(self.demo_url):
             return self.demo_url
         return self.url

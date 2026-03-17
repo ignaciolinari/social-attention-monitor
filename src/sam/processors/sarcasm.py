@@ -22,6 +22,12 @@ class SarcasmDetector:
     """Detect sarcasm in text using a transformer classifier."""
 
     def __init__(self) -> None:
+        """Load the sarcasm model eagerly at construction time.
+
+        Sets ``is_available`` to ``True`` only if both ``transformers`` and
+        ``torch`` are installed and the model loads without error.  Construction
+        never raises — failures are logged as warnings.
+        """
         self._tokenizer: Any | None = None
         self._model: Any | None = None
         self._available = False
@@ -31,6 +37,11 @@ class SarcasmDetector:
         self._load()
 
     def _load(self) -> None:
+        """Download and initialize the sarcasm model and tokenizer.
+
+        No-ops silently if ``transformers``/``torch`` are not installed or if
+        the model download fails, leaving ``is_available`` as ``False``.
+        """
         try:
             import torch as _torch  # noqa: F401
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -52,6 +63,7 @@ class SarcasmDetector:
 
     @property
     def is_available(self) -> bool:
+        """``True`` if the model loaded successfully and inference can run."""
         return self._available
 
     def detect(self, text: str) -> tuple[bool, float]:
