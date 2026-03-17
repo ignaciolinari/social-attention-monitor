@@ -104,13 +104,12 @@ async def get_platform_mentions(
             status_code=400,
             detail=f"Unsupported platform '{platform}'. Must be one of: {sorted(deps.VALID_PLATFORMS)}",
         )
-    effective_limit = min(limit, deps.PLATFORM_DEFAULT_LIMITS.get(platform, limit))
     return await _get_mentions_for_platform(
         platform=platform,
         background_tasks=background_tasks,
         title=title,
         title_id=title_id,
-        limit=effective_limit,
+        limit=limit,
         offset=offset,
     )
 

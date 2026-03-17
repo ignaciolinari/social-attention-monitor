@@ -8,7 +8,11 @@ from fastapi import BackgroundTasks
 
 import sam.api.dependencies as deps
 import sam.api.main as api
-from sam.api.routes.mentions import get_bluesky_mentions, get_reddit_mentions
+from sam.api.routes.mentions import (
+    get_bluesky_mentions,
+    get_platform_mentions,
+    get_reddit_mentions,
+)
 
 
 def _fake_mention(platform: str = "reddit") -> api.MentionResponse:
@@ -126,3 +130,40 @@ async def test_bluesky_mentions_refreshes_when_stale(monkeypatch) -> None:
 
     assert response.platform == "bluesky"
     assert len(background_tasks.tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_generic_mentions_keeps_requested_limit(monkeypatch) -> None:
+    seen: dict[str, int] = {}
+
+    async def fake_get_mentions_from_db(
+        *,
+        title: str,
+        title_id,
+        platform: str,
+        limit: int,
+        offset: int,
+    ):
+        _ = (title, title_id, offset)
+        seen[platform] = limit
+        return deps.DbMentionsResult(
+            mentions=[_fake_mention(platform)],
+            total_count=1,
+            next_offset=None,
+            title_id=uuid4(),
+            last_collected_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(deps, "get_mentions_from_db", fake_get_mentions_from_db)
+    background_tasks = BackgroundTasks()
+
+    response = await get_platform_mentions(
+        platform="youtube",
+        background_tasks=background_tasks,
+        title="Dune",
+        limit=80,
+        offset=0,
+    )
+
+    assert response.platform == "youtube"
+    assert seen["youtube"] == 80
