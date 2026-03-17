@@ -180,7 +180,7 @@ psycopg2-binary==2.9.11
     # via social-attention-monitor (pyproject.toml)
 pyarrow==23.0.1
     # via streamlit
-pyasn1==0.6.2
+pyasn1==0.6.3
     # via
     #   pyasn1-modules
     #   rsa
@@ -271,7 +271,7 @@ tenacity==9.1.4
     #   streamlit
 toml==0.10.2
     # via streamlit
-tornado==6.5.4
+tornado==6.5.5
     # via streamlit
 tqdm==4.67.3
     # via nltk

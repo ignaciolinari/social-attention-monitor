@@ -55,6 +55,14 @@ class EngagementMetrics:
 
 
 class MetricsPayload(TypedDict, total=False):
+    """Platform engagement counters for a single mention.
+
+    All fields are optional because available metrics vary by platform:
+    Reddit supplies ``score`` and ``num_comments``; YouTube supplies
+    ``like_count``, ``comment_count``, and ``view_count``; Bluesky supplies
+    ``likes``, ``reposts``, and ``replies``.
+    """
+
     score: int
     num_comments: int
     like_count: int
@@ -66,10 +74,23 @@ class MetricsPayload(TypedDict, total=False):
 
 
 class SentimentPayload(TypedDict, total=False):
+    """Minimal sentiment data read by :class:`MetricsCalculator`.
+
+    The full sentiment JSONB column can contain richer fields (label, model,
+    extra, sarcasm_confidence, etc.) but the calculator only reads ``compound``.
+    """
+
     compound: float
 
 
 class MentionData(TypedDict, total=False):
+    """Input record type for :class:`MetricsCalculator`.
+
+    Mirrors the columns projected from the ``Mention`` ORM model. All fields
+    are optional (``total=False``) because different callers construct these
+    dicts from different query projections.
+    """
+
     created_at: datetime
     author: str
     platform: str
@@ -107,6 +128,9 @@ class MetricsCalculator:
             mentions: List of mention dictionaries with sentiment scores
             window_hours: Time window for calculations
             previous_metrics: Previous period metrics for velocity calculations
+            window_end: Upper boundary of the analysis window. Defaults to
+                ``datetime.now(UTC)`` when not provided. Pass an explicit value
+                for reproducible back-fills or tests.
 
         Returns:
             EngagementMetrics with all computed values
@@ -180,7 +204,7 @@ class MetricsCalculator:
         author_diversity_score, repeat_author_ratio = self._calc_author_diversity(in_window)
         creator_sentiment, audience_sentiment = self._calc_creator_audience_sentiment(in_window)
 
-        # Composite scores (z-score when possible)
+        # Composite scores (ratio-normalised against previous window when available)
         attention_index = self._calculate_attention_index(
             mention_count, mention_velocity, unique_authors, avg_sentiment, previous_metrics
         )

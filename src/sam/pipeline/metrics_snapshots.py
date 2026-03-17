@@ -260,8 +260,9 @@ def _aggregate_sentiment_models(
     """Single-pass aggregation of primary + secondary sentiment model stats.
 
     Returns ``(primary_model_counts, secondary_sentiment_payload)``.
-    Replaces the previous ``_aggregate_primary_sentiment_models`` +
-    ``_aggregate_secondary_sentiment`` two-pass approach (B8 optimisation).
+    Combines primary model counting and secondary sentiment extraction in a
+    single pass over mentions, replacing the previous two-pass approach to
+    halve the number of iterations over the mentions list.
     """
     # Primary model counts
     primary_counts: dict[str, int] = {}

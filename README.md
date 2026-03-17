@@ -52,7 +52,23 @@ The pipeline is designed to operate **fully within official APIs and their terms
 ## Key Features
 
 - **Multi-Platform Collection**: Native support for Reddit, YouTube, TMDB, and Bluesky with per-platform circuit breakers.
-- **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), aspect-based sentiment, emotion classification, sarcasm detection, content deduplication, and optional provider-gated translation.
+- **Advanced NLP Pipeline**: Dual-engine sentiment (VADER & RoBERTa), emotion classification, sarcasm detection, keyword extraction, content deduplication, and optional provider-gated translation.
+
+  SAM's NLP runs through several independent layers before producing an aggregated sentiment signal:
+
+  | Layer | Model | Speed | Role |
+  |---|---|---|---|
+  | **Fast Sentiment** | [VADER](https://github.com/cjhutto/vaderSentiment) (rule-based, no GPU) | ~1 ms | Primary scorer for real-time pipelines; purpose-built for social media text — handles emojis, slang, ALL-CAPS, and punctuation without any model download |
+  | **Deep Sentiment** | [`cardiffnlp/twitter-roberta-base-sentiment-latest`](https://huggingface.co/cardiffnlp/twitter-roberta-base-sentiment-latest) | ~200–500 ms/batch | RoBERTa fine-tuned on ~124 M tweets; captures negation, context, and nuance that rules miss. Outputs: Negative / Neutral / Positive |
+  | **Emotion Classifier** | [`j-hartmann/emotion-english-distilroberta-base`](https://huggingface.co/j-hartmann/emotion-english-distilroberta-base) | ~100–200 ms/batch | DistilRoBERTa fine-tuned for 7-class emotion detection: anger, disgust, fear, joy, neutral, sadness, surprise |
+  | **Sarcasm Guard** | [`helinivan/english-sarcasm-detector`](https://huggingface.co/helinivan/english-sarcasm-detector) | ~100 ms/batch | Binary irony/sarcasm classifier; annotates each mention with a sarcasm probability score stored alongside the sentiment payload — does not modify the compound score |
+  | **Keyword Extractor** | [YAKE](https://github.com/LIAAD/yake) (statistical, unsupervised, no GPU) | ~1 ms | Language-agnostic graph-based keyword extraction from mention text; no model download required |
+  | **Aggregated Signal** | Average / engagement-weighted mean | — | Final scores stored per mention: simple `avg_sentiment` and `engagement_weighted_sentiment` (higher-engagement opinions count more). Sarcasm and emotion results are stored as annotations alongside the score, not modifiers of it. |
+
+  Timing values are indicative only and vary with hardware, batch size, and runtime environment.
+
+  VADER is the default and requires no GPU or model download. RoBERTa can be enabled when higher fidelity matters more than latency, or both can run simultaneously — in that case VADER remains the primary stored score and RoBERTa is kept as secondary comparison data. Emotion classification and sarcasm detection are optional enrichment steps that annotate each mention independently at runtime.
+
 - **Metric Computation**: Intelligent scoring via "Attention Index" and "Hype Acceleration", plus alpha metrics (Audience Fatigue, Viral Coefficient, Sentiment Divergence).
 - **Box Office Correlation**: Automatic revenue/budget data from TMDB, scatter-plot analysis of social attention vs. commercial performance.
 - **Language Segmentation**: Automatic language detection on mentions with per-language sentiment breakdowns.
@@ -84,7 +100,7 @@ Comprehensive guides on the internals, configuration, and API:
 ## Requirements
 
 - **Python 3.11+**
-- PostgreSQL 16 (with optional TimescaleDB)
+- PostgreSQL 16 (recommended, with optional TimescaleDB)
 - Redis
 
 ## Quick Start (Demo Mode)
@@ -95,6 +111,7 @@ You can run the full pipeline instantly using mock data (no API keys required).
 # 1. Clone and install
 git clone https://github.com/ignaciolinari/social-attention-monitor.git
 cd social-attention-monitor
+cp .env.example .env          # copy config template (edit with your API keys)
 pip install -e ".[dev]"
 
 # 2. Start PostgreSQL (+ TimescaleDB) and Redis via Docker Compose
@@ -161,10 +178,14 @@ social-attention-monitor/
 │   │   ├── api/           # FastAPI (routes/, schemas, middleware, metrics)
 │   │   ├── collectors/    # Platform integrations (Reddit, YouTube, Bluesky, TMDB)
 │   │   ├── pipeline/      # Shared enrichment & metrics snapshot logic
-│   │   ├── processors/    # NLP (sentiment, emotions, sarcasm, spam, keywords)
+│   │   ├── processors/    # NLP (sentiment, emotions, sarcasm, spam, keywords, matching)
 │   │   ├── storage/       # PostgreSQL models, repository & Alembic migrations
 │   │   ├── scheduler/     # APScheduler runner for periodic ETL
-│   │   └── utils/         # Translation, shared helpers
+│   │   ├── utils/         # Translation, shared helpers
+│   │   ├── cache.py       # Redis helpers (API cache, collector toggles, pub/sub)
+│   │   ├── cli.py         # `sam` CLI entrypoint
+│   │   ├── config.py      # Pydantic-settings environment config
+│   │   └── quota.py       # YouTube quota accounting
 │   └── dashboard/         # Streamlit app (pages/, sidebar, api_client)
 ├── docs/                  # Architecture, features, setup, API reference
 ├── tests/                 # Unit & integration tests (400+)

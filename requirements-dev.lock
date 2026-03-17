@@ -277,7 +277,7 @@ py-serializable==2.1.0
     # via cyclonedx-python-lib
 pyarrow==23.0.1
     # via streamlit
-pyasn1==0.6.2
+pyasn1==0.6.3
     # via
     #   pyasn1-modules
     #   rsa
@@ -419,7 +419,7 @@ tomli-w==1.2.0
     # via pip-audit
 torch==2.10.0
     # via social-attention-monitor (pyproject.toml)
-tornado==6.5.4
+tornado==6.5.5
     # via streamlit
 tqdm==4.67.3
     # via

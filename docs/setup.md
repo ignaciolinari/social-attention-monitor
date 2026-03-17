@@ -1,11 +1,22 @@
 # Setup & Configuration
 
+## Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Python** | 3.11+ | Required. 3.10 and earlier will fail at import. |
+| **Docker** | any recent | Required for `make db-up` (Postgres + Redis). Docker Desktop, OrbStack, or Colima all work. |
+| **PostgreSQL** | 16 (recommended) | Only if running natively without Docker (see Option B). Tested on 16. |
+| **Redis** | 6+ | Only if running natively without Docker. |
+
+---
+
 ## 1. Installation Methods
 
 You can run SAM fully natively (Python + external Postgres/Redis), or you can use Docker to spin up the entire cluster seamlessly.
 
 ### A. Recommended (Docker Compose)
-The easiest way to get started is to use Docker for the databases, or everything.
+The easiest way to get started is to use Docker for the databases, or for the entire stack.
 
 1. **Install Docker** (Docker Desktop, OrbStack, or Colima).
 2. **Clone and Setup Environment**:
@@ -35,6 +46,8 @@ make run-collector
 
 > [!TIP]
 > To run the entire stack—API, Dashboard, and DBs—simply use: `docker compose up -d`
+>
+> In this full-stack Docker Compose mode, the dashboard container reaches the API over the internal service network (`API_HOST=api`, `API_PORT=8000`).
 >
 > For a local `.venv`-based workflow in one command, use:
 > `./run-all-local.sh start`
@@ -213,6 +226,9 @@ SAM_WS_CLEANUP_INTERVAL=60
 
 ### Dashboard API Connection
 When the Dashboard runs in a different context (e.g. Docker), it needs to reach the API:
+
+`docker compose up -d` already wires this automatically for the dashboard service (`API_HOST=api`, `API_PORT=8000`). Set `SAM_API_BASE_URL` only when you need to override that default (for example, a remote API).
+
 ```env
 # For Docker Compose (dashboard container): API_HOST=api, API_PORT=8000
 # For remote API: use SAM_API_BASE_URL to override entirely
@@ -249,12 +265,23 @@ DATABASE_DEMO_SYNC_URL=postgresql://...           # Sync URL for migrations
 | `make db-down` | Stop Docker services |
 | `make db-upgrade` | Apply Alembic migrations |
 | `make db-migrate` | Create new migration (prompts for message) |
-| `make db-downgrade` | Rollback one migration |
+| `make db-downgrade` | Roll back one Alembic migration |
 | `make lint` | Run ruff check |
-| `make format` | Run ruff format |
+| `make format` | Run ruff lint auto-fix (`--fix`) then ruff format |
 | `make ci-check` | Lint + format check + mypy + tests |
 | `make lock` | Regenerate requirements lockfiles (uv) |
 | `make audit` | Run pip-audit for vulnerabilities |
+| `make ci-deps` | Install dependencies from the lockfile (used in CI) |
+| `make test-fast` | Run tests without coverage, stop on first failure |
+| `make typecheck` | Run mypy on `src/sam/` only |
+| `make db-setup` | Create local database and apply migrations (native, no Docker) |
+| `make db-logs` | Tail Docker postgres + Redis logs |
+| `make db-reset` | **⚠️ Destructive** — removes Docker volumes, then restarts postgres + Redis |
+| `make clean` | Remove Python `__pycache__`, `.pytest_cache`, and `.ruff_cache` |
+| `make demo` | Run all collectors once in demo mode (`SAM_DEMO_MODE=true sam demo`) |
+
+> [!WARNING]
+> `make db-reset` runs `docker compose down -v` and permanently removes local Postgres/Redis Docker volumes. All locally collected data is deleted.
 
 ### One-Shot Collector Recovery
 For operator-triggered smoke runs or recovery after an abnormal collector exit, you can run a single collection cycle directly:
@@ -289,6 +316,8 @@ Integration tests require a real Postgres instance. Use `make test-integration` 
 1. Starts Postgres on port 5433 (avoiding conflicts with local dev)
 2. Creates `sam_test` database
 3. Runs pytest with `SAM_TEST_DATABASE_URL=postgresql+asyncpg://sam:sam@127.0.0.1:5433/sam_test`
+
+`make test-integration` exports `SAM_TEST_DATABASE_URL` for the test command automatically. The `.env` value is only needed when invoking pytest manually.
 
 ### Pre-commit
 `make dev` installs pre-commit hooks. Before each commit, the following run automatically:

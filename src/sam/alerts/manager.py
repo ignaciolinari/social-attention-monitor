@@ -48,6 +48,8 @@ class AlertManager:
         Args:
             detector: AnomalyDetector instance (creates default if None)
             dedup_window_minutes: Don't create duplicate alerts within this window
+            freshness_hours: Snapshots older than this are skipped during anomaly
+                checks — stale data should not trigger new alerts.
         """
         self.detector = detector or AnomalyDetector()
         self.dedup_window_minutes = dedup_window_minutes

@@ -311,12 +311,14 @@ class YouTubeDailyQuota:
 
     @property
     def budget_used_pct(self) -> float:
+        """Percentage of the daily API quota consumed, in the range [0.0, 100.0]."""
         return (
             round(self.total_units / YOUTUBE_DAILY_BUDGET * 100, 1) if YOUTUBE_DAILY_BUDGET else 0.0
         )
 
     @property
     def budget_remaining(self) -> int:
+        """Remaining YouTube Data API v3 units before the daily quota is exhausted."""
         return YOUTUBE_DAILY_BUDGET - self.total_units
 
     def to_api_dict(self) -> dict[str, object]:
